@@ -18,4 +18,8 @@ public interface McpServiceRepository extends JpaRepository<McpServiceEntity, Lo
     Optional<McpServiceEntity> findByName(String name);
 
     boolean existsByName(String name);
+
+    List<McpServiceEntity> findByScope(String scope);
+
+    Optional<McpServiceEntity> findByNameAndScope(String name, String scope);
 }

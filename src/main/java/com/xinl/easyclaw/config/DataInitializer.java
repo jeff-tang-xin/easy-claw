@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.config;
 
+import com.xinl.easyclaw.config.seed.SystemDataSeeder;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
@@ -13,12 +14,18 @@ import org.springframework.context.annotation.Configuration;
 /**
  * 数据初始化配置
  * <p>
- * 应用首次启动时初始化默认角色与内置工具定义
+ * 应用首次启动时初始化默认角色与内置工具定义；
+ * 每次启动都会确保 SYSTEM 级别的内置 MCP 服务和 Skill 存在。
  */
 @Configuration
 public class DataInitializer {
 
     private static final Logger log = LoggerFactory.getLogger(DataInitializer.class);
+
+    @Bean
+    public CommandLineRunner seedSystemData(SystemDataSeeder seeder) {
+        return args -> seeder.seedAll();
+    }
 
     @Bean
     public CommandLineRunner initDefaultRoles(RoleManagementService roleService) {

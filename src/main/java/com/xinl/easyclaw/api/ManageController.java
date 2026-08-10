@@ -14,6 +14,7 @@ import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -237,17 +238,29 @@ public class ManageController {
     @PostMapping("/mcp")
     public McpServiceEntity createMcp(@RequestBody McpServiceEntity entity) {
         entity.setId(null);
+        if (entity.getScope() == null || entity.getScope().isBlank()) {
+            entity.setScope("GLOBAL");
+        }
         return mcpService.create(entity);
     }
 
     @PutMapping("/mcp/{id}")
-    public McpServiceEntity updateMcp(@PathVariable Long id, @RequestBody McpServiceEntity entity) {
-        return mcpService.update(id, entity);
+    public ResponseEntity<?> updateMcp(@PathVariable Long id, @RequestBody McpServiceEntity entity) {
+        try {
+            return ResponseEntity.ok(mcpService.update(id, entity));
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+        }
     }
 
     @DeleteMapping("/mcp/{id}")
-    public void deleteMcp(@PathVariable Long id) {
-        mcpService.delete(id);
+    public ResponseEntity<?> deleteMcp(@PathVariable Long id) {
+        try {
+            mcpService.delete(id);
+            return ResponseEntity.noContent().build();
+        } catch (IllegalStateException e) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).body(e.getMessage());
+        }
     }
 
     @PostMapping("/mcp/{id}/connect")

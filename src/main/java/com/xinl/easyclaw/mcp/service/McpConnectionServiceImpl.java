@@ -49,15 +49,20 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     @Override
     @Transactional
     public McpServiceEntity create(McpServiceEntity service) {
-        if (repository.existsByName(service.getName())) {
-            throw new IllegalArgumentException("MCP 服务名称已存在: " + service.getName());
+        String scope = service.getScope() != null ? service.getScope() : "GLOBAL";
+        service.setScope(scope);
+        if (repository.findByNameAndScope(service.getName(), scope).isPresent()) {
+            throw new IllegalArgumentException("同 scope 下 MCP 服务名称已存在: " + service.getName() + " (" + scope + ")");
+        }
+        if ("SYSTEM".equals(scope)) {
+            throw new IllegalStateException("SYSTEM 级别的 MCP 服务只能由系统内置，禁止手动创建");
         }
         // 自动推断 transport
         if (service.getTransport() == null || service.getTransport().isBlank()) {
             service.setTransport(inferTransport(service));
         }
         McpServiceEntity saved = repository.save(service);
-        log.info("创建 MCP 服务: name={}, transport={}", service.getName(), service.getTransport());
+        log.info("创建 MCP 服务: name={}, scope={}, transport={}", service.getName(), scope, service.getTransport());
         return saved;
     }
 
@@ -66,6 +71,9 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     public McpServiceEntity update(Long id, McpServiceEntity service) {
         return repository.findById(id)
                 .map(existing -> {
+                    if ("SYSTEM".equals(existing.getScope())) {
+                        throw new IllegalStateException("SYSTEM 级别的 MCP 服务不可修改: " + existing.getName());
+                    }
                     existing.setDescription(service.getDescription());
                     existing.setTransport(service.getTransport());
                     existing.setUrl(service.getUrl());
@@ -92,12 +100,14 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     @Override
     @Transactional
     public void delete(Long id) {
-        if (!repository.existsById(id)) {
-            throw new IllegalArgumentException("MCP 服务不存在: id=" + id);
-        }
-        closeClient(id);
-        repository.deleteById(id);
-        log.info("删除 MCP 服务: id={}", id);
+        repository.findById(id).ifPresent(entity -> {
+            if ("SYSTEM".equals(entity.getScope())) {
+                throw new IllegalStateException("SYSTEM 级别的 MCP 服务不可删除: " + entity.getName());
+            }
+            closeClient(id);
+            repository.delete(entity);
+            log.info("删除 MCP 服务: id={}, name={}", id, entity.getName());
+        });
     }
 
     @Override

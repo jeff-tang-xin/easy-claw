@@ -176,11 +176,26 @@ public class McpServiceEntity {
     @Column(name = "last_connected")
     private Instant lastConnected;
 
+    /**
+     * 作用域：SYSTEM（内置只读）/ GLOBAL（所有 workspace 可见）/ WORKSPACE（单个 workspace 私有）
+     */
+    @Column(name = "scope", length = 16)
+    private String scope;
+
+    /**
+     * WORKSPACE scope 时关联的 workspace ID
+     */
+    @Column(name = "workspace_id", length = 64)
+    private String workspaceId;
+
     @PrePersist
     protected void onCreate() {
         createdAt = Instant.now();
         if (isConnected == null) {
             isConnected = false;
+        }
+        if (scope == null) {
+            scope = "GLOBAL";
         }
     }
 
