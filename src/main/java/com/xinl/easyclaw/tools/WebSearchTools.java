@@ -12,6 +12,13 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 
+/**
+ * 网络搜索 + 网页抓取工具。
+ * <ul>
+ *   <li>{@code web_search}：Google Custom Search，API Key 从 GOOGLE_API_KEY / GOOGLE_SEARCH_CX 环境变量读取</li>
+ *   <li>{@code fetch_webpage}：直接 HTTP GET 网页，返回纯文本</li>
+ * </ul>
+ */
 @Component
 public class WebSearchTools {
 
@@ -24,12 +31,20 @@ public class WebSearchTools {
                 .build();
     }
 
-    @Tool(name = "web_search", description = "搜索网络获取信息，返回搜索摘要和相关内容")
+    @Tool(name = "web_search", description = "通过搜索引擎检索最新信息，返回相关摘要。"
+            + " 适用于需要实时数据（新闻、版本号、价格、API 文档等）的问题。")
     public String webSearch(@ToolParam(name = "query", description = "搜索关键词") String query) {
         log.info("网络搜索: {}", query);
         try {
+            String apiKey = System.getenv().getOrDefault("GOOGLE_API_KEY", "").trim();
+            String cx = System.getenv().getOrDefault("GOOGLE_SEARCH_CX", "").trim();
+            if (apiKey.isEmpty() || cx.isEmpty()) {
+                return "⚠️ web_search 未配置（缺少 GOOGLE_API_KEY 或 GOOGLE_SEARCH_CX 环境变量）。"
+                        + " 请改用 fetch_webpage 直接抓取已知 URL，或根据已有知识回答。";
+            }
             String encodedQuery = java.net.URLEncoder.encode(query, "UTF-8");
-            String url = "https://www.googleapis.com/customsearch/v1?q=" + encodedQuery;
+            String url = "https://www.googleapis.com/customsearch/v1?q=" + encodedQuery
+                    + "&key=" + apiKey + "&cx=" + cx + "&num=5";
 
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
@@ -40,39 +55,55 @@ public class WebSearchTools {
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() == 200) {
-                return "搜索结果: " + response.body().substring(0, Math.min(2000, response.body().length()));
+                return response.body().substring(0, Math.min(4000, response.body().length()));
             } else {
-                return "⚠️ 搜索请求返回状态码: " + response.statusCode() + "。请配置有效的 API Key。";
+                return "⚠️ web_search 返回状态码 " + response.statusCode() + "（可能 API Key 无效或配额耗尽）。";
             }
         } catch (Exception e) {
             log.error("网络搜索失败: {}", e.getMessage());
-            return "⚠️ 网络搜索暂时不可用: " + e.getMessage() + "\n\n你可以直接根据已有知识回答用户的问题。";
+            return "⚠️ web_search 调用失败: " + e.getMessage()
+                    + "。请改用 fetch_webpage 或根据已有知识回答。";
         }
     }
 
-    @Tool(name = "fetch_url", description = "获取指定 URL 的网页内容，返回网页的文本内容")
-    public String fetchUrl(@ToolParam(name = "url", description = "要获取的网页 URL") String url) {
+    @Tool(name = "fetch_webpage", description = "获取指定 URL 的网页文本内容（自动去除 HTML 标签）。"
+            + " 适合读取文档、API 说明、博客文章等。")
+    public String fetchWebpage(@ToolParam(name = "url", description = "要获取的完整 URL") String url) {
         log.info("获取网页: {}", url);
         try {
             HttpRequest request = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(15))
-                    .header("User-Agent", "Mozilla/5.0")
+                    .timeout(Duration.ofSeconds(20))
+                    .header("User-Agent", "Mozilla/5.0 (compatible; Easy-Claw/1.0; +https://github.com/easy-claw)")
                     .GET()
                     .build();
 
             HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
 
             if (response.statusCode() == 200) {
-                String body = response.body();
-                int end = Math.min(3000, body.length());
-                return body.substring(0, end) + (body.length() > 3000 ? "\n... (内容已截断)" : "");
+                String text = stripHtml(response.body());
+                int end = Math.min(6000, text.length());
+                return text.substring(0, end) + (text.length() > 6000 ? "\n... (内容已截断)" : "");
             } else {
-                return "⚠️ 请求失败，状态码: " + response.statusCode();
+                return "⚠️ fetch_webpage 返回状态码 " + response.statusCode() + "。";
             }
         } catch (Exception e) {
             log.error("获取网页失败: {}", e.getMessage());
-            return "⚠️ 获取网页失败: " + e.getMessage();
+            return "⚠️ fetch_webpage 调用失败: " + e.getMessage();
         }
+    }
+
+    /** 简单去除 HTML 标签，保留可见文本（不处理 script/style 等） */
+    private static String stripHtml(String html) {
+        if (html == null) return "";
+        String text = html.replaceAll("(?is)<script.*?>.*?</script>", "")
+                .replaceAll("(?is)<style.*?>.*?</style>", "")
+                .replaceAll("(?is)<[^>]+>", " ")
+                .replaceAll("&nbsp;", " ").replaceAll("&amp;", "&")
+                .replaceAll("&lt;", "<").replaceAll("&gt;", ">")
+                .replaceAll("&quot;", "\"").replaceAll("&#39;", "'")
+                .replaceAll("\\s+", " ")
+                .trim();
+        return text;
     }
 }

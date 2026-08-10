@@ -255,6 +255,11 @@ public class ManageController {
         return mcpService.connect(id);
     }
 
+    @PostMapping("/mcp/{id}/disconnect")
+    public McpServiceEntity disconnectMcp(@PathVariable Long id) {
+        return mcpService.disconnect(id);
+    }
+
     // ================= 设置（YAML 原文编辑器） =================
 
     public record SettingsYamlResponse(String yaml, String settingsFile, String hotReloadNote) {

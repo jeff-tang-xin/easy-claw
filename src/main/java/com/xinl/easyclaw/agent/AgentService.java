@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xinl.easyclaw.agent.domain.ChatMode;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
@@ -11,6 +12,11 @@ import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
+import com.xinl.easyclaw.workspace.entity.WorkspaceConfigEntity;
+import com.xinl.easyclaw.workspace.repository.WorkspaceConfigRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.*;
 import io.agentscope.core.message.*;
@@ -46,7 +52,7 @@ public class AgentService {
     private final WorkspaceManager workspaceManager;
     private final AgentFactory agentFactory;
     private final PermissionRuleService permissionRuleService;
-
+    private final WorkspaceConfigRepository configRepository;
     /** 待用户确认的工具调用（按会话隔离） */
     private final Map<String, List<ToolUseBlock>> pendingConfirms = new ConcurrentHashMap<>();
     /** 本回合已允许的工具名（按会话隔离） */
@@ -62,10 +68,12 @@ public class AgentService {
 
     public AgentService(WorkspaceManager workspaceManager,
                         AgentFactory agentFactory,
-                        PermissionRuleService permissionRuleService) {
+                        PermissionRuleService permissionRuleService,
+                        WorkspaceConfigRepository configRepository) {
         this.workspaceManager = workspaceManager;
         this.agentFactory = agentFactory;
         this.permissionRuleService = permissionRuleService;
+        this.configRepository = configRepository;
     }
 
     /**
@@ -187,19 +195,37 @@ public class AgentService {
                            Consumer<StreamEvent> onEvent,
                            Consumer<Throwable> onError,
                            Runnable onFinish) {
-        streamChat(workspaceId, sessionId, message, List.of(), onEvent, onError, onFinish);
+        streamChat(workspaceId, sessionId, message, List.of(),
+                ChatMode.BaseMode.PLAN, null,
+                onEvent, onError, onFinish);
     }
 
     /**
      * 使用指定 Workspace 的 Agent 进行流式对话（异步，支持截图/附件）。
-     * <ul>
-     *   <li>image/* 附件 → ImageBlock（多模态，需模型支持视觉）</li>
-     *   <li>文本/代码附件 → 内容拼入消息文本</li>
-     *   <li>附件原件保存在 {@code <ws>/.easyClaw/agent/attachments/<sessionId>/}</li>
-     * </ul>
      */
     public void streamChat(String workspaceId, String sessionId, String message,
                            List<UserAttachment> attachments,
+                           Consumer<StreamEvent> onEvent,
+                           Consumer<Throwable> onError,
+                           Runnable onFinish) {
+        streamChat(workspaceId, sessionId, message, attachments,
+                ChatMode.BaseMode.PLAN, null,
+                onEvent, onError, onFinish);
+    }
+
+    /**
+     * 流式对话入口：模式 + Skill 通过 prompt 前缀注入（不重建 Agent）。
+     * <p>
+     * 模式：PLAN（Plan Mode 原生开启 + 深度推理）/ QUICK（自由执行）。
+     * Skill：可选 .md 文件全文注入，工作区优先 → 全局回退。
+     * 模式来源优先级：前端显式传入 > workspace 配置默认值 > PLAN。
+     *
+     * @param baseMode  基础模式，null 表示使用 workspace 默认值或 PLAN
+     * @param skillName 注入的 Skill 名称，null 表示不注入
+     */
+    public void streamChat(String workspaceId, String sessionId, String message,
+                           List<UserAttachment> attachments,
+                           ChatMode.BaseMode baseMode, String skillName,
                            Consumer<StreamEvent> onEvent,
                            Consumer<Throwable> onError,
                            Runnable onFinish) {
@@ -231,17 +257,86 @@ public class AgentService {
         agent = workspace.getAgent();
         context = buildContext(workspace, sessionId);
 
-        // Plan Mode 按会话隔离：将 PLAN.md 路径预设为 plans/{sessionId}/PLAN.md，
-        // 框架 enter() 仅在 currentPlanFile 为空时才使用默认 plans/PLAN.md，
-        // 因此每轮对话前预写入即可让不同会话的方案互不覆盖。
-        preconfigurePlanFile(workspace, sessionId);
+        // Plan Mode 状态管理：
+        //   PLAN（默认）→ 预设 plan 文件路径 plans/{sessionId}/PLAN.md，
+        //                让框架 enter() 不回退到默认 plans/PLAN.md，实现会话隔离。
+        //   QUICK       → 强制退出 plan mode（清空 PlanModeContextState），
+        //                确保不在只读限制模式下，agent 可以自由执行。
+        // 模式来源优先级：前端显式传入 > workspace 配置默认值 > PLAN
+        ChatMode.BaseMode effectiveBase = resolveBaseMode(workspaceId, baseMode);
+        if (effectiveBase == ChatMode.BaseMode.PLAN) {
+            preconfigurePlanFile(workspace, sessionId);
+        } else {
+            exitPlanMode(workspace, sessionId);
+        }
 
-        log.info("流式对话开始: workspaceId={}, sessionId={}, message={}, attachments={}",
-                workspaceId, sessionId, message == null ? "" : message.substring(0, Math.min(50, message.length())),
+        // 关键：Plan Mode 状态变化写入磁盘后，必须重建 Agent 让它从新磁盘状态加载。
+        // 否则 agent 内存里的 PlanModeContextState 仍是旧值（比如 planActive=true），
+        // PlanModeManager 会继续认为在规划中、保持只读限制。
+        workspaceManager.rebuildAgent(workspaceId);
+        workspace = workspaceManager.getWorkspace(workspaceId);
+        agent = workspace.getAgent();
+        context = buildContext(workspace, sessionId);
+
+        log.info("流式对话开始: workspaceId={}, sessionId={}, baseMode={}, skill={}, message={}, attachments={}",
+                workspaceId, sessionId,
+                effectiveBase,
+                skillName,
+                message == null ? "" : message.substring(0, Math.min(50, message.length())),
                 attachments == null ? 0 : attachments.size());
 
-        Msg userMsg = buildUserMessage(workspace, sessionId, message, attachments);
+        String modePrefix = buildModeSkillPrefix(workspace, effectiveBase, skillName);
+        Msg userMsg = buildUserMessage(workspace, sessionId,
+                (modePrefix.isEmpty() ? "" : modePrefix + "\n\n") + (message == null ? "" : message),
+                attachments);
         startStream(agent, context, userMsg, sessionId, true, onEvent, onError, onFinish);
+    }
+
+    /**
+     * 构建模式 + Skill 的 prompt 前缀（空字符串表示无附加）。
+     * <p>Skill 查找顺序：工作区 .easyClaw/agent/skills/name.md → 全局 ~/.easyClaw/skills/name.md。
+     * 找到则注入 frontmatter + 正文；找不到则静默跳过。</p>
+     */
+    private String buildModeSkillPrefix(WorkspaceContext workspace, ChatMode.BaseMode baseMode,
+                                        String skillName) {
+        StringBuilder sb = new StringBuilder();
+        sb.append(ChatMode.buildInstruction(baseMode));
+        if (skillName != null && !skillName.isBlank()) {
+            String safeName = skillName.trim().endsWith(".md") ? skillName.trim() : skillName.trim() + ".md";
+            Path workspaceSkill = workspace.getPath().resolve(".easyClaw/agent/skills").resolve(safeName);
+            Path globalSkill = com.xinl.easyclaw.config.SystemHomePaths.globalSkillsDir().resolve(safeName);
+            Path chosen = Files.exists(workspaceSkill) ? workspaceSkill
+                    : Files.exists(globalSkill) ? globalSkill : null;
+            if (chosen != null) {
+                try {
+                    String content = Files.readString(chosen, StandardCharsets.UTF_8);
+                    sb.append("\n\n—— 已加载 Skill: ").append(skillName.trim()).append(" ——\n")
+                            .append(content);
+                    log.info("Skill 注入成功: name={}, path={}", skillName, chosen);
+                } catch (IOException e) {
+                    log.warn("读取 Skill 失败: name={}, err={}", skillName, e.getMessage());
+                }
+            } else {
+                log.warn("Skill 文件不存在（跳过注入）: name={}, 查找路径: {}, {}", skillName, workspaceSkill, globalSkill);
+            }
+        }
+        return sb.toString().trim();
+    }
+
+    /**
+     * 解析 baseMode：前端显式传入 > workspace 配置默认值 > PLAN。
+     * workspace 级配置不区分 session，整个 workspace 共享。
+     */
+    private ChatMode.BaseMode resolveBaseMode(String workspaceId, ChatMode.BaseMode incoming) {
+        if (incoming != null) return incoming;
+        try {
+            return configRepository
+                    .findByWorkspaceIdAndConfigTypeAndConfigKey(workspaceId, "chat", "baseMode")
+                    .map(e -> ChatMode.BaseMode.valueOf(e.getConfigValue()))
+                    .orElse(ChatMode.BaseMode.PLAN);
+        } catch (IllegalArgumentException ex) {
+            return ChatMode.BaseMode.PLAN;
+        }
     }
 
     /**
@@ -373,6 +468,38 @@ public class AgentService {
             log.debug("预设 Plan 文件路径: session={}, planFile={}", sessionId, planFile);
         } catch (Exception e) {
             log.warn("预设 Plan 文件路径失败（忽略）: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 强制退出 Plan Mode（自由模式 QUICK 下调用）。
+     * <p>清空 agent_state.json 中 PlanModeContextState 的 currentPlanFile，
+     * 让框架 PlanModeManager.isInPlanMode() 返回 false，解除只读限制。</p>
+     */
+    private void exitPlanMode(WorkspaceContext workspace, String sessionId) {
+        try {
+            String userId = workspace.getUserId() == null
+                    ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
+            Path stateFile = workspace.getPath().resolve(".easyClaw/agent/state")
+                    .resolve(userId).resolve(sessionId).resolve("agent_state.json");
+            if (!Files.exists(stateFile)) {
+                return;
+            }
+            AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
+            PlanModeContextState ctx = state.getPlanModeContext();
+            if (ctx == null) {
+                return;
+            }
+            boolean wasActive = ctx.isPlanActive()
+                    || (ctx.getCurrentPlanFile() != null && !ctx.getCurrentPlanFile().isBlank());
+            if (wasActive) {
+                ctx.setPlanActive(false);
+                ctx.setCurrentPlanFile("");
+                Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
+                log.info("强制退出 Plan Mode: session={}", sessionId);
+            }
+        } catch (Exception e) {
+            log.warn("退出 Plan Mode 失败（忽略）: {}", e.getMessage());
         }
     }
 

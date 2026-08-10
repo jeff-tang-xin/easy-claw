@@ -483,6 +483,59 @@ details.fold.subagent .fold-body { max-height: 340px; color: var(--text-secondar
 .input-row textarea:focus { box-shadow: none; border: none; }
 .input-row .btn { height: 40px; flex-shrink: 0; align-self: flex-end; }
 
+/* 模式 + Skill 选择栏 */
+.chat-mode-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 2px;
+}
+.mode-pill {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  line-height: 1.4;
+}
+.mode-pill:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+.mode-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  font-weight: 500;
+}
+.skill-select {
+  padding: 3px 8px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text-secondary);
+  cursor: pointer;
+  max-width: 260px;
+}
+.skill-select:hover { border-color: var(--accent); color: var(--text); }
+.skill-select:focus { outline: none; border-color: var(--accent); }
+
+/* 增强 pill（可叠加 toggle）——用不同 accent 色区分基础模式 */
+.mode-pill.enhance {
+  border-style: dashed;
+  color: var(--text-secondary);
+}
+.mode-pill.enhance.active {
+  background: linear-gradient(135deg, #7c3aed 0%, #2563eb 100%);
+  border-color: transparent;
+  color: #fff;
+}
+
 /* 确认弹窗 */
 .modal-overlay {
   position: fixed; inset: 0;

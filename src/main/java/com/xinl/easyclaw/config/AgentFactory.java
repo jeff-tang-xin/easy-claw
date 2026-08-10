@@ -1,10 +1,14 @@
 package com.xinl.easyclaw.config;
 
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
+import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
+import com.xinl.easyclaw.tool.service.ToolManagementService;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
+import com.xinl.easyclaw.tools.http.HttpAgentTool;
+import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import org.slf4j.Logger;
@@ -32,6 +36,7 @@ public class AgentFactory {
     private final CodeGenerationTools codeTools;
     private final McpConnectionService mcpConnectionService;
     private final ToolRegistryService toolRegistryService;
+    private final ToolManagementService toolManagementService;
 
     public AgentFactory(AgentScopeProperties props,
                         ModelRegistryService modelRegistryService,
@@ -39,7 +44,8 @@ public class AgentFactory {
                         WebSearchTools searchTools,
                         CodeGenerationTools codeTools,
                         McpConnectionService mcpConnectionService,
-                        ToolRegistryService toolRegistryService) {
+                        ToolRegistryService toolRegistryService,
+                        ToolManagementService toolManagementService) {
         this.props = props;
         this.modelRegistryService = modelRegistryService;
         this.fileTools = fileTools;
@@ -47,6 +53,7 @@ public class AgentFactory {
         this.codeTools = codeTools;
         this.mcpConnectionService = mcpConnectionService;
         this.toolRegistryService = toolRegistryService;
+        this.toolManagementService = toolManagementService;
     }
 
     /**
@@ -57,25 +64,22 @@ public class AgentFactory {
     }
 
     /**
-     * 按模型 ID 解析 Model（角色/子智能体配置的模型），未注册或无效时回退全局默认模型。
+     * 按模型 ID 解析 Model（角色/子智能体配置的模型）。
+     * <p>
+     * 解析策略（按优先级）：
+     * <ol>
+     *   <li>ModelRegistry 已注册 → 直接返回</li>
+     *   <li>未注册 → 动态构建：有 provider 前缀取对应 provider 凭证，无前缀用激活 provider</li>
+     *   <li>动态构建也失败 → 回退全局默认模型</li>
+     * </ol>
      */
     public io.agentscope.core.model.Model resolveModel(String modelId) {
-        if (modelId != null && !modelId.isBlank()) {
-            try {
-                if (io.agentscope.core.model.ModelRegistry.canResolve(modelId)) {
-                    return io.agentscope.core.model.ModelRegistry.resolve(modelId);
-                }
-                log.warn("模型 {} 未注册，回退全局默认 {}", modelId, getModelId());
-            } catch (Exception e) {
-                log.warn("解析模型 {} 失败，回退全局默认: {}", modelId, e.getMessage());
-            }
-        }
-        return io.agentscope.core.model.ModelRegistry.resolve(getModelId());
+        return modelRegistryService.resolveOrBuild(modelId);
     }
 
     /**
      * 创建 Workspace 使用的完整 Toolkit：
-     * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 已连接的 MCP 服务工具
+     * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 用户定义的 HTTP 工具 + 已连接的 MCP 服务工具
      */
     public Toolkit createWorkspaceToolkit() {
         Toolkit toolkit = new Toolkit();
@@ -92,14 +96,21 @@ public class AgentFactory {
         }
         registration.apply();
 
-        // 注册已连接的 MCP 工具（失败降级，不阻断 Agent 创建）
+        // 注册 MCP HTTP_TOOL 桥接（REST API 包装成 AgentTool）
+        List<AgentTool> httpTools = mcpConnectionService.getHttpTools();
+        for (AgentTool tool : httpTools) {
+            toolkit.registerAgentTool(tool);
+            log.info("已注册 HTTP_TOOL 桥接: {}", tool.getName());
+        }
+
+        // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
         List<McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
         for (McpClientWrapper client : mcpClients) {
             try {
                 toolkit.registerMcpClient(client).block();
-                log.info("已注册 MCP 工具客户端");
+                log.info("已注册外部 MCP 工具客户端");
             } catch (Exception e) {
-                log.warn("注册 MCP 客户端失败: {}", e.getMessage());
+                log.warn("注册外部 MCP 客户端失败: {}", e.getMessage());
             }
         }
         return toolkit;

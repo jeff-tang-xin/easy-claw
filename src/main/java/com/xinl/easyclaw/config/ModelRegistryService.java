@@ -73,6 +73,62 @@ public class ModelRegistryService {
     }
 
     /**
+     * 解析模型 ID：先查注册表，未命中则用当前激活的 OpenAI 兼容协议动态构建并缓存。
+     * <p>
+     * 所有 Provider 都走 OpenAI Chat Completions 协议（OpenAIChatModel），
+     * 所以角色/子 Agent 只需填 model name 即可，不用关心 provider 是什么：
+     * <ul>
+     *   <li>{@code "kimi-k2.7-code"} → 用激活 provider 的 baseUrl + apiKey + 此 modelName</li>
+     *   <li>{@code "deepseek:deepseek-reasoner"} → 从 providers 表取对应 provider 配置</li>
+     *   <li>空值 → 回退全局默认模型</li>
+     * </ul>
+     * 动态构建的模型会注册到 ModelRegistry，下次同 modelId 直接命中。
+     */
+    public io.agentscope.core.model.Model resolveOrBuild(String modelId) {
+        if (modelId == null || modelId.isBlank()) {
+            return ModelRegistry.resolve(resolveModelId());
+        }
+        String trimmed = modelId.trim();
+        if (ModelRegistry.canResolve(trimmed)) {
+            return ModelRegistry.resolve(trimmed);
+        }
+
+        String providerName;
+        String modelName;
+        int idx = trimmed.indexOf(':');
+        if (idx > 0) {
+            providerName = trimmed.substring(0, idx).trim().toLowerCase(Locale.ROOT);
+            modelName = trimmed.substring(idx + 1).trim();
+        } else {
+            // 裸 model name → 用当前激活的协议凭证
+            providerName = props.getModel().getProvider().trim().toLowerCase(Locale.ROOT);
+            modelName = trimmed;
+        }
+
+        AgentScopeProperties.ProviderConfig cfg = idx > 0
+                ? props.getProviders().get(providerName)
+                : props.getActiveProviderConfig();
+        if (cfg == null || modelName.isBlank()) {
+            log.warn("模型 {} 解析失败（provider 配置缺失），回退全局默认 {}", trimmed, resolveModelId());
+            return ModelRegistry.resolve(resolveModelId());
+        }
+
+        try {
+            String dynamicId = providerName + ":" + modelName;
+            if (ModelRegistry.canResolve(dynamicId)) {
+                return ModelRegistry.resolve(dynamicId);
+            }
+            io.agentscope.core.model.Model model = buildModel(providerName, cfg, modelName);
+            ModelRegistry.register(dynamicId, model);
+            log.info("动态注册模型: {} (baseUrl={})", dynamicId, cfg.getBaseUrl());
+            return model;
+        } catch (Exception e) {
+            log.warn("动态构建模型 {} 失败，回退全局默认: {}", trimmed, e.getMessage());
+            return ModelRegistry.resolve(resolveModelId());
+        }
+    }
+
+    /**
      * 当前激活的模型 ID，如 "deepseek:deepseek-chat"
      */
     public String resolveModelId() {
@@ -87,6 +143,12 @@ public class ModelRegistryService {
 
     private io.agentscope.core.model.Model buildModel(String providerName,
                                                       AgentScopeProperties.ProviderConfig cfg) {
+        return buildModel(providerName, cfg, cfg.getModelName());
+    }
+
+    private io.agentscope.core.model.Model buildModel(String providerName,
+                                                      AgentScopeProperties.ProviderConfig cfg,
+                                                      String modelName) {
         String apiKey = resolveApiKey(providerName, cfg.getApiKey());
         String baseUrl = cfg.getBaseUrl();
         if (baseUrl == null || baseUrl.isBlank()) {
@@ -94,13 +156,12 @@ public class ModelRegistryService {
         }
         Boolean stream = props.getModel().getStream();
 
-        // 默认 transport + 429/5xx 重试包装
         HttpTransport transport = new RetryableHttpTransport(HttpTransportFactory.getDefault());
 
         return OpenAIChatModel.builder()
                 .baseUrl(baseUrl.trim())
                 .apiKey(apiKey)
-                .modelName(cfg.getModelName().trim())
+                .modelName(modelName == null ? "" : modelName.trim())
                 .stream(stream == null || stream)
                 .httpTransport(transport)
                 .build();

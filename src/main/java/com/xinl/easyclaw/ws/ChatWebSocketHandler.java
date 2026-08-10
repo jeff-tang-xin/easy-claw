@@ -3,6 +3,7 @@ package com.xinl.easyclaw.ws;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.AgentService;
+import com.xinl.easyclaw.agent.domain.ChatMode;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
@@ -165,6 +166,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             sessionWorkspaceIds.put(sessionId, workspaceId);
         }
         String msg = root.path("message").asText("");
+        String baseModeRaw = root.path("baseMode").asText("");
+        String skillName = root.path("skillName").asText("");
+        ChatMode.BaseMode baseMode = ChatMode.BaseMode.parse(baseModeRaw);
         List<UserAttachment> atts = new ArrayList<>();
         JsonNode arr = root.path("attachments");
         if (arr.isArray()) {
@@ -175,11 +179,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         a.path("base64Data").asText("")));
             }
         }
-        log.info("WS chat 收到: workspaceId={}, sessionId={}, msgLen={}, atts={}",
-                workspaceId, sessionId, msg.length(), atts.size());
+        log.info("WS chat 收到: workspaceId={}, sessionId={}, baseMode={}, skill={}, msgLen={}, atts={}",
+                workspaceId, sessionId, baseMode, skillName, msg.length(), atts.size());
         final int[] counter = {0};
         try {
             agentService.streamChat(workspaceId, sessionId, msg, atts,
+                    baseMode, skillName.isBlank() ? null : skillName,
                     evt -> {
                         counter[0]++;
                         if (counter[0] <= 5 || counter[0] % 50 == 0 || "end".equals(evt.type())) {

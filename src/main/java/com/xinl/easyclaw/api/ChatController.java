@@ -3,19 +3,25 @@ package com.xinl.easyclaw.api;
 import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.agent.AgentStateBoxReader;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
+import com.xinl.easyclaw.agent.domain.ChatMode;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
+import com.xinl.easyclaw.workspace.entity.WorkspaceConfigEntity;
+import com.xinl.easyclaw.workspace.repository.WorkspaceConfigRepository;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
+import java.time.Instant;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -27,16 +33,26 @@ public class ChatController {
 
     private final AgentService agentService;
     private final WorkspaceManager workspaceManager;
+    private final WorkspaceConfigRepository configRepository;
+    private final ObjectMapper objectMapper;
     /** sessionId → SSE 连接（确认/恢复继续用同一连接推流） */
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
-    public ChatController(AgentService agentService, WorkspaceManager workspaceManager) {
+    public ChatController(AgentService agentService, WorkspaceManager workspaceManager,
+                          WorkspaceConfigRepository configRepository, ObjectMapper objectMapper) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
+        this.configRepository = configRepository;
+        this.objectMapper = objectMapper;
     }
 
+    static final String CONFIG_TYPE_CHAT = "chat";
+    static final String CONFIG_KEY_BASE_MODE = "baseMode";
+    static final String CONFIG_KEY_ENHANCEMENTS = "enhancements";
+
     public record ChatStreamRequest(String workspaceId, String sessionId, String message,
-                                    List<AttachmentDto> attachments) {
+                                    List<AttachmentDto> attachments,
+                                    String baseMode, List<String> enhancements, String skillName) {
     }
 
     public record AttachmentDto(String name, String mimeType, String base64Data) {
@@ -81,7 +97,10 @@ public class ChatController {
                         .toList();
 
         try {
+            ChatMode.BaseMode baseMode = ChatMode.BaseMode.parse(req.baseMode());
+            String skillName = req.skillName() == null || req.skillName().isBlank() ? null : req.skillName();
             agentService.streamChat(req.workspaceId(), req.sessionId(), req.message(), atts,
+                    baseMode, skillName,
                     evt -> safeSend(req.sessionId(), emitter, evt),
                     err -> {
                         log.warn("流式错误: sessionId={}, err={}", req.sessionId(),
@@ -164,6 +183,46 @@ public class ChatController {
         String userId = ws.getUserId() == null ? AppConstants.DEFAULT_USER_ID : ws.getUserId();
         Path file = ws.getPath().resolve(".easyClaw/agent/state/" + userId + "/" + sessionId + "/agent_state.json");
         return AgentStateBoxReader.read(file);
+    }
+
+    /**
+     * 获取 workspace 级默认模式配置（baseMode，PLAN/QUICK）。
+     * 旧 enhancements 字段不再使用，保持向后兼容不再返回。
+     */
+    @GetMapping("/mode")
+    public Map<String, String> getMode(@RequestParam String workspaceId) {
+        String baseMode = configRepository
+                .findByWorkspaceIdAndConfigTypeAndConfigKey(workspaceId, CONFIG_TYPE_CHAT, CONFIG_KEY_BASE_MODE)
+                .map(WorkspaceConfigEntity::getConfigValue)
+                .orElse(ChatMode.BaseMode.PLAN.name());
+        return Map.of("baseMode", baseMode);
+    }
+
+    public record ModeRequest(String baseMode) {}
+
+    /**
+     * 保存 workspace 级默认模式配置（不区分 session，整个 workspace 共享）。
+     * 同时清理历史遗留的 enhancements 旧配置行（不再使用增强开关）。
+     */
+    @PutMapping("/mode")
+    public Map<String, String> saveMode(@RequestParam String workspaceId, @RequestBody ModeRequest req) {
+        Instant now = Instant.now();
+        String baseMode = req.baseMode() == null ? ChatMode.BaseMode.PLAN.name() : req.baseMode();
+
+        configRepository.findByWorkspaceIdAndConfigTypeAndConfigKey(workspaceId, CONFIG_TYPE_CHAT, CONFIG_KEY_BASE_MODE)
+                .ifPresentOrElse(e -> {
+                    e.setConfigValue(baseMode);
+                    e.setUpdatedAt(now);
+                    configRepository.save(e);
+                }, () -> configRepository.save(WorkspaceConfigEntity.builder()
+                        .workspaceId(workspaceId).configType(CONFIG_TYPE_CHAT).configKey(CONFIG_KEY_BASE_MODE)
+                        .configValue(baseMode).createdAt(now).updatedAt(now).build()));
+
+        // 清理遗留的 enhancements 旧配置（DEEP/SEARCH 增强开关已废弃）
+        configRepository.findByWorkspaceIdAndConfigTypeAndConfigKey(workspaceId, CONFIG_TYPE_CHAT, CONFIG_KEY_ENHANCEMENTS)
+                .ifPresent(configRepository::delete);
+
+        return Map.of("baseMode", baseMode);
     }
 
     private void safeSend(String sessionId, SseEmitter emitter, StreamEvent evt) {

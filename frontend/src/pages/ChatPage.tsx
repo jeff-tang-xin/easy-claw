@@ -1,6 +1,6 @@
 import {memo, useCallback, useEffect, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {del, getJson, postJson, type StreamEvent} from '../api';
+import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
 import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem} from '../chatStore';
@@ -372,6 +372,9 @@ export default function ChatPage() {
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState('');
   const [filePreview, setFilePreview] = useState<{ entry: FileEntry; kind: 'text' | 'image'; loading: boolean; content?: string; error?: string } | null>(null);
+  const [baseMode, setBaseMode] = useState<'PLAN' | 'QUICK'>('PLAN');
+  const [skillName, setSkillName] = useState<string>('');
+  const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; scope: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickRef = useRef(true);
@@ -621,6 +624,8 @@ export default function ChatPage() {
         }
         loadAuth(workspaceId);
         loadFiles(workspaceId, '');
+        loadSkills(workspaceId);
+        loadMode(workspaceId);
       } catch (e) {
         patch({ error: String(e) });
       }
@@ -668,12 +673,42 @@ export default function ChatPage() {
         getJson<{ name: string; displayName: string }[]>('/api/tools/builtin'),
       ]);
       setAuthList(rules);
-      // 合并后端 /api/tools（持久化工具表，含 enabled 状态）和 /api/tools/builtin（全量可用工具）
       setAuthOptions(tools);
     } catch {
       // 忽略
     }
   };
+
+  const loadSkills = async (wid: string) => {
+    try {
+      const all = await getJson<{ scope: string; name: string; description: string }[]>(
+        `/api/skills?workspaceId=${encodeURIComponent(wid)}`);
+      // 只保留 skills（不含 subagents）
+      setAvailableSkills(all.filter(s => s.scope === 'global' || s.scope === 'workspace'));
+    } catch {
+      setAvailableSkills([]);
+    }
+  };
+
+  const loadMode = async (wid: string) => {
+    try {
+      const data = await getJson<{ baseMode: string }>(
+        `/api/chat/mode?workspaceId=${encodeURIComponent(wid)}`);
+      if (data.baseMode === 'PLAN' || data.baseMode === 'QUICK') setBaseMode(data.baseMode);
+    } catch {
+      // 保持默认
+    }
+  };
+
+  const saveMode = useCallback(async (wid: string, bm: 'PLAN' | 'QUICK') => {
+    try {
+      await putJson(`/api/chat/mode?workspaceId=${encodeURIComponent(wid)}`, {
+        baseMode: bm,
+      });
+    } catch {
+      // 静默
+    }
+  }, []);
 
   /** 切换某个工具的白名单状态：已在白名单→移除，不在→加入 */
   const toggleAuth = async (toolName: string) => {
@@ -817,10 +852,18 @@ export default function ChatPage() {
         if (hangTimerRef.current) clearInterval(hangTimerRef.current);
       }
     }, 5000);
-    const chatMsg = { type: 'chat', workspaceId, sessionId, message: text, attachments: myAtts };
-    console.log('[ws-send] chat:', { workspaceId, sessionId, msgLen: text.length, atts: myAtts.length });
+    const chatMsg: Record<string, unknown> = {
+      type: 'chat',
+      workspaceId,
+      sessionId,
+      message: text,
+      attachments: myAtts,
+      baseMode,
+      skillName: skillName || null,
+    };
+    console.log('[ws-send] chat:', { workspaceId, sessionId, msgLen: text.length, atts: myAtts.length, baseMode, skillName });
     getChatSocket().send(chatMsg);
-  }, [workspaceId, sessionId, patch, patchMsgs]);
+  }, [workspaceId, sessionId, patch, patchMsgs, baseMode, skillName]);
 
   // 发送队列中的下一条
   const sendNextQueued = useCallback(() => {
@@ -1057,6 +1100,43 @@ export default function ChatPage() {
             ))}
           </div>
         )}
+        <div className="chat-mode-bar">
+          {/* 基础模式（互斥 radio） */}
+          <span className="hint" style={{ marginRight: 4 }}>模式:</span>
+          {([
+            ['PLAN', '📋 计划', 'Plan Mode 原生开启 + 深度推理，先规划再执行'],
+            ['QUICK', '⚡ 自由', '简短直接，不走规划'],
+          ] as const).map(([k, label, tip]) => (
+            <button
+              key={k}
+              className={`mode-pill ${baseMode === k ? 'active' : ''}`}
+              onClick={() => {
+                setBaseMode(k);
+                if (workspaceId) saveMode(workspaceId, k);
+              }}
+              title={tip}
+            >{label}</button>
+          ))}
+          {/* Skill 下拉（可选，workspace 级持久化） */}
+          {availableSkills.length > 0 && (
+            <>
+              <span className="hint" style={{ marginLeft: 10, marginRight: 4 }}>Skill:</span>
+              <select
+                className="skill-select"
+                value={skillName}
+                onChange={(e) => setSkillName(e.target.value)}
+                title="加载 Skill 作为本轮对话的操作指南"
+              >
+                <option value="">— 不指定 —</option>
+                {availableSkills.map((s) => (
+                  <option key={s.scope + ':' + s.name} value={s.name}>
+                    {s.name}{s.description ? ` — ${s.description}` : ''}
+                  </option>
+                ))}
+              </select>
+            </>
+          )}
+        </div>
         <div className="input-row">
           <label className="btn small" style={{ alignSelf: 'flex-end', marginBottom: 6 }}>
             📎 附件

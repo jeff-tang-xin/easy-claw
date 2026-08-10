@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.mcp.service;
 
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
+import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 
 import java.util.List;
@@ -29,6 +30,11 @@ public interface McpConnectionService {
      * 返回所有已建立连接的 MCP 客户端（供 Agent Toolkit 注册）
      */
     List<McpClientWrapper> getConnectedWrappers();
+
+    /**
+     * 返回所有已激活的 HTTP_TOOL 桥接工具（供 Agent Toolkit 注册为 AgentTool）
+     */
+    List<AgentTool> getHttpTools();
 
     McpServiceEntity connect(Long id);
 

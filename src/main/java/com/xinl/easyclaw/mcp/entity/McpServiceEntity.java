@@ -11,7 +11,21 @@ import java.time.Instant;
 /**
  * MCP 服务连接配置实体
  * <p>
- * 存储外部 MCP 服务器的连接信息，支持动态注册与连接状态管理
+ * 字段对齐 Claude Desktop 标准 mcpServers JSON 格式：
+ * <pre>{@code
+ * {
+ *   "mcpServers": {
+ *     "name": {
+ *       "command": "npx",
+ *       "args": ["-y", "..."],
+ *       "env": {"KEY": "value"},
+ *       "cwd": "/path",
+ *       "url": "https://.../mcp",
+ *       "headers": {"Authorization": "Bearer ..."}
+ *     }
+ *   }
+ * }
+ * }</pre>
  */
 @Entity
 @Table(name = "mcp_services")
@@ -25,50 +39,130 @@ public class McpServiceEntity {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
+    /**
+     * 用户自定义的服务名（唯一标识，对应 mcpServers 的 key）
+     */
     @Column(name = "name", unique = true, nullable = false, length = 64)
     private String name;
 
+    /**
+     * 用户填写的备注说明
+     */
     @Column(name = "description", length = 500)
     private String description;
 
-    @Column(name = "sse_url", nullable = false, length = 500)
-    private String sseUrl;
+    // ====== 用户配置字段（对应标准 mcpServers JSON） ======
 
     /**
-     * 传输协议: SSE / HTTP / STDIO（默认 SSE）
+     * 传输类型：STDIO / STREAMABLE_HTTP / SSE
+     * 未指定时根据 url / command 自动推断
      */
-    @Column(name = "transport", length = 16)
+    @Column(name = "transport", length = 24)
     private String transport;
 
     /**
-     * STDIO 传输时的启动命令（如 npx）
+     * HTTP 传输时的 MCP 端点 URL（STREAMABLE_HTTP 或 SSE）
+     */
+    @Column(name = "url", length = 500)
+    private String url;
+
+    /**
+     * STDIO 传输时的启动命令（如 npx、uvx、python）
      */
     @Column(name = "command", length = 255)
     private String command;
 
     /**
-     * STDIO 传输时的命令行参数 (JSON 数组字符串)
+     * STDIO 传输时的命令行参数（JSON 数组字符串）
      */
     @Column(name = "args", columnDefinition = "TEXT")
     private String args;
 
     /**
-     * STDIO 传输时的环境变量 (JSON 对象字符串)
+     * STDIO 传输时的环境变量（JSON 对象字符串）
      */
     @Column(name = "env", columnDefinition = "TEXT")
     private String env;
 
     /**
-     * 认证类型: NONE / API_KEY / BEARER
+     * STDIO 传输时的工作目录
      */
-    @Column(name = "auth_type", length = 32)
-    private String authType;
+    @Column(name = "cwd", length = 500)
+    private String cwd;
 
-    @Column(name = "auth_config", columnDefinition = "TEXT")
-    private String authConfig;
+    /**
+     * HTTP 请求头（JSON 对象字符串），替代原来的 authType/authConfig
+     * 例：{"Authorization":"Bearer xxx","X-Tenant":"tenant1"}
+     */
+    @Column(name = "headers", columnDefinition = "TEXT")
+    private String headers;
+
+    /**
+     * 请求超时（秒），null 使用默认
+     */
+    @Column(name = "timeout_seconds")
+    private Integer timeoutSeconds;
+
+    /**
+     * 初始化超时（秒），null 使用默认
+     */
+    @Column(name = "init_timeout_seconds")
+    private Integer initTimeoutSeconds;
+
+    /**
+     * 桥接实现的详细配置（JSON）
+     * <p>
+     * 当 transport = HTTP_TOOL 时，此字段存 REST API 工具的完整定义：
+     * <pre>{@code
+     * {
+     *   "method": "GET",
+     *   "urlTemplate": "https://api.weather.com/{city}",
+     *   "bodyMode": "json",
+     *   "params": {
+     *     "city": {"in": "path", "type": "string", "required": true, "description": "城市名"}
+     *   }
+     * }
+     * }</pre>
+     * <p>
+     * 当 transport = STDIO / STREAMABLE_HTTP / SSE 时，此字段可空。
+     */
+    @Column(name = "implementation_config", columnDefinition = "TEXT")
+    private String implementationConfig;
+
+    // ====== 运行时状态字段（系统自动填充） ======
 
     @Column(name = "is_connected")
     private Boolean isConnected;
+
+    /**
+     * 服务端返回的 Implementation.name（连接后自动填充）
+     */
+    @Column(name = "server_name", length = 128)
+    private String serverName;
+
+    /**
+     * 服务端返回的 Implementation.title
+     */
+    @Column(name = "server_title", length = 256)
+    private String serverTitle;
+
+    /**
+     * 服务端返回的 Implementation.version
+     */
+    @Column(name = "server_version", length = 64)
+    private String serverVersion;
+
+    /**
+     * 服务端返回的 instructions（人类可读描述）
+     */
+    @Column(name = "server_instructions", columnDefinition = "TEXT")
+    private String serverInstructions;
+
+    /**
+     * 服务端 capabilities（JSON，连接后自动填充）
+     */
+    @Column(name = "capabilities", columnDefinition = "TEXT")
+    private String capabilities;
 
     /**
      * 可用工具列表 (JSON)
@@ -88,5 +182,24 @@ public class McpServiceEntity {
         if (isConnected == null) {
             isConnected = false;
         }
+    }
+
+    /**
+     * 自动推断传输类型：有 command → STDIO；有 implementationConfig → HTTP_TOOL；URL 以 /sse 结尾 → SSE；否则 → STREAMABLE_HTTP
+     */
+    public String resolveTransport() {
+        if (transport != null && !transport.isBlank()) {
+            return transport.toUpperCase();
+        }
+        if (implementationConfig != null && !implementationConfig.isBlank()) {
+            return "HTTP_TOOL";
+        }
+        if (command != null && !command.isBlank()) {
+            return "STDIO";
+        }
+        if (url != null && !url.isBlank()) {
+            return url.toLowerCase().endsWith("/sse") ? "SSE" : "STREAMABLE_HTTP";
+        }
+        throw new IllegalStateException("无法推断传输类型：既无 command、url 也无 implementationConfig");
     }
 }
