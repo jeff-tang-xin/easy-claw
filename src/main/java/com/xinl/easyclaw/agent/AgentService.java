@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
+import com.xinl.easyclaw.agent.error.AgentErrorClass;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.config.RetryableHttpTransport;
@@ -773,59 +774,11 @@ public class AgentService {
      * <p>本方法额外根据结果文本内容推断真实状态，修正错误分类。</p>
      * <p>设计原则：只匹配 AgentScope 框架错误的精确特征，避免把 read_file 返回的
      * 代码内容（可能含 error: 属性、failed 注释等）误判为 ERROR。</p>
+     * <p><b>P1 重构后：</b>具体分类逻辑下沉到 {@link AgentErrorClass}，本方法仅做 5 行委托。
+     * 19 个 startsWith 模式 + 短文本启发式 100% 覆盖，调用方无感。</p>
      */
     private static String inferToolResultState(String state, String resultText) {
-        if (state != null && !"SUCCESS".equalsIgnoreCase(state) && !"RUNNING".equalsIgnoreCase(state)) {
-            return state;
-        }
-        if (resultText == null || resultText.isBlank()) {
-            return state != null ? state : "SUCCESS";
-        }
-        String trimmed = resultText.trim();
-        String lower = trimmed.toLowerCase(Locale.ROOT);
-
-        // AgentScope 框架级错误的精确特征：
-        // 1) 以明确的错误标记开头（框架级错误都是短消息 + 明确前缀）
-        if (trimmed.startsWith("[ERROR]")
-                || trimmed.startsWith("Error: ")
-                || trimmed.startsWith("❌ ")
-                || trimmed.startsWith("Exception: ")
-                || trimmed.startsWith("Caused by: ")) {
-            return "ERROR";
-        }
-        // 2) AgentScope 特有的框架错误短语（精确匹配整条消息的前几个词）
-        if (lower.startsWith("tool not found")
-                || lower.startsWith("unknown tool")
-                || lower.startsWith("tool execution failed")
-                || lower.startsWith("parameter validation failed")
-                || lower.startsWith("insufficient permissions")
-                || lower.startsWith("unauthorized tool call")
-                || lower.startsWith("string not found in file")
-                || lower.startsWith("file not found")
-                || lower.startsWith("permission denied")
-                || lower.startsWith("illegal argument")
-                || lower.startsWith("illegalargumentexception")) {
-            return "ERROR";
-        }
-        // 3) 短文本（< 200 字符）且不含引号/括号开头——几乎肯定是框架错误
-        //    正常工具返回要么很长，要么以代码/数据开头
-        if (trimmed.length() < 200
-                && !trimmed.startsWith("\"")
-                && !trimmed.startsWith("{")
-                && !trimmed.startsWith("[")
-                && !trimmed.startsWith("`")
-                && !trimmed.startsWith("<")
-                && !trimmed.startsWith("package ")
-                && !trimmed.startsWith("import ")
-                && !trimmed.contains("\n")
-                && (lower.contains("failed")
-                        || lower.contains("error")
-                        || lower.contains("not found")
-                        || lower.contains("failed to"))) {
-            return "ERROR";
-        }
-
-        return state != null ? state : "SUCCESS";
+        return AgentErrorClass.classifyToString(state, resultText);
     }
 
     private void handleEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
