@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.api;
 
+import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import javax.swing.*;
@@ -19,12 +20,12 @@ public class SystemController {
      * 弹出系统原生目录选择器（JFileChooser）。
      * <p>
      * 必须在 AWT EDT (Event Dispatch Thread) 上调用。
-     * 返回选中目录的绝对路径；用户取消或 headless 环境返回 null。
+     * 返回选中目录的绝对路径；用户取消或 headless 环境返回 200 with null body。
      */
     @PostMapping("/choose-dir")
-    public String chooseDir(@RequestBody(required = false) ChooseDirRequest req) {
+    public ResponseEntity<String> chooseDir(@RequestBody(required = false) ChooseDirRequest req) {
         if (GraphicsEnvironment.isHeadless()) {
-            return null;
+            return ResponseEntity.ok().body(null);
         }
 
         String startDir = (req != null && req.startDir() != null) ? req.startDir() : System.getProperty("user.home");
@@ -62,7 +63,7 @@ public class SystemController {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-        return result.get();
+        return ResponseEntity.ok().body(result.get());
     }
 
     public record ChooseDirRequest(String startDir) {}

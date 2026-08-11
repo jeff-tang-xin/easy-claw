@@ -23,6 +23,15 @@ interface McpService {
   serverInstructions?: string;
   capabilities?: string;
   availableTools?: string;
+  isTemplate?: boolean;
+  scope?: string;
+  workspaceId?: string;
+}
+
+interface WorkspaceRef {
+  workspaceId: string;
+  name: string;
+  description?: string;
 }
 
 interface KVRow { key: string; value: string; }
@@ -147,24 +156,50 @@ const PARAM_IN = ['query', 'path', 'body'] as const;
 
 export default function McpPage() {
   const [items, setItems] = useState<McpService[]>([]);
+  const [templates, setTemplates] = useState<McpService[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [error, setError] = useState('');
+  const [tab, setTab] = useState<'services' | 'templates'>('services');
   const [editing, setEditing] = useState<McpService | null>(null);
-  const [editMode, setEditMode] = useState<'form' | 'json'>('form');
+  const [editMode, setEditMode] = useState<'form' | 'json' | 'copy'>('form');
   const [jsonText, setJsonText] = useState('');
   const [httpForm, setHttpForm] = useState<HttpToolForm>({method: 'GET', url: '', bodyMode: 'json', params: []});
+  const [copyTarget, setCopyTarget] = useState<{templateId: number; scope: string; workspaceId: string} | null>(null);
 
   const load = async () => {
     try {
-      setItems(await getJson<McpService[]>('/api/mcp'));
+      const all = await getJson<McpService[]>('/api/mcp');
+      setItems(all.filter(m => !m.isTemplate));
     } catch (e) {
       setError(String(e));
     }
   };
-  useEffect(() => { load(); }, []);
+  const loadTemplates = async () => {
+    try {
+      setTemplates(await getJson<McpService[]>('/api/mcp/templates'));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  const loadWorkspaces = async () => {
+    try {
+      setWorkspaces(await getJson<WorkspaceRef[]>('/api/workspaces'));
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+  useEffect(() => { load(); loadTemplates(); loadWorkspaces(); }, []);
 
   const save = async () => {
     if (!editing) return;
     const toSave: McpService = {...editing};
+    if (!toSave.id) {
+      // 新建校验
+      if ((toSave.scope || 'GLOBAL') === 'WORKSPACE' && !toSave.workspaceId) {
+        alert('WORKSPACE 作用域必须选择目标工作区');
+        return;
+      }
+    }
     // HTTP_TOOL：把表单数据序列化到 implementationConfig，同时 url 字段同步
     if (transport === 'HTTP_TOOL') {
       toSave.implementationConfig = buildHttpToolConfig(httpForm);
@@ -195,6 +230,32 @@ export default function McpPage() {
   const disconnect = async (id: number) => {
     try { await postJson(`/api/mcp/${id}/disconnect`, {}); await load(); }
     catch (e) { setError(String(e)); }
+  };
+
+  const copyFromTemplate = (templateId: number) => {
+    setCopyTarget({templateId, scope: 'GLOBAL', workspaceId: ''});
+    setEditMode('copy');
+    setEditing({id: 0, name: ''});
+  };
+
+  const submitCopy = async () => {
+    if (!copyTarget) return;
+    if (copyTarget.scope === 'WORKSPACE' && !copyTarget.workspaceId) {
+      alert('请选择目标 workspace');
+      return;
+    }
+    try {
+      const body: any = {scope: copyTarget.scope};
+      if (copyTarget.scope === 'WORKSPACE') body.workspaceId = copyTarget.workspaceId;
+      const copied = await postJson<McpService>(`/api/mcp/${copyTarget.templateId}/copy`, body);
+      alert(`已从模板复制服务：${copied.name}`);
+      setCopyTarget(null);
+      setEditing(null);
+      setTab('services');
+      await load();
+    } catch (e) {
+      setError(String(e));
+    }
   };
 
   // ==================== JSON 导入 ====================
@@ -243,6 +304,7 @@ export default function McpPage() {
       id: 0, name: '', description: '', transport: 'STDIO',
       command: '', args: '[]', env: '{}', cwd: '',
       url: '', headers: '{}',
+      scope: 'GLOBAL', workspaceId: '',
     });
     setHttpForm({method: 'GET', url: '', bodyMode: 'json', params: []});
     setEditMode('form');
@@ -271,85 +333,188 @@ export default function McpPage() {
       <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
         <h1 className="page-title">🔌 MCP 服务管理</h1>
         <div style={{display: 'flex', gap: 8}}>
-          <button className="btn" onClick={openImportJson}>📦 批量导入 JSON</button>
-          <button className="btn primary" onClick={openNewForm}>＋ 添加服务</button>
+          {tab === 'services' && (
+            <>
+              <button className="btn" onClick={openImportJson}>📦 批量导入 JSON</button>
+              <button className="btn primary" onClick={openNewForm}>＋ 添加服务</button>
+            </>
+          )}
         </div>
       </div>
       {error && <div className="error-box">{error}</div>}
 
-      {/* 列表 */}
-      <div className="card">
-        <table>
-          <thead>
-            <tr><th>名称</th><th>传输</th><th>服务端描述</th><th>状态</th><th></th></tr>
-          </thead>
-          <tbody>
-            {items.map((m) => {
-              const transportLabel = m.transport?.toLowerCase()
-                || (m.implementationConfig ? 'http_tool' : m.command ? 'stdio' : 'http');
-              const transportBadgeClass = transportLabel === 'stdio' ? 'blue'
-                : transportLabel === 'http_tool' ? 'orange' : '';
-              const displayName = m.serverName && m.serverName !== m.name ? `${m.name} (${m.serverName})` : m.name;
-              const versionTag = m.serverVersion ? ` v${m.serverVersion}` : '';
-              return (
-                <tr key={m.id}>
-                  <td style={{fontWeight: 600}}>
-                    {displayName}
-                    {versionTag && <span className="hint" style={{marginLeft: 4}}>{versionTag}</span>}
-                  </td>
-                  <td><span className={`badge ${transportBadgeClass}`}>{transportLabel}</span></td>
-                  <td style={{maxWidth: 360}}>
-                    <div
-                      className="hint"
-                      title={m.serverInstructions || m.description || ''}
-                      style={{
-                        fontSize: 12,
-                        overflow: 'hidden',
-                        textOverflow: 'ellipsis',
-                        whiteSpace: 'nowrap',
-                        maxWidth: 360,
-                      }}
-                    >
-                      {m.serverInstructions || m.description || '—'}
-                    </div>
-                  </td>
-                  <td>
-                    {m.isConnected
-                      ? <span className="badge green">已连接</span>
-                      : <span className="badge gray">未连接</span>}
-                  </td>
-                  <td>
-                    {m.isConnected
-                      ? <button className="btn small" onClick={() => disconnect(m.id)}>断开</button>
-                      : <button className="btn small primary" onClick={() => connect(m.id)}>连接</button>}
-                    {' '}
-                    <button className="btn small" onClick={() => openEditForm(m)}>编辑</button>
-                    {' '}
-                    <button className="btn danger small" onClick={() => remove(m.id)}>删除</button>
-                  </td>
-                </tr>
-              );
-            })}
-            {items.length === 0 && (
-              <tr><td colSpan={5} className="hint" style={{textAlign: 'center', padding: 24}}>
-                暂无 MCP 服务。点击右上角添加，或从 JSON 批量导入。
-              </td></tr>
-            )}
-          </tbody>
-        </table>
+      {/* Tab 切换 */}
+      <div style={{display: 'flex', gap: 4, marginBottom: 8}}>
+        <button className={`btn small ${tab === 'services' ? 'primary' : ''}`} onClick={() => setTab('services')}>
+          💬 我的服务 ({items.length})
+        </button>
+        <button className={`btn small ${tab === 'templates' ? 'primary' : ''}`} onClick={() => setTab('templates')}>
+          📋 模板库 ({templates.length})
+        </button>
       </div>
+
+      {tab === 'services' && (
+        <div className="card">
+          <table>
+            <thead>
+              <tr><th>名称</th><th>传输</th><th>服务端描述</th><th>状态</th><th></th></tr>
+            </thead>
+            <tbody>
+              {items.map((m) => {
+                const transportLabel = m.transport?.toLowerCase()
+                  || (m.implementationConfig ? 'http_tool' : m.command ? 'stdio' : 'http');
+                const transportBadgeClass = transportLabel === 'stdio' ? 'blue'
+                  : transportLabel === 'http_tool' ? 'orange' : '';
+                const displayName = m.serverName && m.serverName !== m.name ? `${m.name} (${m.serverName})` : m.name;
+                const versionTag = m.serverVersion ? ` v${m.serverVersion}` : '';
+                return (
+                  <tr key={m.id}>
+                    <td style={{fontWeight: 600}}>
+                      {displayName}
+                      {versionTag && <span className="hint" style={{marginLeft: 4}}>{versionTag}</span>}
+                      {m.scope === 'SYSTEM' && <span className="badge" style={{marginLeft: 4, background: '#e3f2fd', color: '#1565c0'}}>内置</span>}
+                      {m.scope === 'WORKSPACE' && <span className="badge" style={{marginLeft: 4, background: '#f3e5f5', color: '#6a1b9a'}}>
+                        工作区
+                        {m.workspaceId && workspaces.find(w => w.workspaceId === m.workspaceId)?.name ? (
+                          <span style={{opacity: 0.8}}>: {workspaces.find(w => w.workspaceId === m.workspaceId)?.name}</span>
+                        ) : null}
+                      </span>}
+                      {m.scope === 'GLOBAL' && <span className="badge" style={{marginLeft: 4, background: '#e8f5e9', color: '#2e7d32'}}>全局</span>}
+                    </td>
+                    <td><span className={`badge ${transportBadgeClass}`}>{transportLabel}</span></td>
+                    <td style={{maxWidth: 360}}>
+                      <div
+                        className="hint"
+                        title={m.serverInstructions || m.description || ''}
+                        style={{
+                          fontSize: 12,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                          maxWidth: 360,
+                        }}
+                      >
+                        {m.serverInstructions || m.description || '—'}
+                      </div>
+                    </td>
+                    <td>
+                      {m.isConnected
+                        ? <span className="badge green">已连接</span>
+                        : <span className="badge gray">未连接</span>}
+                    </td>
+                    <td>
+                      {m.scope !== 'SYSTEM' && (
+                        <>
+                          {m.isConnected
+                            ? <button className="btn small" onClick={() => disconnect(m.id)}>断开</button>
+                            : <button className="btn small primary" onClick={() => connect(m.id)}>连接</button>}
+                          {' '}
+                          <button className="btn small" onClick={() => openEditForm(m)}>编辑</button>
+                          {' '}
+                          <button className="btn danger small" onClick={() => remove(m.id)}>删除</button>
+                        </>
+                      )}
+                      {m.scope === 'SYSTEM' && <span className="hint" style={{fontSize: 11}}>只读</span>}
+                    </td>
+                  </tr>
+                );
+              })}
+              {items.length === 0 && (
+                <tr><td colSpan={5} className="hint" style={{textAlign: 'center', padding: 24}}>
+                  暂无 MCP 服务。点击右上角添加，或切换到「模板库」从内置模板复制。
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {tab === 'templates' && (
+        <div className="card">
+          <div style={{marginBottom: 8, fontSize: 12, color: '#666'}}>
+            📋 内置模板：点击「复制使用」将模板创建为你的 GLOBAL 级服务，之后再填写 API Key / Token 即可连接。
+          </div>
+          <table>
+            <thead>
+              <tr><th>模板</th><th>传输</th><th>说明</th><th></th></tr>
+            </thead>
+            <tbody>
+              {templates.map((t) => {
+                const transportLabel = t.transport?.toLowerCase() || (t.implementationConfig ? 'http_tool' : 'http');
+                const transportBadgeClass = transportLabel === 'http_tool' ? 'orange' : '';
+                return (
+                  <tr key={t.id}>
+                    <td style={{fontWeight: 600}}>{t.name}</td>
+                    <td><span className={`badge ${transportBadgeClass}`}>{transportLabel}</span></td>
+                    <td style={{maxWidth: 420}}>
+                      <div className="hint" style={{fontSize: 12}} title={t.description || ''}>
+                        {(t.description || '').replace(/^【内置模板】/, '')}
+                      </div>
+                    </td>
+                    <td>
+                      <button className="btn small primary" onClick={() => copyFromTemplate(t.id)}>📋 复制使用</button>
+                    </td>
+                  </tr>
+                );
+              })}
+              {templates.length === 0 && (
+                <tr><td colSpan={4} className="hint" style={{textAlign: 'center', padding: 24}}>
+                  暂无内置模板
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {/* 编辑弹窗 */}
       {editing && (
         <Modal
           title={
             editMode === 'json' ? '📦 从 JSON 批量导入' :
-              editing.id ? '🔌 编辑 MCP 服务' : '🔌 添加 MCP 服务'
+              editMode === 'copy' ? '📋 从模板复制' :
+                editing.id ? '🔌 编辑 MCP 服务' : '🔌 添加 MCP 服务'
           }
-          onClose={() => setEditing(null)}
+          onClose={() => { setEditing(null); setCopyTarget(null); }}
           width={640}
         >
-          {editMode === 'json' ? (
+          {editMode === 'copy' && copyTarget ? (
+            <div>
+              <p className="hint" style={{marginTop: 0}}>
+                选择复制后的作用域，WORKSPACE 级别仅在指定工作区内可见。
+              </p>
+              <div className="field">
+                <label>作用域 *</label>
+                <select
+                  value={copyTarget.scope}
+                  onChange={e => setCopyTarget({...copyTarget, scope: e.target.value, workspaceId: ''})}
+                >
+                  <option value="GLOBAL">🌐 GLOBAL — 全局可用，所有 workspace 都能看到</option>
+                  <option value="WORKSPACE">📁 WORKSPACE — 仅在指定工作区内可用</option>
+                </select>
+              </div>
+              {copyTarget.scope === 'WORKSPACE' && (
+                <div className="field">
+                  <label>目标工作区 *</label>
+                  <select
+                    value={copyTarget.workspaceId}
+                    onChange={e => setCopyTarget({...copyTarget, workspaceId: e.target.value})}
+                  >
+                    <option value="">— 请选择 —</option>
+                    {workspaces.map(w => (
+                      <option key={w.workspaceId} value={w.workspaceId}>
+                        {w.name}{w.description ? ` — ${w.description}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div style={{display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12}}>
+                <button className="btn" onClick={() => { setEditing(null); setCopyTarget(null); }}>取消</button>
+                <button className="btn primary" onClick={submitCopy}>复制</button>
+              </div>
+            </div>
+          ) : editMode === 'json' ? (
             <div>
               <p className="hint" style={{marginTop: 0}}>
                 粘贴标准 mcpServers JSON（兼容 Claude Desktop 格式），将批量创建服务。
@@ -393,6 +558,38 @@ export default function McpPage() {
                 <input value={editing.description || ''} onChange={e => setEditing({...editing, description: e.target.value})}
                        placeholder="可选，仅用于自己识别" />
               </div>
+
+              {/* Scope 选择 */}
+              {!editing.id && (
+                <div style={{background: '#f5f5f5', padding: '8px 12px', borderRadius: 6}}>
+                  <div style={{fontWeight: 600, marginBottom: 6, fontSize: 13}}>📍 作用域</div>
+                  <div className="field" style={{marginBottom: 0}}>
+                    <select
+                      value={editing.scope || 'GLOBAL'}
+                      onChange={e => setEditing({...editing, scope: e.target.value, workspaceId: ''})}
+                    >
+                      <option value="GLOBAL">🌐 GLOBAL — 全局可用，所有 workspace 都能看到</option>
+                      <option value="WORKSPACE">📁 WORKSPACE — 仅在指定工作区内可用</option>
+                    </select>
+                  </div>
+                  {(editing.scope === 'WORKSPACE') && (
+                    <div className="field" style={{marginBottom: 0, marginTop: 6}}>
+                      <label style={{fontSize: 12}}>目标工作区 *</label>
+                      <select
+                        value={editing.workspaceId || ''}
+                        onChange={e => setEditing({...editing, workspaceId: e.target.value})}
+                      >
+                        <option value="">— 请选择 —</option>
+                        {workspaces.map(w => (
+                          <option key={w.workspaceId} value={w.workspaceId}>
+                            {w.name}{w.description ? ` — ${w.description}` : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* STDIO 配置 */}
               {transport === 'STDIO' && (

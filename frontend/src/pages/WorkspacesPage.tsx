@@ -23,7 +23,6 @@ export default function WorkspacesPage() {
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [description, setDescription] = useState('');
-  const [browsing, setBrowsing] = useState(false);
   const navigate = useNavigate();
 
   // 白名单管理弹窗状态
@@ -90,20 +89,13 @@ export default function WorkspacesPage() {
   };
 
   const browseDir = async () => {
-    setBrowsing(true);
     try {
-      const chosen = await postJson<string>('/api/system/choose-dir', { startDir: path || undefined });
-      if (chosen) {
-        setPath(chosen);
-        if (!name) {
-          const last = chosen.split(/[/\\]/).filter(Boolean).pop() || '';
-          if (last) setName(last);
-        }
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setBrowsing(false);
+      const dir: string | null = await postJson('/api/system/choose-dir', { startDir: path || '' });
+      if (!dir) return;
+      setPath(dir);
+      if (!name) setName(dir.split(/[/\\]/).pop() || dir);
+    } catch (e: any) {
+      setError('选择目录失败: ' + (e?.message || e));
     }
   };
 
@@ -145,8 +137,8 @@ export default function WorkspacesPage() {
                 placeholder="如：F:\rust\Easy-Copy"
                 style={{ flex: 1 }}
               />
-              <button className="btn" onClick={browseDir} disabled={browsing}>
-                {browsing ? '打开中...' : '📁 浏览'}
+              <button className="btn" onClick={browseDir}>
+                📁 浏览
               </button>
             </div>
           </div>

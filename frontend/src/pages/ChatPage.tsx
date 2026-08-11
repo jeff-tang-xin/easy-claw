@@ -1,6 +1,6 @@
 import {memo, useCallback, useEffect, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
+import {del, getJson, postJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
 import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem} from '../chatStore';
@@ -371,8 +371,11 @@ export default function ChatPage() {
   const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string }[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState('');
-  const [filePreview, setFilePreview] = useState<{ entry: FileEntry; kind: 'text' | 'image'; loading: boolean; content?: string; error?: string } | null>(null);
-  const [baseMode, setBaseMode] = useState<'PLAN' | 'QUICK'>('PLAN');
+  interface OpenFile { entry: FileEntry; kind: 'text' | 'image'; content?: string; error?: string; loading: boolean; }
+  const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+  const [activeFileTab, setActiveFileTab] = useState<string | null>(null);
+  const [panelWidth, setPanelWidth] = useState(320);
+  const [resizing, setResizing] = useState(false);
   const [skillName, setSkillName] = useState<string>('');
   const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; scope: string }[]>([]);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -524,6 +527,31 @@ export default function ChatPage() {
       } catch {
         // 忽略
       }
+    } else if (evt.type === 'status') {
+      // 后端主动回推的会话状态（register / 重连时触发）
+      try {
+        const json = JSON.parse(evt.content);
+        const cur = getChatSession(key);
+        const nextRunning = !!json.running;
+        const pendingTools = Array.isArray(json.pendingTools) ? json.pendingTools : [];
+        const nextPending = !!json.pending && pendingTools.length > 0;
+        const updates: Partial<typeof cur> = {};
+        if (cur.running !== nextRunning) updates.running = nextRunning;
+        if (nextPending) {
+          updates.pending = {
+            tools: pendingTools.map((t: any) => ({ name: t.name, input: t.input || '{}' })),
+            raw: '',
+          };
+        } else if (cur.pending && !nextPending) {
+          updates.pending = null;
+        }
+        if (Object.keys(updates).length > 0) {
+          patch(updates as any);
+          console.log('[ws-status] 会话状态同步:', updates);
+        }
+      } catch {
+        // 忽略格式错误
+      }
     } else if (evt.type === 'reconnected') {
       const sid = sessionIdRef.current;
       const wid = workspaceIdRef.current;
@@ -545,7 +573,7 @@ export default function ChatPage() {
         clearInterval(hangTimerRef.current);
         hangTimerRef.current = null;
       }
-      // 队列自动发送：如果队列有消息，等下一 tick 让 running=false 生效后自动发送
+      // 队列自动发送（介入插队到队首的消息也会被 sendNextQueued 取到）
       setTimeout(() => sendNextQueued(), 0);
     } else {
       // reasoning/tool_args/tool_result/subagent_text 等：统一批量渲染
@@ -616,6 +644,9 @@ export default function ChatPage() {
           if (freshLoadRef.current || !(existing.messages.length > 0 || existing.running)) {
             freshLoadRef.current = false;
             loadHistory(workspaceId, targetSid);
+          } else {
+            // store 已有历史：仍然同步一下 running/pending 状态（HTTP 兜底）
+            syncSessionStatus(workspaceId, targetSid);
           }
         } else {
           const created = await postJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions`, { title: '新会话' });
@@ -625,7 +656,6 @@ export default function ChatPage() {
         loadAuth(workspaceId);
         loadFiles(workspaceId, '');
         loadSkills(workspaceId);
-        loadMode(workspaceId);
       } catch (e) {
         patch({ error: String(e) });
       }
@@ -661,8 +691,31 @@ export default function ChatPage() {
         }
       }
       updateChatSession(chatKey(wid, sid), (c) => ({ ...c, messages: msgs }));
+      // 历史加载完后同步运行状态（HTTP 接口兜底，WS status 事件可能稍后到达）
+      syncSessionStatus(wid, sid);
     } catch (e) {
       patch({ error: String(e) });
+    }
+  };
+
+  const syncSessionStatus = async (wid: string, sid: string) => {
+    try {
+      const status = await getJson<{ running: boolean; pending: boolean; pendingTools: { name: string; input: string }[] }>(
+        `/api/chat/status?workspaceId=${wid}&sessionId=${sid}`);
+      const cur = getChatSession(chatKey(wid, sid));
+      const updates: Partial<typeof cur> = {};
+      if (cur.running !== status.running) updates.running = status.running;
+      if (status.pending && status.pendingTools.length > 0) {
+        updates.pending = { tools: status.pendingTools, raw: '' };
+      } else if (cur.pending && !status.pending) {
+        updates.pending = null;
+      }
+      if (Object.keys(updates).length > 0) {
+        updateChatSession(chatKey(wid, sid), (c) => ({ ...c, ...updates }));
+        console.log('[http-status] 会话状态同步:', updates);
+      }
+    } catch (e) {
+      console.warn('[http-status] 查询失败:', e);
     }
   };
 
@@ -683,32 +736,12 @@ export default function ChatPage() {
     try {
       const all = await getJson<{ scope: string; name: string; description: string }[]>(
         `/api/skills?workspaceId=${encodeURIComponent(wid)}`);
-      // 只保留 skills（不含 subagents）
-      setAvailableSkills(all.filter(s => s.scope === 'global' || s.scope === 'workspace'));
+      // 包含 system/global/workspace 三级
+      setAvailableSkills(all.filter(s => s.scope === 'system' || s.scope === 'global' || s.scope === 'workspace'));
     } catch {
       setAvailableSkills([]);
     }
   };
-
-  const loadMode = async (wid: string) => {
-    try {
-      const data = await getJson<{ baseMode: string }>(
-        `/api/chat/mode?workspaceId=${encodeURIComponent(wid)}`);
-      if (data.baseMode === 'PLAN' || data.baseMode === 'QUICK') setBaseMode(data.baseMode);
-    } catch {
-      // 保持默认
-    }
-  };
-
-  const saveMode = useCallback(async (wid: string, bm: 'PLAN' | 'QUICK') => {
-    try {
-      await putJson(`/api/chat/mode?workspaceId=${encodeURIComponent(wid)}`, {
-        baseMode: bm,
-      });
-    } catch {
-      // 静默
-    }
-  }, []);
 
   /** 切换某个工具的白名单状态：已在白名单→移除，不在→加入 */
   const toggleAuth = async (toolName: string) => {
@@ -729,27 +762,46 @@ export default function ChatPage() {
     }
   };
 
-  const openFilePreview = useCallback(async (entry: FileEntry) => {
+  const openFileTab = useCallback(async (entry: FileEntry) => {
     if (!workspaceId) return;
     const kind = fileKind(entry);
     if (kind === 'dir' || kind === 'binary') return;
-    setFilePreview({ entry, kind, loading: true });
+    const already = openFiles.find((f) => f.entry.path === entry.path);
+    if (already) {
+      setActiveFileTab(entry.path);
+      return;
+    }
+    const newFile: OpenFile = { entry, kind, loading: true };
+    setOpenFiles((prev) => [...prev, newFile]);
+    setActiveFileTab(entry.path);
     if (kind === 'text') {
       try {
         const res = await fetch(`/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(entry.path)}`);
         if (!res.ok) {
-          setFilePreview((prev) => prev && { ...prev, loading: false, error: `HTTP ${res.status}` });
+          setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false, error: `HTTP ${res.status}` } : f));
           return;
         }
         const text = await res.text();
-        setFilePreview((prev) => prev && { ...prev, loading: false, content: text });
+        setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false, content: text } : f));
       } catch (e) {
-        setFilePreview((prev) => prev && { ...prev, loading: false, error: String(e) });
+        setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false, error: String(e) } : f));
       }
     } else {
-      setFilePreview((prev) => prev && { ...prev, loading: false });
+      setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false } : f));
     }
-  }, [workspaceId]);
+  }, [workspaceId, openFiles]);
+
+  const closeFileTab = (path: string) => {
+    setOpenFiles((prev) => {
+      const idx = prev.findIndex((f) => f.entry.path === path);
+      const next = prev.filter((f) => f.entry.path !== path);
+      if (activeFileTab === path) {
+        const newActive = next[Math.max(0, idx - 1)]?.entry.path ?? next[0]?.entry.path ?? null;
+        setActiveFileTab(newActive);
+      }
+      return next;
+    });
+  };
 
   // 自动滚动
   useEffect(() => {
@@ -775,7 +827,6 @@ export default function ChatPage() {
       loadHistory(workspaceId, sid);
     }
   };
-
   const createSession = async () => {
     if (!workspaceId) return;
     const created = await postJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions`, { title: `会话 ${sessions.length + 1}` });
@@ -858,12 +909,11 @@ export default function ChatPage() {
       sessionId,
       message: text,
       attachments: myAtts,
-      baseMode,
       skillName: skillName || null,
     };
-    console.log('[ws-send] chat:', { workspaceId, sessionId, msgLen: text.length, atts: myAtts.length, baseMode, skillName });
+    console.log('[ws-send] chat:', { workspaceId, sessionId, msgLen: text.length, atts: myAtts.length, skillName });
     getChatSocket().send(chatMsg);
-  }, [workspaceId, sessionId, patch, patchMsgs, baseMode, skillName]);
+  }, [workspaceId, sessionId, patch, patchMsgs, skillName]);
 
   // 发送队列中的下一条
   const sendNextQueued = useCallback(() => {
@@ -873,6 +923,33 @@ export default function ChatPage() {
     updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.slice(1) }));
     sendNow(next.text, next.attachments);
   }, [key, sendNow]);
+
+  // 介入当前输入：插队到队首，等 LLM 自然 end 后优先发送
+  const interveneNow = useCallback(() => {
+    if (!workspaceId || !sessionId || !running) return;
+    const text = input.trim();
+    if (!text && attachments.length === 0) return;
+    const item: QueueItem = {
+      id: `q-intervene-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      text,
+      attachments: [...attachments],
+      guides: [],
+    };
+    setInput('');
+    setAttachments([]);
+    updateChatSession(key, (c) => ({ ...c, messageQueue: [item, ...c.messageQueue] }));
+    console.log('[intervene] 介入已入队首:', { textLen: text.length, queueAfter: 1 + getChatSession(key).messageQueue.length });
+  }, [workspaceId, sessionId, running, input, attachments, key, updateChatSession]);
+
+  // 将指定队列项提到队首（等 LLM 自然 end 后优先发送）
+  const interveneQueueItem = useCallback((index: number) => {
+    const cur = getChatSession(key);
+    if (cur.messageQueue.length === 0 || index < 0 || index >= cur.messageQueue.length) return;
+    const target = cur.messageQueue[index];
+    const newQueue = [target, ...cur.messageQueue.filter((_, i) => i !== index)];
+    updateChatSession(key, (c) => ({ ...c, messageQueue: newQueue }));
+    console.log('[intervene] 队列项 idx=', index, '提到队首');
+  }, [key, workspaceId, sessionId]);
 
   // 给当前正在运行的对话追加引导消息（入队带 guides）
   const submitWithGuides = useCallback((text: string, guides: string[]) => {
@@ -1004,7 +1081,7 @@ export default function ChatPage() {
                 key={'f' + i}
                 className={`session-item file-entry ${fileColorClass(f)} ${canOpen ? 'openable' : 'not-openable'}`}
                 style={{ cursor: canOpen ? 'pointer' : 'default' }}
-                onClick={() => canOpen && openFilePreview(f)}
+                onClick={() => canOpen && openFileTab(f)}
                 title={canOpen ? '点击打开预览' : '不支持预览'}
               >
                 <span className="file-entry-icon">{fileIcon(f)}</span>
@@ -1040,6 +1117,28 @@ export default function ChatPage() {
           </span>
         ))}
         <span className="ws-path">{workspace?.path}</span>
+        <button
+            className="btn refresh-env-btn"
+            onClick={async () => {
+              const btn = document.querySelector('.refresh-env-btn') as HTMLButtonElement;
+              if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
+              try {
+                const res = await postJson<{success: boolean; pathSegments?: number; error?: string}>(
+                    `/api/workspaces/${workspaceId}/refresh-env`, {});
+                if (res.success) {
+                  if (btn) { btn.textContent = `✅ 已刷新 (${res.pathSegments} 段 PATH)`; }
+                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 2500);
+                } else {
+                  if (btn) { btn.textContent = `❌ ${res.error || '刷新失败'}`; }
+                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 3000);
+                }
+              } catch (e) {
+                if (btn) { btn.textContent = `❌ ${String(e)}`; btn.disabled = false; }
+                setTimeout(() => { if (btn) { btn.textContent = '🔄 刷新运行环境'; btn.disabled = false; } }, 3000);
+              }
+            }}
+            title="运行中安装/切换语言（node/python/java）后点击，让 execute 感知最新 PATH"
+        >🔄 刷新运行环境</button>
       </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={(e) => {
         const el = e.currentTarget;
@@ -1079,6 +1178,13 @@ export default function ChatPage() {
                 <span className="queue-num">{i === 0 ? '▶' : i + 1}</span>
                 <span className="queue-text" title={item.text}>{item.text}</span>
                 {item.guides.length > 0 && <span className="queue-guides" title={item.guides.join(', ')}>🧭 {item.guides.length}</span>}
+                {(running || pending) && (
+                  <button
+                    className="queue-intervene"
+                    title="提到队首（等 LLM 输出完成后优先发送）"
+                    onClick={() => interveneQueueItem(i)}
+                  >⚡插队</button>
+                )}
                 {i === 0 && running && (
                   <button className="queue-del" onClick={() => updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.slice(1) }))}>✕</button>
                 )}
@@ -1101,26 +1207,9 @@ export default function ChatPage() {
           </div>
         )}
         <div className="chat-mode-bar">
-          {/* 基础模式（互斥 radio） */}
-          <span className="hint" style={{ marginRight: 4 }}>模式:</span>
-          {([
-            ['PLAN', '📋 计划', 'Plan Mode 原生开启 + 深度推理，先规划再执行'],
-            ['QUICK', '⚡ 自由', '简短直接，不走规划'],
-          ] as const).map(([k, label, tip]) => (
-            <button
-              key={k}
-              className={`mode-pill ${baseMode === k ? 'active' : ''}`}
-              onClick={() => {
-                setBaseMode(k);
-                if (workspaceId) saveMode(workspaceId, k);
-              }}
-              title={tip}
-            >{label}</button>
-          ))}
-          {/* Skill 下拉（可选，workspace 级持久化） */}
           {availableSkills.length > 0 && (
             <>
-              <span className="hint" style={{ marginLeft: 10, marginRight: 4 }}>Skill:</span>
+              <span className="hint" style={{ marginRight: 4 }}>Skill:</span>
               <select
                 className="skill-select"
                 value={skillName}
@@ -1148,13 +1237,17 @@ export default function ChatPage() {
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+              if (e.nativeEvent.isComposing) return;
+              if (e.key === 'Enter' && !e.shiftKey && (e.ctrlKey || e.metaKey) && running) {
+                e.preventDefault();
+                interveneNow();
+              } else if (e.key === 'Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
                 e.preventDefault();
                 submit();
               }
             }}
             placeholder={running
-              ? `运行中 — Enter 入队（${chat.messageQueue.length} 条待发）`
+              ? `运行中 — Enter 入队，Ctrl+Enter 插队，Shift+Enter 换行`
               : '输入消息，Enter 发送，Shift+Enter 换行，可粘贴截图'}
             rows={1}
           />
@@ -1169,6 +1262,14 @@ export default function ChatPage() {
               title="停止当前回复"
             >⏹ 停止</button>
           )}
+          {running && (input.trim() || attachments.length > 0) && (
+            <button
+              className="btn intervene-btn"
+              style={{ alignSelf: 'flex-end', marginBottom: 6 }}
+              onClick={interveneNow}
+              title="插队：等 LLM 输出完成后优先发送（Ctrl+Enter）"
+            >⚡插队</button>
+          )}
           <button className={`btn ${running ? 'primary' : 'primary'}`} style={{ alignSelf: 'flex-end', marginBottom: 6 }} onClick={submit}>
             {running ? '📥 入队' : '➤ 发送'}
           </button>
@@ -1177,16 +1278,81 @@ export default function ChatPage() {
     </div>
   );
 
-  return (
-    <div className="chat-page">
-      <div className="chat-side">
-        <div style={{ display: 'flex', gap: 4, marginBottom: 10 }}>
-          <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
-          <button className={`btn small ${tab === 'auth' ? 'primary' : ''}`} onClick={() => setTab('auth')}>🔐 授权</button>
-          <button className={`btn small ${tab === 'files' ? 'primary' : ''}`} onClick={() => setTab('files')}>📁 文件</button>
-        </div>
+  // resizer 拖拽
+  const onResizerDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    setResizing(true);
+    const startX = e.clientX;
+    const startW = panelWidth;
+    const onMove = (ev: MouseEvent) => {
+      const delta = startX - ev.clientX;
+      const newW = Math.max(240, Math.min(600, startW + delta));
+      setPanelWidth(newW);
+    };
+    const onUp = () => {
+      setResizing(false);
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
 
-        {tab === 'sessions' && (
+  const activeFile = openFiles.find((f) => f.entry.path === activeFileTab) ?? null;
+
+  const fileContentView = (file: OpenFile) => {
+    if (file.loading) return <div className="file-preview-loading"><span className="spinner-tiny" /> 加载中...</div>;
+    if (file.error) return <div className="error-box">{file.error}</div>;
+    if (file.kind === 'image') {
+      return (
+        <div className="file-preview-image-wrap">
+          <img
+            className="file-preview-image"
+            src={`/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(file.entry.path)}`}
+            alt={file.entry.name}
+          />
+        </div>
+      );
+    }
+    const ext = extOf(file.entry.name);
+    const mdContent = (ext === 'md' || ext === 'markdown') ? md(file.content || '') : null;
+    if (mdContent) {
+      return <div className="file-markdown-body" dangerouslySetInnerHTML={{ __html: mdContent }} />;
+    }
+    return <pre className="file-preview-text">{file.content}</pre>;
+  };
+
+  const renderToolPanel = () => {
+    if (openFiles.length > 0) {
+      return (
+        <div className="tool-panel-inner">
+          <div className="file-tab-bar">
+            {openFiles.map((f) => (
+              <div
+                key={f.entry.path}
+                className={`file-tab ${f.entry.path === activeFileTab ? 'active' : ''}`}
+                onClick={() => setActiveFileTab(f.entry.path)}
+                title={f.entry.path}
+              >
+                <span className="file-tab-icon">{fileIcon(f.entry)}</span>
+                <span className="file-tab-name">{f.entry.name}</span>
+                <button
+                  className="file-tab-close"
+                  onClick={(e) => { e.stopPropagation(); closeFileTab(f.entry.path); }}
+                  title="关闭"
+                >✕</button>
+              </div>
+            ))}
+          </div>
+          <div className="file-tab-content">
+            {activeFile ? fileContentView(activeFile) : <div className="hint" style={{ padding: 16 }}>无内容</div>}
+          </div>
+        </div>
+      );
+    }
+    switch (tab) {
+      case 'sessions':
+        return (
           <>
             <button className="btn primary" style={{ width: '100%', marginBottom: 8 }} onClick={createSession}>＋ 新会话</button>
             <div className="session-list">
@@ -1197,55 +1363,42 @@ export default function ChatPage() {
                   className={`session-item ${s.id === sessionId ? 'active' : ''}`}
                   onClick={() => switchSession(s.id)}
                 >
-                  <span className="title">
-                    {s.title}
-                  </span>
+                  <span className="title">{s.title}</span>
                   <button
                     className="session-del"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      deleteSession(s.id);
-                    }}
-                  >
-                    🗑
-                  </button>
+                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                  >🗑</button>
                 </div>
               ))}
             </div>
           </>
-        )}
-        {tab === 'auth' && authPanel}
-        {tab === 'files' && filePanel}
-      </div>
+        );
+      case 'auth':
+        return authPanel;
+      case 'files':
+        return filePanel;
+    }
+  };
 
+  return (
+    <div className={`chat-page ${resizing ? 'resizing' : ''}`}>
       {chatArea}
 
-      {filePreview && (
-        <div className="modal-overlay" onClick={() => setFilePreview(null)}>
-          <div className="modal file-preview-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="file-preview-header">
-              <span className="file-preview-title" title={filePreview.entry.path}>{fileIcon(filePreview.entry)} {filePreview.entry.name}</span>
-              <span className="file-preview-meta">{formatSize(filePreview.entry.size)} · {filePreview.kind}</span>
-              <button className="btn small" onClick={() => setFilePreview(null)}>✕</button>
-            </div>
-            {filePreview.loading && <div className="file-preview-loading"><span className="spinner-tiny" /> 加载中...</div>}
-            {filePreview.error && <div className="error-box">{filePreview.error}</div>}
-            {!filePreview.loading && !filePreview.error && filePreview.kind === 'text' && (
-              <pre className="file-preview-text">{filePreview.content}</pre>
-            )}
-            {!filePreview.loading && !filePreview.error && filePreview.kind === 'image' && (
-              <div className="file-preview-image-wrap">
-                <img
-                  className="file-preview-image"
-                  src={`/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(filePreview.entry.path)}`}
-                  alt={filePreview.entry.name}
-                  onError={() => setFilePreview((prev) => prev && { ...prev, error: '图片加载失败' })}
-                />
-              </div>
-            )}
-          </div>
+      <div className="chat-resizer" onMouseDown={onResizerDown} title="拖拽调整" />
+
+      <div className="chat-side" style={{ width: panelWidth }}>
+        <div className="side-tabs">
+          <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
+          <button className={`btn small ${tab === 'auth' ? 'primary' : ''}`} onClick={() => setTab('auth')}>🔐 授权</button>
+          <button className={`btn small ${tab === 'files' ? 'primary' : ''}`} onClick={() => setTab('files')}>📁 文件</button>
+          {openFiles.length > 0 && (
+            <button className="btn small" onClick={() => { setOpenFiles([]); setActiveFileTab(null); }} title="关闭所有文件">📑 ×</button>
+          )}
         </div>
-      )}
+        <div className="side-body">
+          {renderToolPanel()}
+        </div>
+      </div>
 
       {pending && (
         <ConfirmDialog

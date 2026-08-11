@@ -2,9 +2,12 @@ import {useEffect, useState} from 'react';
 import {del, getJson, postJson} from '../api';
 import Modal from '../components/Modal';
 
-interface SkillFile { scope: string; name: string; description: string; path: string; content: string; }
+interface SkillChild { name: string; description: string; path: string; content: string; }
+interface SkillFile { scope: string; name: string; description: string; path: string; content: string; type: string; children?: SkillChild[]; }
+interface WorkspaceRef { workspaceId: string; name: string; description?: string; }
 
 const scopeLabel: Record<string, string> = {
+  system: '内置',
   global: '全局',
   workspace: '工作区',
   'global-subagent': '全局子Agent',
@@ -14,12 +17,17 @@ const scopeLabel: Record<string, string> = {
 export default function SkillsPage() {
   const [tab, setTab] = useState<'skills' | 'subagents'>('skills');
   const [items, setItems] = useState<SkillFile[]>([]);
+  const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
   const [scope, setScope] = useState('global');
+  const [workspaceId, setWorkspaceId] = useState('');
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [content, setContent] = useState('');
+  const [skillType, setSkillType] = useState<'file' | 'dir'>('file');
+  const [children, setChildren] = useState<{name: string; content: string}[]>([]);
+  const [viewing, setViewing] = useState<SkillFile | null>(null);
 
   const load = async () => {
     try {
@@ -28,29 +36,49 @@ export default function SkillsPage() {
       setError(String(e));
     }
   };
-  useEffect(() => { load(); }, []);
+  const loadWorkspaces = async () => {
+    try {
+      setWorkspaces(await getJson<WorkspaceRef[]>('/api/workspaces'));
+    } catch { /* ignore */ }
+  };
+  useEffect(() => { load(); loadWorkspaces(); }, []);
 
-  const skills = items.filter((s) => s.scope === 'global' || s.scope === 'workspace');
+  const skills = items.filter((s) => s.scope === 'global' || s.scope === 'workspace' || s.scope === 'system');
   const subagents = items.filter((s) => s.scope === 'global-subagent' || s.scope === 'workspace-subagent');
 
   const openCreate = (t: 'skills' | 'subagents') => {
     setTab(t);
     setScope(t === 'skills' ? 'global' : 'global-subagent');
+    setWorkspaceId('');
     setName('');
     setDescription('');
     setContent('');
+    setSkillType('file');
+    setChildren([]);
     setCreating(true);
   };
 
   const create = async () => {
+    if (!name.trim()) { alert('请输入名称'); return; }
+    const isWs = scope === 'workspace' || scope === 'workspace-subagent';
+    if (isWs && !workspaceId) { alert('请选择目标工作区'); return; }
     try {
-      await postJson('/api/skills', { scope, name, description, content });
+      const body: any = { scope, name: name.trim(), description, content, type: skillType };
+      if (skillType === 'dir') body.children = children;
+      if (isWs) body.workspaceId = workspaceId;
+      await postJson('/api/skills', body);
       setCreating(false);
       await load();
     } catch (e) {
       setError(String(e));
     }
   };
+
+  const addChild = () => setChildren([...children, { name: '', content: '' }]);
+  const updateChild = (idx: number, field: 'name' | 'content', val: string) => {
+    setChildren(children.map((c, i) => i === idx ? { ...c, [field]: val } : c));
+  };
+  const removeChild = (idx: number) => setChildren(children.filter((_, i) => i !== idx));
 
   const remove = async (path: string) => {
     if (!confirm('删除该项？')) return;
@@ -85,7 +113,7 @@ export default function SkillsPage() {
       <div className="card">
         <table>
           <thead>
-            <tr><th>名称</th><th>类型</th><th>描述</th><th>路径</th><th></th></tr>
+            <tr><th>名称</th><th>类型</th><th>描述</th><th>路径</th><th>操作</th></tr>
           </thead>
           <tbody>
             {list.length === 0 && (
@@ -93,11 +121,17 @@ export default function SkillsPage() {
             )}
             {list.map((s, i) => (
               <tr key={i}>
-                <td style={{ fontWeight: 600 }}>{s.name}</td>
-                <td><span className="badge blue">{scopeLabel[s.scope] || s.scope}</span></td>
-                <td className="hint">{s.description}</td>
-                <td className="hint" style={{ fontSize: 11 }}>{s.path}</td>
-                <td><button className="btn danger small" onClick={() => remove(s.path)}>删除</button></td>
+                <td style={{ fontWeight: 600 }}>
+                  {s.type === 'dir' ? '📁 ' : s.type === 'system' ? '⚙️ ' : '📄 '}{s.name}
+                </td>
+                <td><span className={`badge ${s.scope === 'system' ? '' : 'blue'}`} style={s.scope === 'system' ? {background: '#e3f2fd', color: '#1565c0'} : {}}>{scopeLabel[s.scope] || s.scope}</span></td>
+                <td className="hint">{s.description}{s.type === 'dir' && s.children && s.children.length > 0 && ` · ${s.children.length} 条子规则`}</td>
+                <td className="hint" style={{ fontSize: 11 }}>{s.scope === 'system' ? '（数据库内置）' : s.path}</td>
+                <td>
+                  <button className="btn small" onClick={() => setViewing(s)}>查看</button>
+                  {s.scope !== 'system' && <button className="btn danger small" onClick={() => remove(s.path)}>删除</button>}
+                  {s.scope === 'system' && <span className="hint" style={{fontSize: 11}}>只读</span>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -105,11 +139,11 @@ export default function SkillsPage() {
       </div>
 
       {creating && (
-        <Modal title={isAgent ? '🤖 新建子 Agent' : '📚 新建 Skill'} onClose={() => setCreating(false)} width={620}>
-          <div style={{ display: 'flex', gap: 12 }}>
-            <div className="field" style={{ flex: 1 }}>
+        <Modal title={isAgent ? '🤖 新建子 Agent' : '📚 新建 Skill'} onClose={() => setCreating(false)} width={680}>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <div className="field" style={{ flex: 1, minWidth: 180 }}>
               <label>作用域</label>
-              <select value={scope} onChange={(e) => setScope(e.target.value)}>
+              <select value={scope} onChange={(e) => { setScope(e.target.value); setWorkspaceId(''); }}>
                 {isAgent ? (
                   <>
                     <option value="global-subagent">全局（~/.easyClaw/subagents）</option>
@@ -123,9 +157,35 @@ export default function SkillsPage() {
                 )}
               </select>
             </div>
+            {(scope === 'workspace' || scope === 'workspace-subagent') && (
+              <div className="field" style={{ flex: 1, minWidth: 180 }}>
+                <label>目标工作区 *</label>
+                <select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
+                  <option value="">— 请选择 —</option>
+                  {workspaces.map(w => (
+                    <option key={w.workspaceId} value={w.workspaceId}>
+                      {w.name}{w.description ? ` — ${w.description}` : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+            {!isAgent && (
+              <div className="field" style={{ flex: 1, minWidth: 150 }}>
+                <label>结构</label>
+                <select value={skillType} onChange={(e) => setSkillType(e.target.value as 'file' | 'dir')}>
+                  <option value="file">📄 单文件（skill.md）</option>
+                  <option value="dir">📁 目录（SKILL.md + 子规则）</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div style={{ display: 'flex', gap: 12 }}>
             <div className="field" style={{ flex: 1 }}>
-              <label>名称（英文标识）</label>
-              <input value={name} onChange={(e) => setName(e.target.value)} placeholder={isAgent ? '如：code-reviewer' : '如：code-review'} />
+              <label>名称（英文标识）{skillType === 'dir' && '，即目录名'}</label>
+              <input value={name} onChange={(e) => setName(e.target.value)}
+                placeholder={isAgent ? '如：code-expert' : skillType === 'dir' ? '如：frontend-quality' : '如：code-review'} />
             </div>
           </div>
           <div className="field">
@@ -133,13 +193,144 @@ export default function SkillsPage() {
             <input value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
           <div className="field">
-            <label>内容（Markdown，frontmatter 支持 description/model/role/steps）</label>
-            <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={7}
-              placeholder={'---\ndescription: ...\nmodel: deepseek:deepseek-chat\nrole: main\n---\n\n你的提示词...'} />
+            <label>{isAgent ? '子 Agent 内容（Markdown，frontmatter 支持 role/model/steps）' : (skillType === 'dir' ? '📌 主入口内容 (SKILL.md)' : '内容（Markdown）')}</label>
+            <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={6}
+              placeholder={isAgent
+                ? '---\ndescription: 资深软件架构师\nrole: code-expert\nsteps: 12\n---\n\n你是名为 code-expert 的子智能体...'
+                : skillType === 'dir'
+                  ? '---\ndescription: 前端质量标准集\n---\n\n你是前端专家，遵循以下最佳实践...'
+                  : '---\ndescription: ...\n---\n\n你的提示词...'} />
           </div>
-          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+
+          {skillType === 'dir' && (
+            <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: 12, marginTop: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>📎 子规则（{children.length}）</span>
+                <button className="btn small" onClick={addChild}>＋ 添加子规则</button>
+              </div>
+              {children.length === 0 && (
+                <div className="hint" style={{ fontSize: 12, textAlign: 'center', padding: '12px 0' }}>
+                  暂无子规则，子规则会按字母序追加到 SKILL.md 后一起注入
+                </div>
+              )}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {children.map((child, idx) => (
+                  <div key={idx} style={{ background: '#fff', border: '1px solid #e0e0e0', borderRadius: 6, padding: 10 }}>
+                    <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                      <input
+                        value={child.name}
+                        onChange={(e) => updateChild(idx, 'name', e.target.value)}
+                        placeholder="规则文件名（如 components.md）"
+                        style={{ flex: 1 }}
+                      />
+                      <button className="btn danger small" onClick={() => removeChild(idx)}>删除</button>
+                    </div>
+                    <textarea
+                      value={child.content}
+                      onChange={(e) => updateChild(idx, 'content', e.target.value)}
+                      rows={4}
+                      placeholder="子规则内容（Markdown）..."
+                      style={{ width: '100%', fontSize: 12 }}
+                    />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
             <button className="btn" onClick={() => setCreating(false)}>取消</button>
             <button className="btn primary" onClick={create}>创建</button>
+          </div>
+        </Modal>
+      )}
+
+      {viewing && (
+        <Modal
+          title={`${viewing.scope.includes('subagent') ? '🤖' : viewing.type === 'dir' ? '📁' : '📚'} ${viewing.name}`}
+          onClose={() => setViewing(null)}
+          width={760}
+        >
+          <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <span className={`badge ${viewing.scope === 'system' ? '' : 'blue'}`}
+              style={viewing.scope === 'system' ? {background: '#e3f2fd', color: '#1565c0'} : {}}>
+              {scopeLabel[viewing.scope] || viewing.scope}
+            </span>
+            <span className="badge" style={{background: '#fff3e0', color: '#e65100'}}>
+              {viewing.type === 'dir' ? '目录 Skill' : viewing.type === 'system' ? '内置 Skill' : '单文件 Skill'}
+            </span>
+            {viewing.description && <span className="hint">{viewing.description}</span>}
+          </div>
+          {viewing.scope !== 'system' && (
+            <div className="hint" style={{ fontSize: 11, marginBottom: 8 }}>
+              路径: {viewing.path}
+            </div>
+          )}
+
+          {/* 主内容 */}
+          <div style={{ marginBottom: viewing.type === 'dir' && viewing.children?.length ? 16 : 0 }}>
+            <div className="hint" style={{ fontSize: 11, marginBottom: 4 }}>
+              {viewing.type === 'dir' ? '📌 主入口 (SKILL.md)' : '📄 内容'}
+            </div>
+            <pre style={{
+              background: '#f8f9fa',
+              border: '1px solid #e0e0e0',
+              borderRadius: 6,
+              padding: 14,
+              maxHeight: 320,
+              overflow: 'auto',
+              fontSize: 13,
+              lineHeight: 1.6,
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-word',
+              margin: 0,
+            }}>{viewing.content || '（空）'}</pre>
+          </div>
+
+          {/* 目录 skill 子规则列表 */}
+          {viewing.type === 'dir' && viewing.children && viewing.children.length > 0 && (
+            <div>
+              <div className="hint" style={{ fontSize: 11, marginBottom: 6 }}>
+                📎 子规则（{viewing.children.length}）——注入时按字母序追加到主入口后
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                {viewing.children.map((child, idx) => (
+                  <details key={idx} style={{
+                    background: '#fafafa',
+                    border: '1px solid #e8e8e8',
+                    borderRadius: 6,
+                    padding: '4px 12px',
+                  }}>
+                    <summary style={{
+                      cursor: 'pointer',
+                      fontWeight: 600,
+                      padding: '6px 0',
+                      fontSize: 13,
+                    }}>
+                      📄 {child.name}
+                      {child.description && <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>— {child.description}</span>}
+                    </summary>
+                    <pre style={{
+                      background: '#fff',
+                      border: '1px solid #eee',
+                      borderRadius: 4,
+                      padding: 10,
+                      maxHeight: 200,
+                      overflow: 'auto',
+                      fontSize: 12,
+                      lineHeight: 1.55,
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      margin: '4px 0 8px 0',
+                    }}>{child.content || '（空）'}</pre>
+                  </details>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+            <button className="btn" onClick={() => setViewing(null)}>关闭</button>
           </div>
         </Modal>
       )}

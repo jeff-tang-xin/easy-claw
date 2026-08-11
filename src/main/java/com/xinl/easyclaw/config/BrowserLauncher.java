@@ -29,16 +29,16 @@ public class BrowserLauncher implements ApplicationListener<WebServerInitialized
     @Value("${easyclaw.browser-host:localhost}")
     private String host;
 
+    @Value("${easyclaw.browser-delay-ms:800}")
+    private long delayMs;
+
     private boolean fired = false;
 
     @PostConstruct
     void init() {
-        if (!Desktop.isDesktopSupported()) {
-            log.info("[Browser] java.awt.Desktop 不可用（可能在无头环境），跳过自动打开浏览器。");
-            openBrowser = false;
-        } else if (!Desktop.getDesktop().isSupported(Desktop.Action.BROWSE)) {
-            log.info("[Browser] 当前平台不支持自动打开浏览器，跳过。");
-            openBrowser = false;
+        log.info("[Browser] 配置: openBrowser={}, host={}", openBrowser, host);
+        if (!openBrowser) {
+            log.info("[Browser] 已禁用 (easyclaw.open-browser=false)。");
         }
     }
 
@@ -60,12 +60,40 @@ public class BrowserLauncher implements ApplicationListener<WebServerInitialized
             return;
         }
 
-        try {
-            Desktop.getDesktop().browse(new URI(url));
-            log.info("[Browser] 已打开浏览器: {}", url);
-        } catch (Exception e) {
-            log.warn("[Browser] 自动打开浏览器失败（不影响服务运行）: {}", e.getMessage());
+        // 在 WebServer 就绪时才检查 Desktop（@PostConstruct 时机可能过早在某些 JDK 下）
+        boolean headless = java.awt.GraphicsEnvironment.isHeadless();
+        boolean desktopSupported = Desktop.isDesktopSupported();
+        boolean browseSupported = desktopSupported && Desktop.getDesktop().isSupported(Desktop.Action.BROWSE);
+
+        log.info("[Browser] 环境检测: headless={}, desktopSupported={}, browseSupported={}",
+                headless, desktopSupported, browseSupported);
+
+        if (headless) {
+            log.info("[Browser] headless 环境，跳过自动打开浏览器。");
             log.info("[Browser] 请手动访问: {}", url);
+            return;
         }
+        if (!desktopSupported) {
+            log.info("[Browser] java.awt.Desktop 不可用，跳过自动打开浏览器。");
+            log.info("[Browser] 请手动访问: {}", url);
+            return;
+        }
+        if (!browseSupported) {
+            log.info("[Browser] 当前 Desktop 不支持 BROWSE 操作，跳过自动打开浏览器。");
+            log.info("[Browser] 请手动访问: {}", url);
+            return;
+        }
+
+        // 延迟一点，让前端资源先就绪，再开浏览器
+        new Thread(() -> {
+            try {
+                Thread.sleep(delayMs);
+                Desktop.getDesktop().browse(new URI(url));
+                log.info("[Browser] 已打开浏览器: {}", url);
+            } catch (Exception e) {
+                log.warn("[Browser] 自动打开浏览器失败（不影响服务运行）: {}", e.getMessage());
+                log.info("[Browser] 请手动访问: {}", url);
+            }
+        }, "EasyClaw-BrowserLauncher").start();
     }
 }

@@ -39,4 +39,14 @@ public interface McpConnectionService {
     McpServiceEntity connect(Long id);
 
     McpServiceEntity disconnect(Long id);
+
+    List<McpServiceEntity> findAllTemplates();
+
+    /**
+     * 从模板复制一个 MCP 服务实例
+     * @param templateId 模板 ID（必须 isTemplate=true）
+     * @param scope 目标 scope：GLOBAL 或 WORKSPACE
+     * @param workspaceId scope=WORKSPACE 时必填
+     */
+    McpServiceEntity copyFromTemplate(Long templateId, String scope, String workspaceId);
 }

@@ -188,6 +188,18 @@ public class McpServiceEntity {
     @Column(name = "workspace_id", length = 64)
     private String workspaceId;
 
+    /**
+     * 是否为模板（模板仅用于复制，用户点击「从模板创建」后会生成 GLOBAL/WORKSPACE 级实例）
+     */
+    @Column(name = "is_template")
+    private Boolean isTemplate;
+
+    /**
+     * 模板 JSON（完整的 mcpServers 配置，用于复制时的初始值）
+     */
+    @Column(name = "template_json", columnDefinition = "TEXT")
+    private String templateJson;
+
     @PrePersist
     protected void onCreate() {
         createdAt = Instant.now();
@@ -196,6 +208,9 @@ public class McpServiceEntity {
         }
         if (scope == null) {
             scope = "GLOBAL";
+        }
+        if (isTemplate == null) {
+            isTemplate = false;
         }
     }
 

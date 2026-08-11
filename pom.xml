@@ -22,7 +22,7 @@
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <agentscope.version>2.0.0</agentscope.version>
+        <agentscope.version>2.0.2</agentscope.version>
         <sqlite.version>3.47.1.0</sqlite.version>
         <lombok.version>1.18.30</lombok.version>
         <jackson.version>2.16.1</jackson.version>

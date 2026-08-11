@@ -68,6 +68,7 @@ public class AiAssistantApplication {
             Files.createDirectories(home);
             Files.createDirectories(home.resolve("skills"));
             Files.createDirectories(home.resolve("subagents"));
+            seedBundledSubagents(home.resolve("subagents"));
             Path externalConfig = home.resolve("application.yml");
             if (!Files.exists(externalConfig)) {
                 try (InputStream in = AiAssistantApplication.class.getResourceAsStream("/application.yml")) {
@@ -153,5 +154,25 @@ public class AiAssistantApplication {
                 ║                                                 ║
                 ╚═══════════════════════════════════════════════════╝
                 %n""", address, port);
+    }
+
+    /**
+     * 将 JAR 内置的 3 个全局子 Agent 模板播种到 ~/.easyClaw/subagents/。
+     * 只复制目标文件不存在的情况（不覆盖用户可能已修改的版本）。
+     */
+    private static void seedBundledSubagents(Path targetDir) {
+        String[] bundled = {"code-expert", "file-expert", "researcher"};
+        for (String name : bundled) {
+            Path target = targetDir.resolve(name + ".md");
+            if (Files.exists(target)) continue;
+            try (InputStream in = AiAssistantApplication.class.getResourceAsStream("/subagents/" + name + ".md")) {
+                if (in != null) {
+                    Files.copy(in, target);
+                    log.info("已播种内置子 Agent: {}", name);
+                }
+            } catch (IOException e) {
+                log.warn("播种内置子 Agent {} 失败（可忽略）: {}", name, e.getMessage());
+            }
+        }
     }
 }

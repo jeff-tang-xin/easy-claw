@@ -3,7 +3,6 @@ package com.xinl.easyclaw.ws;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.AgentService;
-import com.xinl.easyclaw.agent.domain.ChatMode;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
@@ -109,6 +108,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } else {
             log.warn("WS register 缺少 workspaceId: sessionId={}", sessionId);
         }
+        // 主动回推当前会话状态（重连/刷新后前端据此恢复 running / pending UI）
+        try {
+            Map<String, Object> status = agentService.getSessionStatus(sessionId);
+            String json = mapper.writeValueAsString(status);
+            sendJson(sessionId, StreamEvent.status(json));
+            log.info("WS register 回推状态: sessionId={}, running={}, pending={}",
+                    sessionId, status.get("running"), status.get("pending"));
+        } catch (Exception e) {
+            log.warn("WS register 状态查询失败: sessionId={}, err={}", sessionId, e.getMessage());
+        }
         flushPendingEvents(sessionId);
     }
 
@@ -166,9 +175,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             sessionWorkspaceIds.put(sessionId, workspaceId);
         }
         String msg = root.path("message").asText("");
-        String baseModeRaw = root.path("baseMode").asText("");
         String skillName = root.path("skillName").asText("");
-        ChatMode.BaseMode baseMode = ChatMode.BaseMode.parse(baseModeRaw);
         List<UserAttachment> atts = new ArrayList<>();
         JsonNode arr = root.path("attachments");
         if (arr.isArray()) {
@@ -179,12 +186,12 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         a.path("base64Data").asText("")));
             }
         }
-        log.info("WS chat 收到: workspaceId={}, sessionId={}, baseMode={}, skill={}, msgLen={}, atts={}",
-                workspaceId, sessionId, baseMode, skillName, msg.length(), atts.size());
+        log.info("WS chat 收到: workspaceId={}, sessionId={}, skill={}, msgLen={}, atts={}",
+                workspaceId, sessionId, skillName, msg.length(), atts.size());
         final int[] counter = {0};
         try {
             agentService.streamChat(workspaceId, sessionId, msg, atts,
-                    baseMode, skillName.isBlank() ? null : skillName,
+                    skillName.isBlank() ? null : skillName,
                     evt -> {
                         counter[0]++;
                         if (counter[0] <= 5 || counter[0] % 50 == 0 || "end".equals(evt.type())) {

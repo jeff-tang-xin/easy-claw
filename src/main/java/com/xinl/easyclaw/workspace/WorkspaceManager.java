@@ -2,9 +2,10 @@ package com.xinl.easyclaw.workspace;
 
 import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.config.AgentFactory;
+import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.config.SystemHomePaths;
-import com.xinl.easyclaw.filesystem.CrlfNormalizingLocalFilesystemSpec;
+
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
@@ -12,6 +13,7 @@ import com.xinl.easyclaw.workspace.entity.SessionEntity;
 import com.xinl.easyclaw.workspace.entity.WorkspaceEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
 import com.xinl.easyclaw.workspace.repository.WorkspaceRepository;
+import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.permission.PermissionBehavior;
@@ -20,8 +22,12 @@ import io.agentscope.core.permission.PermissionMode;
 import io.agentscope.core.permission.PermissionRule;
 import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.bus.WorkspaceAsyncToolRegistry;
+import io.agentscope.harness.agent.bus.WorkspaceMessageBus;
+import io.agentscope.harness.agent.filesystem.AbstractFilesystem;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
+import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import io.agentscope.harness.agent.workspace.LocalFsMode;
 import jakarta.annotation.PostConstruct;
@@ -63,22 +69,38 @@ public class WorkspaceManager {
     private final SubagentLoader subagentLoader;
     private final PermissionRuleService permissionRuleService;
     private final RoleManagementService roleService;
+    private final com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties;
 
     private final Map<String, WorkspaceContext> workspaceCache = new ConcurrentHashMap<>();
     private final Map<String, SessionContext> sessionCache = new ConcurrentHashMap<>();
+    private final Map<String, String> refreshedPaths = new ConcurrentHashMap<>();
+
+    public void setRefreshedPath(String workspaceId, String path) {
+        if (path != null) {
+            refreshedPaths.put(workspaceId, path);
+        } else {
+            refreshedPaths.remove(workspaceId);
+        }
+    }
+
+    public String getRefreshedPath(String workspaceId) {
+        return refreshedPaths.get(workspaceId);
+    }
 
     public WorkspaceManager(WorkspaceRepository workspaceRepository,
                             SessionRepository sessionRepository,
                             AgentFactory agentFactory,
                             SubagentLoader subagentLoader,
                             PermissionRuleService permissionRuleService,
-                            RoleManagementService roleService) {
+                            RoleManagementService roleService,
+                            com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties) {
         this.workspaceRepository = workspaceRepository;
         this.sessionRepository = sessionRepository;
         this.agentFactory = agentFactory;
         this.subagentLoader = subagentLoader;
         this.permissionRuleService = permissionRuleService;
         this.roleService = roleService;
+        this.agentScopeProperties = agentScopeProperties;
     }
 
     /**
@@ -166,6 +188,10 @@ public class WorkspaceManager {
      * 从磁盘恢复 Workspace（服务重启后自动重建 Agent，状态由 AgentStateStore 按会话恢复）
      */
     private WorkspaceContext restoreWorkspace(String workspaceId) {
+        return restoreWorkspace(workspaceId, null);
+    }
+
+    private WorkspaceContext restoreWorkspace(String workspaceId, String sysPromptAugment) {
         WorkspaceEntity meta = workspaceRepository.findById(workspaceId).orElse(null);
         if (meta == null) {
             return null;
@@ -180,7 +206,7 @@ public class WorkspaceManager {
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         initWorkspaceStructure(workspacePath, easyClawDir);
 
-        HarnessAgent agent = buildAgent(workspaceId, meta.getName(), workspacePath, easyClawDir);
+        HarnessAgent agent = buildAgent(workspaceId, meta.getName(), workspacePath, easyClawDir, sysPromptAugment);
 
         return WorkspaceContext.builder()
                 .workspaceId(workspaceId)
@@ -209,15 +235,34 @@ public class WorkspaceManager {
      * </ul>
      */
     private HarnessAgent buildAgent(String workspaceId, String name, Path workspacePath, Path easyClawDir) {
+        return buildAgent(workspaceId, name, workspacePath, easyClawDir, null);
+    }
+
+    private HarnessAgent buildAgent(String workspaceId, String name, Path workspacePath, Path easyClawDir,
+                                    String sysPromptAugment) {
         Path agentRoot = easyClawDir.resolve("agent");
 
         // 文件系统沙箱：ROOTED 模式 = 仅允许声明的根目录内操作；
         // project 根 = 用户指定目录（AI 文件操作的工作目录，显式允许读写），
         // 杜绝 AgentScope 默认将应用运行目录（如 F:\java\Easy-Claw）暴露给 Agent
-        LocalFilesystemSpec fsSpec = new CrlfNormalizingLocalFilesystemSpec();
+        LocalFilesystemSpec fsSpec = new LocalFilesystemSpec();
         fsSpec.mode(LocalFsMode.ROOTED);
         fsSpec.project(workspacePath);
         fsSpec.projectWritable(true);
+        AgentScopeProperties.Agent agentCfg = agentScopeProperties.getAgent();
+        fsSpec.executeTimeoutSeconds(agentCfg.getShellTimeoutSeconds());
+        fsSpec.maxOutputBytes(agentCfg.getMaxShellOutputBytes());
+        String refreshedPath = refreshedPaths.get(workspaceId);
+        if (refreshedPath != null) {
+            fsSpec.env("PATH", refreshedPath);
+        }
+
+        // 用 fsSpec 创建唯一的 agentFs 实例，同时给 builder 和 bus 用。
+        // Bus 目录从 Harness 默认的 ".agentscope/bus" 收敛到 ".easyClaw/bus"，
+        // 避免在 workspace 根散落 .agentscope 目录
+        AbstractFilesystem agentFs = fsSpec.toFilesystem(workspacePath, null);
+        WorkspaceMessageBus messageBus = new WorkspaceMessageBus(agentFs, ".easyClaw/bus");
+        WorkspaceAsyncToolRegistry asyncRegistry = new WorkspaceAsyncToolRegistry(agentFs, ".easyClaw/bus/async-tools");
 
         // 全局共享目录（~/.easyClaw/skills、~/.easyClaw/subagents）
         Path globalSkillsDir = SystemHomePaths.globalSkillsDir();
@@ -233,7 +278,7 @@ public class WorkspaceManager {
         List<SubagentDeclaration> subagents = subagentLoader.loadMerged(
                 globalSubagentsDir, agentRoot.resolve("subagents"));
 
-        // 系统提示词：默认人格 + 团队模式引导（并行调度、结果汇总、动态组合）
+        // 系统提示词：默认人格 + 团队模式引导
         String sysPrompt = agentFactory.defaultSystemPrompt();
         if (!subagents.isEmpty()) {
             StringBuilder sb = new StringBuilder(sysPrompt);
@@ -254,6 +299,15 @@ public class WorkspaceManager {
             sysPrompt = sb.toString();
         }
 
+        if (sysPromptAugment != null && !sysPromptAugment.isBlank()) {
+            sysPrompt = sysPrompt + "\n\n" + sysPromptAugment;
+            log.info("Skill 已注入 system prompt: {} chars, 尾部内容:\n---\n{}\n---",
+                    sysPromptAugment.length(),
+                    sysPromptAugment.length() > 800
+                            ? sysPromptAugment.substring(0, 800) + "...(truncated)"
+                            : sysPromptAugment);
+        }
+
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(workspaceId)
                 .description(name)
@@ -265,34 +319,53 @@ public class WorkspaceManager {
                 .filesystem(fsSpec)
                 .permissionContext(buildPermissionContext(workspaceId))
                 .stateStore(new JsonFileAgentStateStore(agentRoot.resolve("state")))
-                // 全局 Skills（优先级低于 workspace 级 skills，同名时 workspace 优先）
                 .projectGlobalSkillsDir(globalSkillsDir)
-                // 禁用 harness 自身的会话文件持久化（.easyClaw/agent/<userId>/agents/...jsonl），
+                // 禁用 harness 自带的会话文件持久化（.easyClaw/agent/<userId>/agents/...jsonl），
                 // 状态统一由 JsonFileAgentStateStore 落在 .easyClaw/agent/state
                 .disableSessionPersistence()
-                // 上下文自动压缩：80 条消息 或 10 万 tokens 触发，保留最近 20 条（约 3 万 tokens）。
-                // 阈值调大减少 MemoryFlush 压缩询问吞回复；token 阈值防止长工具结果撑爆模型窗口
-                // （曾出现 prompt 29.7 万 tokens → 模型 API 拒绝 → Retries exhausted）
+                // 关闭 pending tool recovery：HarnessAgent 的 maybePatchPendingToolCalls 会在
+                // assistant ToolUseBlock 被 clearStaleConfirmation 移除后，
+                // 检测到"pending tool calls"并自动生成孤儿 ToolResultBlock，
+                // 污染上下文导致 OpenAI-compatible API 报 tool_call_id is not found。
+                // 我们改用 clearStaleConfirmation + cleanupPollutedContext 组合来清理残留。
+                .enablePendingToolRecovery(false)
+                // ── 上下文自动压缩（平衡保守策略）──
+                // 触发条件（OR 关系，任一满足即压缩）：
+                //   - 消息数 ≥ 80 条（Harness 默认 50，放宽避免长对话频繁压缩）
+                //   - token 数 ≥ 80K（Harness 默认 0=禁用，加上防长工具结果撑爆窗口）
+                // 压缩后保留：最近 20 条消息 / 16K tokens
+                //   - keepTokens 不设太大，兼容 8K~128K 各类模型窗口
+                //   - reserved 20K 预留给模型输出
+                // 另外：PruneConfig 默认 protectTokens=40K / minimumTokens=20K，
+                // 会在压缩前先把老工具结果输出裁剪到 2K 字符，避免大工具结果撑满上下文。
                 .compaction(CompactionConfig.builder()
                         .triggerMessages(80)
+                        .triggerTokens(80_000)
                         .keepMessages(20)
-                        .triggerTokens(100_000)
-                        .keepTokens(30_000)
+                        .keepTokens(16_000)
+                        .reserved(20_000)
+                        .flushBeforeCompact(true)
+                        .offloadBeforeCompact(true)
                         .build())
-                .maxIters(15)
-                // Plan-and-Execute 模式：AI 可调用 plan_enter / plan_write / plan_exit 三个工具，
-                // 在 plan mode 期间强制只读，先规划再执行，避免误删误改。
-                // plan 文件默认名 PLAN.md；AgentService 每轮对话前会注入 plans/{sessionId}/ 路径
-                // 实现会话隔离（不同会话的方案互不覆盖）
-                .planFileDirectory("plans")
-                .enablePlanMode()
-                // plan mode 下允许 shell 执行（用于跑 build/test 等只读命令验证假设）
-                .allowShellInPlanMode()
-                // 关闭 tracing log：默认注入的 AgentTraceMiddleware 只打 SLF4J 日志不落盘，
-                // 但生产环境每轮都打会刷屏，调试时再开 .enableAgentTracingLog(true)
+                // 工具结果淘汰：单结果超 40K 字符时写入磁盘，上下文仅留 2K 预览
+                // Harness 默认 80K 才淘汰，这里收紧更早触发，省出更多上下文空间
+                .toolResultEviction(ToolResultEvictionConfig.builder()
+                        .maxResultChars(40_000)
+                        .previewChars(2_000)
+                        .build())
+                .maxIters(agentCfg.getMaxIters())
+                .modelExecutionConfig(ExecutionConfig.builder()
+                        .timeout(java.time.Duration.ofMinutes(agentCfg.getModelTimeoutMinutes()))
+                        .maxAttempts(2)
+                        .build())
+                .toolExecutionConfig(ExecutionConfig.builder()
+                        .timeout(java.time.Duration.ofMinutes(agentCfg.getToolTimeoutMinutes()))
+                        .maxAttempts(1)
+                        .build())
+                .messageBus(messageBus)
+                .asyncToolRegistry(asyncRegistry)
+                .enablePlanMode(false)
                 .enableAgentTracingLog(false)
-                // 硬 token 上限：默认 8000 太保守，现代模型窗口普遍 128K，留 16K 足够容纳
-                // 多轮工具调用结果而不触发硬性截断
                 .maxContextTokens(16_000);
 
         // 注册子 Agent 声明（subagents 已在上方加载）
@@ -310,13 +383,19 @@ public class WorkspaceManager {
     private Model resolveMainModel() {
         try {
             AgentRoleEntity main = roleService.findByName("main").orElse(null);
+            log.info("resolveMainModel: main role found={}, model='{}'",
+                    main != null, main != null ? main.getModel() : "null");
             if (main != null && main.getModel() != null && !main.getModel().isBlank()) {
-                return agentFactory.resolveModel(main.getModel());
+                Model m = agentFactory.resolveModel(main.getModel());
+                log.info("resolveMainModel: 使用角色配置的模型 -> {}", m.getModelName());
+                return m;
             }
         } catch (Exception e) {
             log.warn("读取主智能体角色模型失败，用全局默认: {}", e.getMessage());
         }
-        return ModelRegistry.resolve(agentFactory.getModelId());
+        Model fallback = ModelRegistry.resolve(agentFactory.getModelId());
+        log.info("resolveMainModel: 回退全局默认 -> {}", fallback.getModelName());
+        return fallback;
     }
 
     /**
@@ -333,9 +412,7 @@ public class WorkspaceManager {
      * 写/执行工具：每次执行前需用户确认
      */
     private static final List<String> WRITE_TOOLS = List.of(
-            "write_file", "edit_file", "file_write", "file_edit",
-            "file_append", "file_remove", "file_delete", "file_move", "file_copy",
-            "shell", "shell_execute", "execute", "bash"
+            "write_file", "edit_file", "execute"
     );
 
     /**
@@ -364,11 +441,20 @@ public class WorkspaceManager {
      * 重建 Workspace 的 Agent（Skill / 子 Agent 声明修改后调用，使新声明生效）
      */
     public void rebuildAgent(String workspaceId) {
+        rebuildAgent(workspaceId, null);
+    }
+
+    /**
+     * 重建 Workspace 的 Agent，并将额外的 prompt 片段注入到 system prompt 中
+     * （用于每轮对话注入模式/Skill，避免污染用户消息）。
+     */
+    public void rebuildAgent(String workspaceId, String sysPromptAugment) {
         workspaceCache.remove(workspaceId);
-        WorkspaceContext rebuilt = restoreWorkspace(workspaceId);
+        WorkspaceContext rebuilt = restoreWorkspace(workspaceId, sysPromptAugment);
         if (rebuilt != null) {
             workspaceCache.put(workspaceId, rebuilt);
-            log.info("Workspace Agent 已重建: {}", workspaceId);
+            log.info("Workspace Agent 已重建: {}, augment={}", workspaceId,
+                    sysPromptAugment == null ? "none" : sysPromptAugment.length() + " chars");
         }
     }
 
@@ -695,18 +781,33 @@ public class WorkspaceManager {
      * 运行时数据落在 .easyClaw/agent/local/ 下，此处仅清理历史版本遗留的 default-user 目录。
      */
     private void cleanupLegacyDirs(Path workspacePath) {
-        String legacyUser = AppConstants.LEGACY_USER_ID;
-        for (Path legacy : List.of(
-                workspacePath.resolve(legacyUser + "/agents"),
-                workspacePath.resolve(legacyUser + "/sessions"),
-                workspacePath.resolve(legacyUser))) {
-            if (Files.exists(legacy)) {
-                try {
-                    deleteRecursively(legacy);
-                    log.info("已清理 harness 遗留目录: {}", legacy);
-                } catch (IOException e) {
-                    log.warn("清理遗留目录失败 {}: {}", legacy, e.getMessage());
+        // 旧版（default-user）+ 本版早期（local）——Harness 会在 workspace 根创建
+        // <userId>/agents、<userId>/sessions，现在统一收敛到 .easyClaw/agent/state，
+        // 这俩历史目录应该删掉
+        for (String userId : List.of(AppConstants.LEGACY_USER_ID, AppConstants.DEFAULT_USER_ID)) {
+            for (Path legacy : List.of(
+                    workspacePath.resolve(userId + "/agents"),
+                    workspacePath.resolve(userId + "/sessions"),
+                    workspacePath.resolve(userId))) {
+                if (Files.exists(legacy)) {
+                    try {
+                        deleteRecursively(legacy);
+                        log.info("已清理 harness 遗留目录: {}", legacy);
+                    } catch (IOException e) {
+                        log.warn("清理遗留目录失败 {}: {}", legacy, e.getMessage());
+                    }
                 }
+            }
+        }
+
+        // Harness 默认的 ".agentscope" bus 目录也清掉（已 override 到 .easyClaw/bus）
+        Path legacyBus = workspacePath.resolve(".agentscope");
+        if (Files.exists(legacyBus)) {
+            try {
+                deleteRecursively(legacyBus);
+                log.info("已清理 harness 遗留目录: {}", legacyBus);
+            } catch (IOException e) {
+                log.warn("清理遗留目录失败 {}: {}", legacyBus, e.getMessage());
             }
         }
     }

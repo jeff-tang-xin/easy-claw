@@ -15,6 +15,8 @@ public interface McpServiceRepository extends JpaRepository<McpServiceEntity, Lo
 
     List<McpServiceEntity> findByIsConnectedTrue();
 
+    List<McpServiceEntity> findByIsTemplateTrue();
+
     Optional<McpServiceEntity> findByName(String name);
 
     boolean existsByName(String name);

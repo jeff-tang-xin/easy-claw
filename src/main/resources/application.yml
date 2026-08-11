@@ -16,7 +16,7 @@ spring:
 logging:
   level:
     root: INFO
-    io.agentscope: WARN
+    io.agentscope: DEBUG
     com.xinl.easyclaw: INFO
   charset:
     console: UTF-8
@@ -37,6 +37,12 @@ agentscope:
     base-url: ${AGENTSCOPE_BASE_URL:}
     temperature: 0.3
     stream: true
+  agent:
+    max-iters: 50
+    model-timeout-minutes: 10
+    tool-timeout-minutes: 30
+    shell-timeout-seconds: 300
+    max-shell-output-bytes: 200000
   providers:
     deepseek:
       api-key:

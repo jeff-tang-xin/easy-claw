@@ -5,10 +5,21 @@ export interface StreamEvent {
   content: string;
 }
 
+async function safeJson<T>(res: Response): Promise<T> {
+  const text = await res.text().catch(() => '');
+  if (!text) return null as T;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    // 后端返回了非 JSON 文本（如纯字符串），直接返回
+    return text as unknown as T;
+  }
+}
+
 export async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error((await safeText(res)) || `HTTP ${res.status}`);
-  return res.json() as Promise<T>;
+  return safeJson<T>(res);
 }
 
 export async function postJson<T>(url: string, body: unknown): Promise<T> {
@@ -18,9 +29,7 @@ export async function postJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error((await safeText(res)) || `HTTP ${res.status}`);
-  const text = await res.text().catch(() => '');
-  if (!text) return undefined as T;
-  return JSON.parse(text) as T;
+  return safeJson<T>(res);
 }
 
 export async function putJson<T>(url: string, body: unknown): Promise<T> {
@@ -30,7 +39,7 @@ export async function putJson<T>(url: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error((await safeText(res)) || `HTTP ${res.status}`);
-  return res.json() as Promise<T>;
+  return safeJson<T>(res);
 }
 
 export async function del(url: string): Promise<void> {

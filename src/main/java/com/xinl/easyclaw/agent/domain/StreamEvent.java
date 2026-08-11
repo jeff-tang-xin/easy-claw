@@ -86,4 +86,11 @@ public record StreamEvent(
     public static StreamEvent error(String message) {
         return new StreamEvent("error", message);
     }
+
+    /**
+     * 会话状态事件（WS register 时主动回推；content 为 JSON：{running, pending, pendingTools:[...]}）
+     */
+    public static StreamEvent status(String json) {
+        return new StreamEvent("status", json);
+    }
 }

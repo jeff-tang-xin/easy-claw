@@ -22,7 +22,10 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Map;
 
 /**
  * 管理类 API：Skills / 子 Agent、角色、工具、MCP、设置、记忆
@@ -57,17 +60,20 @@ public class ManageController {
 
     // ================= Skills & 子 Agent =================
 
-    public record SkillFileDto(String scope, String name, String description, String path, String content) {
+    public record SkillChild(String name, String description, String path, String content) {}
+
+    public record SkillFileDto(String scope, String name, String description, String path, String content,
+                               String type, List<SkillChild> children) {
     }
 
     public record SkillWriteRequest(String scope, String workspaceId, String name, String description,
-                                    String content, String fileName) {
+                                    String content, String fileName, String type,
+                                    List<Map<String, String>> children) {
     }
 
     @GetMapping("/skills")
     public List<SkillFileDto> listSkills(@RequestParam(required = false) String workspaceId) {
         List<SkillFileDto> result = new ArrayList<>();
-        // global（~/.easyClaw/skills）
         collectMd(SystemHomePaths.globalSkillsDir(), "global", result);
         collectMd(SystemHomePaths.globalSubagentsDir(), "global-subagent", result);
         if (workspaceId != null) {
@@ -82,20 +88,46 @@ public class ManageController {
     }
 
     private void collectMd(Path dir, String scope, List<SkillFileDto> out) {
-        if (!Files.isDirectory(dir)) {
-            return;
-        }
+        if (!Files.isDirectory(dir)) return;
         try (var stream = Files.list(dir)) {
-            stream.filter(p -> p.getFileName().toString().endsWith(".md"))
-                    .sorted(Comparator.comparing(p -> p.getFileName().toString()))
-                    .forEach(p -> {
-                        String name = p.getFileName().toString().replace(".md", "");
-                        String desc = readDescription(p);
-                        out.add(new SkillFileDto(scope, name, desc, p.toAbsolutePath().toString(), ""));
-                    });
-        } catch (IOException ignored) {
-            // 忽略
-        }
+            List<Path> entries = stream.sorted(Comparator.comparing(p -> p.getFileName().toString())).toList();
+            for (Path p : entries) {
+                String name = p.getFileName().toString();
+                if (Files.isDirectory(p)) {
+                    // 目录 skill：必须有 SKILL.md（harness 规范）
+                    Path index = p.resolve("SKILL.md");
+                    if (!Files.exists(index)) continue;
+                    String desc = readDescription(index);
+                    String content = readAllSafe(index);
+                    List<SkillChild> children = new ArrayList<>();
+                    try (var sub = Files.list(p)) {
+                        sub.filter(sp -> sp.getFileName().toString().endsWith(".md")
+                                        && !sp.getFileName().toString().equals("SKILL.md"))
+                                .sorted(Comparator.comparing(sp -> sp.getFileName().toString()))
+                                .forEach(sp -> children.add(new SkillChild(
+                                        sp.getFileName().toString().replace(".md", ""),
+                                        readDescription(sp),
+                                        sp.toAbsolutePath().toString(),
+                                        readAllSafe(sp)
+                                )));
+                    } catch (IOException ignored) {}
+                    out.add(new SkillFileDto(scope, name, desc, p.toAbsolutePath().toString(),
+                            content, "dir", children));
+                } else if (name.endsWith(".md") && !"SKILL.md".equals(name)) {
+                    // 单文件：subagent 都是这种（如 code-expert.md）
+                    String desc = readDescription(p);
+                    String content = readAllSafe(p);
+                    String id = name.substring(0, name.length() - 3);
+                    out.add(new SkillFileDto(scope, id, desc, p.toAbsolutePath().toString(),
+                            content, "file", List.of()));
+                }
+            }
+        } catch (IOException ignored) {}
+    }
+
+    private String readAllSafe(Path file) {
+        try { return Files.readString(file, StandardCharsets.UTF_8); }
+        catch (IOException e) { return ""; }
     }
 
     private String readDescription(Path file) {
@@ -119,36 +151,63 @@ public class ManageController {
     @PostMapping("/skills")
     public SkillFileDto createSkill(@RequestBody SkillWriteRequest req) {
         try {
-            String safeName = (req.fileName() == null || req.fileName().isBlank())
-                    ? (req.name() == null ? "skill" : req.name()) + ".md"
-                    : req.fileName();
-            if (!safeName.endsWith(".md")) {
-                safeName = safeName + ".md";
-            }
-            Path dir;
-            if ("workspace".equals(req.scope()) || "workspace-subagent".equals(req.scope()) || "workspace" == req.scope()) {
+            String name = req.name() == null || req.name().isBlank() ? "skill" : req.name().trim();
+            String safeName = name.endsWith(".md") ? name.substring(0, name.length() - 3) : name;
+
+            Path baseDir;
+            if ("workspace".equals(req.scope()) || "workspace-subagent".equals(req.scope())) {
                 WorkspaceContext ws = workspaceManager.getWorkspace(req.workspaceId());
                 if (ws == null) {
                     throw new ResponseStatusException(HttpStatus.NOT_FOUND, "工作区不存在");
                 }
                 Path agentRoot = ws.getPath().resolve(".easyClaw/agent");
-                dir = ("subagent".equals(req.scope())) ? agentRoot.resolve("subagents")
-                        : agentRoot.resolve("skills");
+                baseDir = req.scope().contains("subagent")
+                        ? agentRoot.resolve("subagents") : agentRoot.resolve("skills");
             } else {
-                dir = "subagent".equals(req.scope()) ? SystemHomePaths.globalSubagentsDir()
-                        : SystemHomePaths.globalSkillsDir();
+                baseDir = req.scope().contains("subagent")
+                        ? SystemHomePaths.globalSubagentsDir() : SystemHomePaths.globalSkillsDir();
             }
-            Files.createDirectories(dir);
+            Files.createDirectories(baseDir);
+
             String content = req.content() == null || req.content().isBlank()
-                    ? "---\ndescription: " + (req.description() == null ? "" : req.description()) + "\n---\n"
+                    ? "---\ndescription: " + safeName + "\n---\n"
                     : req.content();
-            Path file = dir.resolve(safeName);
-            Files.writeString(file, content, StandardCharsets.UTF_8);
+
+            SkillFileDto created;
+            if ("dir".equals(req.type())) {
+                // 目录型：SKILL.md + 子规则
+                Path skillDir = baseDir.resolve(safeName);
+                Files.createDirectories(skillDir);
+                Path index = skillDir.resolve("SKILL.md");
+                Files.writeString(index, content, StandardCharsets.UTF_8);
+                List<SkillChild> children = new ArrayList<>();
+                if (req.children() != null) {
+                    int idx = 0;
+                    for (Map<String, String> child : req.children()) {
+                        String cn = child.getOrDefault("name", "rule-" + (++idx));
+                        if (!cn.endsWith(".md")) cn = cn + ".md";
+                        String cc = child.getOrDefault("content", "");
+                        Files.writeString(skillDir.resolve(cn), cc, StandardCharsets.UTF_8);
+                        children.add(new SkillChild(cn.replace(".md", ""), "",
+                                skillDir.resolve(cn).toAbsolutePath().toString(), cc));
+                    }
+                }
+                created = new SkillFileDto(req.scope(), safeName,
+                        req.description() == null ? "" : req.description(),
+                        skillDir.toAbsolutePath().toString(), content, "dir", children);
+            } else {
+                // 单文件型（subagent 都是这种）
+                Path file = baseDir.resolve(safeName + ".md");
+                Files.writeString(file, content, StandardCharsets.UTF_8);
+                created = new SkillFileDto(req.scope(), safeName,
+                        req.description() == null ? "" : req.description(),
+                        file.toAbsolutePath().toString(), content, "file", List.of());
+            }
+
             if (req.workspaceId() != null) {
                 workspaceManager.rebuildAgent(req.workspaceId());
             }
-            return new SkillFileDto(req.scope(), safeName.replace(".md", ""),
-                    req.description() == null ? "" : req.description(), file.toAbsolutePath().toString(), content);
+            return created;
         } catch (IOException e) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "创建失败: " + e.getMessage());
         }
@@ -157,9 +216,16 @@ public class ManageController {
     @DeleteMapping("/skills")
     public void deleteSkill(@RequestParam String path) {
         try {
-            Path file = Path.of(path).normalize();
-            if (Files.isRegularFile(file) && file.getFileName().toString().endsWith(".md")) {
-                Files.deleteIfExists(file);
+            Path target = Path.of(path).normalize();
+            if (Files.isDirectory(target)) {
+                // 目录 skill：整个删掉（递归）
+                try (var walk = Files.walk(target)) {
+                    walk.sorted(Comparator.reverseOrder()).forEach(p -> {
+                        try { Files.deleteIfExists(p); } catch (IOException ignored) {}
+                    });
+                }
+            } else if (Files.isRegularFile(target)) {
+                Files.deleteIfExists(target);
             }
         } catch (IOException e) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "删除失败: " + e.getMessage());
@@ -271,6 +337,21 @@ public class ManageController {
     @PostMapping("/mcp/{id}/disconnect")
     public McpServiceEntity disconnectMcp(@PathVariable Long id) {
         return mcpService.disconnect(id);
+    }
+
+    @GetMapping("/mcp/templates")
+    public List<McpServiceEntity> mcpTemplates() {
+        return mcpService.findAllTemplates();
+    }
+
+    public record CopyFromTemplateRequest(String scope, String workspaceId) {}
+
+    @PostMapping("/mcp/{id}/copy")
+    public McpServiceEntity copyFromTemplate(@PathVariable Long id,
+                                             @RequestBody(required = false) CopyFromTemplateRequest req) {
+        String scope = (req != null && req.scope != null) ? req.scope : "GLOBAL";
+        String workspaceId = req != null ? req.workspaceId : null;
+        return mcpService.copyFromTemplate(id, scope, workspaceId);
     }
 
     // ================= 设置（YAML 原文编辑器） =================

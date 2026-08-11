@@ -20,6 +20,9 @@ public class AgentScopeProperties {
     /** 多 Provider 配置表：key 为 provider 名（如 deepseek、openai） */
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
 
+    /** Agent 运行时配置（迭代、超时等） */
+    private Agent agent = new Agent();
+
     public Model getModel() {
         return model;
     }
@@ -152,6 +155,74 @@ public class AgentScopeProperties {
 
         public void setTemperature(Double temperature) {
             this.temperature = temperature;
+        }
+    }
+
+    public Agent getAgent() {
+        return agent;
+    }
+
+    public void setAgent(Agent agent) {
+        this.agent = agent;
+    }
+
+    /**
+     * Agent 运行时配置
+     */
+    public static class Agent {
+        /** ReAct 最大迭代次数（默认 50，15 太少会导致长任务中途被强制结束） */
+        private int maxIters = 50;
+
+        /** 单次模型调用超时（分钟）。复杂推理/长输出可能需要更久 */
+        private int modelTimeoutMinutes = 10;
+
+        /** 单次工具调用超时（分钟）。子 Agent 通过 agent_spawn 同步调用，必须大于子 Agent 任务耗时 */
+        private int toolTimeoutMinutes = 30;
+
+        /** 单条 shell 命令超时（秒）。编译、npm install 等长命令需要足够时间 */
+        private int shellTimeoutSeconds = 300;
+
+        /** shell 输出截断上限（字节）。防止工具结果撑爆上下文 */
+        private int maxShellOutputBytes = 200_000;
+
+        public int getMaxIters() {
+            return maxIters;
+        }
+
+        public void setMaxIters(int maxIters) {
+            this.maxIters = maxIters;
+        }
+
+        public int getModelTimeoutMinutes() {
+            return modelTimeoutMinutes;
+        }
+
+        public void setModelTimeoutMinutes(int modelTimeoutMinutes) {
+            this.modelTimeoutMinutes = modelTimeoutMinutes;
+        }
+
+        public int getToolTimeoutMinutes() {
+            return toolTimeoutMinutes;
+        }
+
+        public void setToolTimeoutMinutes(int toolTimeoutMinutes) {
+            this.toolTimeoutMinutes = toolTimeoutMinutes;
+        }
+
+        public int getShellTimeoutSeconds() {
+            return shellTimeoutSeconds;
+        }
+
+        public void setShellTimeoutSeconds(int shellTimeoutSeconds) {
+            this.shellTimeoutSeconds = shellTimeoutSeconds;
+        }
+
+        public int getMaxShellOutputBytes() {
+            return maxShellOutputBytes;
+        }
+
+        public void setMaxShellOutputBytes(int maxShellOutputBytes) {
+            this.maxShellOutputBytes = maxShellOutputBytes;
         }
     }
 }

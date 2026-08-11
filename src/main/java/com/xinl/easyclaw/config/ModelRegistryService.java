@@ -100,8 +100,11 @@ public class ModelRegistryService {
             providerName = trimmed.substring(0, idx).trim().toLowerCase(Locale.ROOT);
             modelName = trimmed.substring(idx + 1).trim();
         } else {
-            // 裸 model name → 用当前激活的协议凭证
+            // 裸 model name → 用当前激活的协议 provider（默认 openai）
             providerName = props.getModel().getProvider().trim().toLowerCase(Locale.ROOT);
+            if (providerName == null || providerName.isBlank()) {
+                providerName = "openai";
+            }
             modelName = trimmed;
         }
 
@@ -115,15 +118,12 @@ public class ModelRegistryService {
 
         try {
             String dynamicId = providerName + ":" + modelName;
-            if (ModelRegistry.canResolve(dynamicId)) {
-                return ModelRegistry.resolve(dynamicId);
-            }
             io.agentscope.core.model.Model model = buildModel(providerName, cfg, modelName);
             ModelRegistry.register(dynamicId, model);
             log.info("动态注册模型: {} (baseUrl={})", dynamicId, cfg.getBaseUrl());
             return model;
         } catch (Exception e) {
-            log.warn("动态构建模型 {} 失败，回退全局默认: {}", trimmed, e.getMessage());
+            log.warn("动态构建模型 {} 失败，回退全局默认: {}", trimmed, e.getMessage(), e);
             return ModelRegistry.resolve(resolveModelId());
         }
     }
@@ -156,7 +156,7 @@ public class ModelRegistryService {
         }
         Boolean stream = props.getModel().getStream();
 
-        HttpTransport transport = new RetryableHttpTransport(HttpTransportFactory.getDefault());
+        HttpTransport transport = new LoggingHttpTransport(new RetryableHttpTransport(HttpTransportFactory.getDefault()));
 
         return OpenAIChatModel.builder()
                 .baseUrl(baseUrl.trim())
@@ -172,6 +172,7 @@ public class ModelRegistryService {
      * 最后回退到 OPENAI_API_KEY（OpenAI 兼容协议统一约定）
      */
     private String resolveApiKey(String providerName, String configured) {
+        log.info("resolveApiKey: provider={}, configured='{}'", providerName, configured);
         if (configured != null && !configured.isBlank()
                 && !configured.startsWith("${") && !configured.contains("your-api-key")) {
             return configured;

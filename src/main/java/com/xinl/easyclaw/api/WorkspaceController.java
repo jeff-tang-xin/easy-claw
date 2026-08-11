@@ -268,4 +268,52 @@ public class WorkspaceController {
             default -> "application/octet-stream";
         };
     }
+
+    /**
+     * 刷新运行环境：启动新 cmd 进程读取系统最新 PATH，
+     * 存入 workspaceManager 并重建 HarnessAgent，让后续 shell 执行使用新 PATH。
+     */
+    @PostMapping("/{workspaceId}/refresh-env")
+    public ResponseEntity<Map<String, Object>> refreshEnv(@PathVariable String workspaceId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        try {
+            ProcessBuilder pb = new ProcessBuilder("cmd", "/c", "echo %PATH%");
+            pb.redirectErrorStream(true);
+            Process p = pb.start();
+            String output;
+            try (var reader = new java.io.BufferedReader(
+                    new java.io.InputStreamReader(p.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
+                output = reader.readLine();
+            }
+            p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+
+            if (output != null && !output.isBlank()) {
+                workspaceManager.setRefreshedPath(workspaceId, output.trim());
+                workspaceManager.rebuildAgent(workspaceId, null);
+                result.put("success", true);
+                result.put("pathPreview", output.length() > 200 ? output.substring(0, 200) + "..." : output);
+                result.put("pathSegments", output.split(";").length);
+            } else {
+                result.put("success", false);
+                result.put("error", "无法读取系统 PATH");
+            }
+        } catch (Exception e) {
+            result.put("success", false);
+            result.put("error", e.getMessage());
+        }
+        return ResponseEntity.ok(result);
+    }
+
+    /** 查询当前 workspace 生效的 PATH（调试用）。 */
+    @GetMapping("/{workspaceId}/cached-path")
+    public ResponseEntity<Map<String, Object>> getCachedPath(@PathVariable String workspaceId) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        String path = workspaceManager.getRefreshedPath(workspaceId);
+        if (path == null) {
+            path = System.getenv("PATH");
+        }
+        result.put("path", path);
+        result.put("segments", path != null ? path.split(";").length : 0);
+        return ResponseEntity.ok(result);
+    }
 }

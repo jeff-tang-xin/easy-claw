@@ -49,20 +49,24 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     @Override
     @Transactional
     public McpServiceEntity create(McpServiceEntity service) {
-        String scope = service.getScope() != null ? service.getScope() : "GLOBAL";
+        String scope = service.getScope() != null ? service.getScope().toUpperCase() : "GLOBAL";
         service.setScope(scope);
-        if (repository.findByNameAndScope(service.getName(), scope).isPresent()) {
-            throw new IllegalArgumentException("同 scope 下 MCP 服务名称已存在: " + service.getName() + " (" + scope + ")");
+        if ("WORKSPACE".equals(scope) && (service.getWorkspaceId() == null || service.getWorkspaceId().isBlank())) {
+            throw new IllegalArgumentException("WORKSPACE scope 必须提供 workspaceId");
         }
         if ("SYSTEM".equals(scope)) {
             throw new IllegalStateException("SYSTEM 级别的 MCP 服务只能由系统内置，禁止手动创建");
+        }
+        if (repository.findByNameAndScope(service.getName(), scope).isPresent()) {
+            throw new IllegalArgumentException("同 scope 下 MCP 服务名称已存在: " + service.getName() + " (" + scope + ")");
         }
         // 自动推断 transport
         if (service.getTransport() == null || service.getTransport().isBlank()) {
             service.setTransport(inferTransport(service));
         }
         McpServiceEntity saved = repository.save(service);
-        log.info("创建 MCP 服务: name={}, scope={}, transport={}", service.getName(), scope, service.getTransport());
+        log.info("创建 MCP 服务: name={}, scope={}, workspaceId={}, transport={}",
+                service.getName(), scope, service.getWorkspaceId(), service.getTransport());
         return saved;
     }
 
@@ -85,6 +89,10 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                     existing.setTimeoutSeconds(service.getTimeoutSeconds());
                     existing.setInitTimeoutSeconds(service.getInitTimeoutSeconds());
                     existing.setImplementationConfig(service.getImplementationConfig());
+                    // workspaceId 允许修改（WORKSPACE scope 下迁移到另一个 workspace）
+                    if (service.getWorkspaceId() != null) {
+                        existing.setWorkspaceId(service.getWorkspaceId());
+                    }
                     // 配置变更后强制断开，需重新连接
                     if (Boolean.TRUE.equals(existing.getIsConnected())) {
                         closeClient(existing.getId());
@@ -125,7 +133,9 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     @Override
     @Transactional(readOnly = true)
     public List<McpServiceEntity> findAll() {
-        return repository.findAll();
+        return repository.findAll().stream()
+                .filter(e -> !Boolean.TRUE.equals(e.getIsTemplate()))
+                .toList();
     }
 
     @Override
@@ -373,5 +383,52 @@ public class McpConnectionServiceImpl implements McpConnectionService {
             log.warn("解析 JSON 配置失败: {}", e.getMessage());
             return new LinkedHashMap<>();
         }
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public List<McpServiceEntity> findAllTemplates() {
+        return repository.findByIsTemplateTrue();
+    }
+
+    @Override
+    @Transactional
+    public McpServiceEntity copyFromTemplate(Long templateId, String scope, String workspaceId) {
+        McpServiceEntity template = repository.findById(templateId)
+                .orElseThrow(() -> new IllegalArgumentException("MCP 模板不存在: id=" + templateId));
+        if (!Boolean.TRUE.equals(template.getIsTemplate())) {
+            throw new IllegalArgumentException("该 MCP 服务不是模板，无法复制: " + template.getName());
+        }
+
+        String targetScope = (scope == null || scope.isBlank()) ? "GLOBAL" : scope.toUpperCase();
+        if (!"GLOBAL".equals(targetScope) && !"WORKSPACE".equals(targetScope)) {
+            throw new IllegalArgumentException("scope 只能是 GLOBAL 或 WORKSPACE: " + targetScope);
+        }
+        if ("WORKSPACE".equals(targetScope) && (workspaceId == null || workspaceId.isBlank())) {
+            throw new IllegalArgumentException("WORKSPACE scope 必须提供 workspaceId");
+        }
+
+        McpServiceEntity copy = McpServiceEntity.builder()
+                .name(template.getName() + "-" + UUID.randomUUID().toString().substring(0, 6))
+                .description(template.getDescription().replace("【内置模板】", ""))
+                .transport(template.getTransport())
+                .implementationConfig(template.getImplementationConfig())
+                .headers(template.getHeaders())
+                .url(template.getUrl())
+                .command(template.getCommand())
+                .args(template.getArgs())
+                .env(template.getEnv())
+                .cwd(template.getCwd())
+                .timeoutSeconds(template.getTimeoutSeconds())
+                .initTimeoutSeconds(template.getInitTimeoutSeconds())
+                .scope(targetScope)
+                .workspaceId("WORKSPACE".equals(targetScope) ? workspaceId : null)
+                .isTemplate(false)
+                .isConnected(false)
+                .build();
+        McpServiceEntity saved = repository.save(copy);
+        log.info("从模板复制 MCP 服务: template={}, new={}, scope={}, workspaceId={}",
+                template.getName(), copy.getName(), targetScope, copy.getWorkspaceId());
+        return saved;
     }
 }

@@ -1,13 +1,11 @@
 package com.xinl.easyclaw.config;
 
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
-import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tool.service.ToolManagementService;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
-import com.xinl.easyclaw.tools.http.HttpAgentTool;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;

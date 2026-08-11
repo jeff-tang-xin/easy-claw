@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { getJson, putJson } from '../api';
+import {useEffect, useState} from 'react';
+import {getJson, putJson} from '../api';
 
 interface SettingsResponse {
   yaml: string;
