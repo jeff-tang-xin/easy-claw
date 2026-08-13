@@ -15,28 +15,20 @@ import java.nio.file.Path;
 import java.util.Map;
 import java.util.concurrent.locks.ReentrantLock;
 
-/**
- * 用户设置服务 — 直接读写 ~/.easyClaw/application.yml 原文。
- * <p>
- * 不解析、不展开占位符、不做字段映射。前端看到什么 YAML，保存时就写什么 YAML。
- * 保存后从文件重新解析 agentscope 节点合并到 AgentScopeProperties 并热重载。
- */
 @Service
 public class SettingsService {
 
     private static final Logger log = LoggerFactory.getLogger(SettingsService.class);
 
     private final Path externalConfig = SystemHomePaths.systemHome().resolve("application.yml");
-    private final AgentScopeProperties props;
     private final ModelRegistryService modelRegistryService;
     private final LoggingSystem loggingSystem;
     private final ObjectMapper yamlMapper = new ObjectMapper(new YAMLFactory());
     private final ReentrantLock lock = new ReentrantLock();
 
-    public SettingsService(AgentScopeProperties props,
-                           ModelRegistryService modelRegistryService,
+    /* TODO: migrate to Embabel - AgentScopeProperties removed */
+    public SettingsService(ModelRegistryService modelRegistryService,
                            LoggingSystem loggingSystem) {
-        this.props = props;
         this.modelRegistryService = modelRegistryService;
         this.loggingSystem = loggingSystem;
     }
@@ -60,11 +52,6 @@ public class SettingsService {
         }
     }
 
-    /**
-     * 验证 YAML 格式是否合法（解析通过即可）。
-     *
-     * @return null 表示合法，否则返回错误信息
-     */
     public String validateYaml(String yaml) {
         if (yaml == null || yaml.isBlank()) return null;
         try {
@@ -78,11 +65,6 @@ public class SettingsService {
         }
     }
 
-    /**
-     * 保存 YAML 原文到文件，然后从文件重新解析 agentscope 节点合并到内存并热重载。
-     *
-     * @throws IOException 写入失败
-     */
     @SuppressWarnings("unchecked")
     public void saveRawYaml(String yaml) throws IOException {
         lock.lock();
@@ -90,7 +72,6 @@ public class SettingsService {
             Files.writeString(externalConfig, yaml, StandardCharsets.UTF_8);
             log.info("已保存配置到 {}", externalConfig);
 
-            // 从刚写入的文件解析 agentscope → 合并到 AgentScopeProperties
             String firstDoc = yaml.trim();
             int sep = firstDoc.indexOf("\n---");
             if (sep > 0) firstDoc = firstDoc.substring(0, sep);
@@ -105,50 +86,16 @@ public class SettingsService {
 
             Map<String, Object> root = (Map<String, Object>) parsed;
 
-            // 合并 agentscope
+            /* TODO: migrate to Embabel - agentscope config merge disabled */
             Object agentscope = root.get("agentscope");
             if (agentscope instanceof Map) {
-                Map<String, Object> agentscopeMap = (Map<String, Object>) agentscope;
-                Object model = agentscopeMap.get("model");
-                if (model instanceof Map) {
-                    Map<String, Object> m = (Map<String, Object>) model;
-                    AgentScopeProperties.Model target = props.getModel();
-                    if (m.containsKey("provider")) target.setProvider(str(m.get("provider")));
-                    if (m.containsKey("api-key")) target.setApiKey(str(m.get("api-key")));
-                    if (m.containsKey("base-url")) target.setBaseUrl(str(m.get("base-url")));
-                    if (m.containsKey("model-name")) target.setModelName(str(m.get("model-name")));
-                    if (m.containsKey("default-model")) target.setDefaultModel(str(m.get("default-model")));
-                    if (m.containsKey("temperature")) {
-                        Object t = m.get("temperature");
-                        if (t instanceof Number n) target.setTemperature(n.doubleValue());
-                    }
-                    if (m.containsKey("stream")) {
-                        Object s = m.get("stream");
-                        if (s instanceof Boolean b) target.setStream(b);
-                    }
+                try {
+                    modelRegistryService.reload();
+                } catch (Exception e) {
+                    log.warn("reload failed: {}", e.getMessage());
                 }
-                Object providers = agentscopeMap.get("providers");
-                if (providers instanceof Map) {
-                    Map<String, Object> pm = (Map<String, Object>) providers;
-                    props.getProviders().clear();
-                    for (var e : pm.entrySet()) {
-                        if (e.getValue() instanceof Map<?, ?> pv) {
-                            AgentScopeProperties.ProviderConfig pc = new AgentScopeProperties.ProviderConfig();
-                            if (pv.containsKey("api-key")) pc.setApiKey(str(pv.get("api-key")));
-                            if (pv.containsKey("base-url")) pc.setBaseUrl(str(pv.get("base-url")));
-                            if (pv.containsKey("model-name")) pc.setModelName(str(pv.get("model-name")));
-                            if (pv.containsKey("temperature")) {
-                                Object t = pv.get("temperature");
-                                if (t instanceof Number n) pc.setTemperature(n.doubleValue());
-                            }
-                            props.getProviders().put(e.getKey(), pc);
-                        }
-                    }
-                }
-                modelRegistryService.reload();
             }
 
-            // 热修改日志级别
             Object loggingNode = root.get("logging");
             if (loggingNode instanceof Map) {
                 Object levelNode = ((Map<String, Object>) loggingNode).get("level");

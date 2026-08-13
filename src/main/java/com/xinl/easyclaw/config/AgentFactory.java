@@ -6,28 +6,17 @@ import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
-import io.agentscope.core.tool.AgentTool;
-import io.agentscope.core.tool.Toolkit;
-import io.agentscope.core.tool.mcp.McpClientWrapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 
-/**
- * Agent 工厂
- * <p>
- * 创建 Toolkit 和配置，以及系统提示词。
- * Agent 实例由 WorkspaceManager 管理（每个 Workspace 一个独立的 HarnessAgent），
- * 每个 Workspace 的 Toolkit 包含：内置工具（文件/代码/搜索）+ 已连接的 MCP 工具。
- */
 @Component
 public class AgentFactory {
 
     private static final Logger log = LoggerFactory.getLogger(AgentFactory.class);
 
-    private final AgentScopeProperties props;
     private final ModelRegistryService modelRegistryService;
     private final FileOperationTools fileTools;
     private final WebSearchTools searchTools;
@@ -36,15 +25,14 @@ public class AgentFactory {
     private final ToolRegistryService toolRegistryService;
     private final ToolManagementService toolManagementService;
 
-    public AgentFactory(AgentScopeProperties props,
-                        ModelRegistryService modelRegistryService,
+    /* TODO: migrate to Embabel - AgentScopeProperties removed, Toolkit removed */
+    public AgentFactory(ModelRegistryService modelRegistryService,
                         FileOperationTools fileTools,
                         WebSearchTools searchTools,
                         CodeGenerationTools codeTools,
                         McpConnectionService mcpConnectionService,
                         ToolRegistryService toolRegistryService,
                         ToolManagementService toolManagementService) {
-        this.props = props;
         this.modelRegistryService = modelRegistryService;
         this.fileTools = fileTools;
         this.searchTools = searchTools;
@@ -54,104 +42,41 @@ public class AgentFactory {
         this.toolManagementService = toolManagementService;
     }
 
-    /**
-     * 当前激活的模型 ID，如 "deepseek:deepseek-chat"
-     */
     public String getModelId() {
         return modelRegistryService.resolveModelId();
     }
 
-    /**
-     * 按模型 ID 解析 Model（角色/子智能体配置的模型）。
-     * <p>
-     * 解析策略（按优先级）：
-     * <ol>
-     *   <li>ModelRegistry 已注册 → 直接返回</li>
-     *   <li>未注册 → 动态构建：有 provider 前缀取对应 provider 凭证，无前缀用激活 provider</li>
-     *   <li>动态构建也失败 → 回退全局默认模型</li>
-     * </ol>
-     */
-    public io.agentscope.core.model.Model resolveModel(String modelId) {
+    public Object resolveModel(String modelId) {
+        /* TODO: migrate to Embabel */
         return modelRegistryService.resolveOrBuild(modelId);
     }
 
-    /**
-     * 创建 Workspace 使用的完整 Toolkit：
-     * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 用户定义的 HTTP 工具 + 已连接的 MCP 服务工具
-     */
-    public Toolkit createWorkspaceToolkit() {
-        Toolkit toolkit = new Toolkit();
-
-        Toolkit.ToolRegistration registration = toolkit.registration();
-        registration.tool(fileTools);
-        registration.tool(searchTools);
-        registration.tool(codeTools);
-        // 按工具管理页的启用状态过滤（disableTools 按 @Tool 名称）
-        List<String> disabled = toolRegistryService.disabledToolNames();
-        if (!disabled.isEmpty()) {
-            registration.disableTools(disabled);
-            log.info("已禁用工具: {}", disabled);
-        }
-        registration.apply();
-
-        // 注册 MCP HTTP_TOOL 桥接（REST API 包装成 AgentTool）
-        List<AgentTool> httpTools = mcpConnectionService.getHttpTools();
-        for (AgentTool tool : httpTools) {
-            toolkit.registerAgentTool(tool);
-            log.info("已注册 HTTP_TOOL 桥接: {}", tool.getName());
-        }
-
-        // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
-        List<McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
-        for (McpClientWrapper client : mcpClients) {
-            try {
-                toolkit.registerMcpClient(client).block();
-                log.info("已注册外部 MCP 工具客户端");
-            } catch (Exception e) {
-                log.warn("注册外部 MCP 客户端失败: {}", e.getMessage());
-            }
-        }
-        return toolkit;
+    public Object createWorkspaceToolkit() {
+        /* TODO: migrate to Embabel - Toolkit creation disabled */
+        log.info("createWorkspaceToolkit() called (no-op pending Embabel migration)");
+        return null;
     }
 
-    /**
-     * 创建代码专家 Toolkit
-     */
-    public Toolkit createCodeToolkit() {
-        Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(codeTools);
-        toolkit.registerTool(fileTools);
-        return toolkit;
+    public Object createCodeToolkit() {
+        /* TODO: migrate to Embabel */
+        return null;
     }
 
-    /**
-     * 创建文件操作专家 Toolkit
-     */
-    public Toolkit createFileToolkit() {
-        Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(fileTools);
-        return toolkit;
+    public Object createFileToolkit() {
+        /* TODO: migrate to Embabel */
+        return null;
     }
 
-    /**
-     * 创建搜索专家 Toolkit
-     */
-    public Toolkit createSearchToolkit() {
-        Toolkit toolkit = new Toolkit();
-        toolkit.registerTool(searchTools);
-        return toolkit;
+    public Object createSearchToolkit() {
+        /* TODO: migrate to Embabel */
+        return null;
     }
 
-    /**
-     * 根据角色名称创建对应的 Toolkit
-     */
-    public Toolkit createToolkitByRole(String roleName) {
+    public Object createToolkitByRole(String roleName) {
         if (roleName == null || roleName.isBlank()) {
             return createWorkspaceToolkit();
         }
-
-        String lower = roleName.toLowerCase();
-        return switch (lower) {
+        return switch (roleName.toLowerCase()) {
             case "code", "代码", "代码专家", "code-expert" -> createCodeToolkit();
             case "file", "文件", "文件专家", "file-expert" -> createFileToolkit();
             case "search", "搜索", "搜索专家", "search-expert", "researcher" -> createSearchToolkit();
@@ -159,16 +84,11 @@ public class AgentFactory {
         };
     }
 
-    /**
-     * 根据角色名称获取系统提示词
-     */
     public String getSystemPromptByRole(String roleName) {
         if (roleName == null || roleName.isBlank()) {
             return defaultSystemPrompt();
         }
-
-        String lower = roleName.toLowerCase();
-        return switch (lower) {
+        return switch (roleName.toLowerCase()) {
             case "code", "代码", "代码专家", "code-expert" -> """
                     你是一个资深的代码专家，擅长 Java、Python、JavaScript 等主流编程语言。
 
@@ -220,9 +140,6 @@ public class AgentFactory {
         };
     }
 
-    /**
-     * 默认系统提示词
-     */
     public String defaultSystemPrompt() {
         return """
                 你是 Easy-Claw AI 智能助手，一个专业、全能的编程助手。

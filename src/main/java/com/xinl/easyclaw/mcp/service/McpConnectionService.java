@@ -1,15 +1,10 @@
 package com.xinl.easyclaw.mcp.service;
 
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
-import io.agentscope.core.tool.AgentTool;
-import io.agentscope.core.tool.mcp.McpClientWrapper;
 
 import java.util.List;
 import java.util.Optional;
 
-/**
- * MCP 服务连接管理接口
- */
 public interface McpConnectionService {
 
     McpServiceEntity create(McpServiceEntity service);
@@ -28,13 +23,15 @@ public interface McpConnectionService {
 
     /**
      * 返回所有已建立连接的 MCP 客户端（供 Agent Toolkit 注册）
+     * TODO: migrate to Embabel - was List<McpClientWrapper>
      */
-    List<McpClientWrapper> getConnectedWrappers();
+    List<Object> getConnectedWrappers();
 
     /**
-     * 返回所有已激活的 HTTP_TOOL 桥接工具（供 Agent Toolkit 注册为 AgentTool）
+     * 返回所有已激活的 HTTP_TOOL 桥接工具（供 Agent Toolkit 注册）
+     * TODO: migrate to Embabel - was List<AgentTool>
      */
-    List<AgentTool> getHttpTools();
+    List<Object> getHttpTools();
 
     McpServiceEntity connect(Long id);
 
@@ -42,11 +39,5 @@ public interface McpConnectionService {
 
     List<McpServiceEntity> findAllTemplates();
 
-    /**
-     * 从模板复制一个 MCP 服务实例
-     * @param templateId 模板 ID（必须 isTemplate=true）
-     * @param scope 目标 scope：GLOBAL 或 WORKSPACE
-     * @param workspaceId scope=WORKSPACE 时必填
-     */
     McpServiceEntity copyFromTemplate(Long templateId, String scope, String workspaceId);
 }

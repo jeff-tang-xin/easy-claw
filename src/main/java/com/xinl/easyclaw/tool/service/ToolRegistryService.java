@@ -6,8 +6,6 @@ import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
-import io.agentscope.core.tool.Tool;
-import io.agentscope.core.tool.ToolParam;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,13 +15,6 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Parameter;
 import java.util.*;
 
-/**
- * 系统内置工具注册表
- * <p>
- * 通过反射扫描 {@code @Tool} 注解方法，提供系统内支持的完整工具清单
- * （名称 / 显示名 / 描述 / 分组 / 参数定义），并将启用状态持久化到
- * {@code tool_definitions} 表（Agent 的 Toolkit 按启用状态过滤注册）。
- */
 @Service
 public class ToolRegistryService {
 
@@ -35,39 +26,31 @@ public class ToolRegistryService {
     private final WebSearchTools searchTools;
     private final CodeGenerationTools codeTools;
 
-    /** 工具参数定义 */
     public record ToolParamDef(String name, boolean required, String description) {
     }
 
-    /** 工具定义 */
     public record ToolDef(String name, String displayName, String description,
                           String group, List<ToolParamDef> params) {
     }
 
-    /** 框架 FilesystemTool 内置工具名（HarnessAgent 自动注册，不可禁用） */
     static final Set<String> FRAMEWORK_FILESYSTEM_TOOLS = Set.of(
             "read_file", "write_file", "edit_file", "grep_files", "glob_files", "list_files"
     );
 
-    /** 框架 Memory 内置工具名 */
     static final Set<String> FRAMEWORK_MEMORY_TOOLS = Set.of(
             "memory_search", "memory_get"
     );
 
-    /** 框架 Session 内置工具名 */
     static final Set<String> FRAMEWORK_SESSION_TOOLS = Set.of(
             "session_search", "session_list", "session_history"
     );
 
-    /** 框架 Subagent 内置工具名（非叶子 Agent 自动注册） */
     static final Set<String> FRAMEWORK_SUBAGENT_TOOLS = Set.of(
             "agent_spawn", "agent_send", "agent_list", "task_output", "task_cancel", "task_list"
     );
 
-    /** 框架 Shell 内置工具名（后端是 AbstractSandboxFilesystem 时自动注册） */
     static final Set<String> FRAMEWORK_SHELL_TOOLS = Set.of("execute");
 
-    /** 所有框架内置工具名的并集 */
     static final Set<String> ALL_FRAMEWORK_TOOLS;
 
     static {
@@ -81,30 +64,24 @@ public class ToolRegistryService {
     }
 
     private static final Map<String, String> DISPLAY = Map.ofEntries(
-            // 框架 FilesystemTool 内置工具
             Map.entry("read_file", "文件读取（框架）"),
             Map.entry("write_file", "文件写入（框架）"),
             Map.entry("edit_file", "文件编辑（框架）"),
             Map.entry("grep_files", "内容搜索（框架）"),
             Map.entry("glob_files", "文件匹配（框架）"),
             Map.entry("list_files", "文件列表（框架）"),
-            // 框架 Memory 内置工具
             Map.entry("memory_search", "记忆搜索（框架）"),
             Map.entry("memory_get", "记忆获取（框架）"),
-            // 框架 Session 内置工具
             Map.entry("session_search", "会话搜索（框架）"),
             Map.entry("session_list", "会话列表（框架）"),
             Map.entry("session_history", "会话历史（框架）"),
-            // 框架 Subagent 内置工具
             Map.entry("agent_spawn", "子Agent创建（框架）"),
             Map.entry("agent_send", "Agent通信（框架）"),
             Map.entry("agent_list", "Agent列表（框架）"),
             Map.entry("task_output", "任务输出（框架）"),
             Map.entry("task_cancel", "任务取消（框架）"),
             Map.entry("task_list", "任务列表（框架）"),
-            // 框架 Shell 内置工具
             Map.entry("execute", "Shell执行（框架）"),
-            // 自定义补充工具
             Map.entry("list_directory", "目录列表（增强）"),
             Map.entry("search_files", "文件搜索（按名称）"),
             Map.entry("analyze_code", "代码分析"),
@@ -152,9 +129,6 @@ public class ToolRegistryService {
         this.codeTools = codeTools;
     }
 
-    /**
-     * 首次启动时把系统内置工具同步到 tool_definitions 表（名称 = @Tool 名）
-     */
     @PostConstruct
     public void syncBuiltinTools() {
         try {
@@ -179,13 +153,9 @@ public class ToolRegistryService {
         }
     }
 
-    /**
-     * 系统内支持的工具清单（框架内置 + 自定义 @Tool 注解）
-     */
     public List<ToolDef> listBuiltinTools() {
         List<ToolDef> defs = new ArrayList<>();
 
-        // 1. 框架内置工具（无 @Tool 注解，AgentScope 自动注册）
         for (String name : ALL_FRAMEWORK_TOOLS) {
             defs.add(new ToolDef(name,
                     DISPLAY.getOrDefault(name, name),
@@ -194,41 +164,79 @@ public class ToolRegistryService {
                     List.of()));
         }
 
-        // 2. 自定义补充工具（反射 @Tool 注解）
+        /* TODO: migrate to Embabel - reflection scan removed, tool names hardcoded */
         for (Object instance : List.of(fileTools, searchTools, codeTools)) {
             for (Method m : instance.getClass().getMethods()) {
-                Tool tool = m.getAnnotation(Tool.class);
-                if (tool == null) {
-                    continue;
+                ToolDef def = tryBuildToolDef(m);
+                if (def != null && !ALL_FRAMEWORK_TOOLS.contains(def.name())) {
+                    defs.add(def);
                 }
-                String name = tool.name();
-                // 避免重复（如果自定义工具名恰好和框架重名）
-                if (ALL_FRAMEWORK_TOOLS.contains(name)) {
-                    continue;
-                }
-                List<ToolParamDef> params = new ArrayList<>();
-                for (Parameter p : m.getParameters()) {
-                    ToolParam tp = p.getAnnotation(ToolParam.class);
-                    if (tp != null) {
-                        params.add(new ToolParamDef(tp.name(), tp.required(), tp.description()));
-                    }
-                }
-                defs.add(new ToolDef(name,
-                        DISPLAY.getOrDefault(name, name),
-                        tool.description(),
-                        GROUPS.getOrDefault(name, "GENERAL"),
-                        params));
             }
         }
         defs.sort(Comparator.comparing(ToolDef::group).thenComparing(ToolDef::name));
         return defs;
     }
 
-    /**
-     * 当前被禁用的内置工具名（Agent Toolkit 注册时过滤）
-     * <p>框架内置工具（FilesystemTool / Memory / Session / Subagent / Shell）
-     * 由 HarnessAgent 自动注册，用户无法禁用，因此不会出现在这里。
-     */
+    private ToolDef tryBuildToolDef(Method m) {
+        String methodName = m.getName();
+        switch (methodName) {
+            case "listDirectory" -> {
+                return new ToolDef("list_directory",
+                        DISPLAY.getOrDefault("list_directory", "list_directory"),
+                        "列出当前工作区内指定目录下的所有文件和子目录（带图标区分）",
+                        GROUPS.getOrDefault("list_directory", "FILE"),
+                        List.of(new ToolParamDef("path", false, "目录路径（相对当前工作区根目录，留空表示根目录）")));
+            }
+            case "searchFiles" -> {
+                return new ToolDef("search_files",
+                        DISPLAY.getOrDefault("search_files", "search_files"),
+                        "在当前工作区内按文件名关键词搜索文件，返回匹配的路径列表",
+                        GROUPS.getOrDefault("search_files", "FILE"),
+                        List.of(new ToolParamDef("keyword", true, "搜索关键词（文件名包含）")));
+            }
+            case "webSearch" -> {
+                return new ToolDef("web_search",
+                        DISPLAY.getOrDefault("web_search", "web_search"),
+                        "通过搜索引擎检索最新信息，返回相关摘要。适用于需要实时数据（新闻、版本号、价格、API 文档等）的问题。",
+                        GROUPS.getOrDefault("web_search", "WEB"),
+                        List.of(new ToolParamDef("query", true, "搜索关键词")));
+            }
+            case "fetchWebpage" -> {
+                return new ToolDef("fetch_webpage",
+                        DISPLAY.getOrDefault("fetch_webpage", "fetch_webpage"),
+                        "获取指定 URL 的网页文本内容（自动去除 HTML 标签）。适合读取文档、API 说明、博客文章等。",
+                        GROUPS.getOrDefault("fetch_webpage", "WEB"),
+                        List.of(new ToolParamDef("url", true, "要获取的完整 URL")));
+            }
+            case "analyzeCode" -> {
+                return new ToolDef("analyze_code",
+                        DISPLAY.getOrDefault("analyze_code", "analyze_code"),
+                        "分析给定代码的复杂度，返回代码统计信息（行数、方法数、类数等）",
+                        GROUPS.getOrDefault("analyze_code", "CODE"),
+                        List.of(new ToolParamDef("code", true, "要分析的代码内容"),
+                                new ToolParamDef("language", true, "编程语言，如 Java、Python、JavaScript")));
+            }
+            case "formatCode" -> {
+                return new ToolDef("format_code",
+                        DISPLAY.getOrDefault("format_code", "format_code"),
+                        "将代码格式化为标准风格，移除多余空行和空格",
+                        GROUPS.getOrDefault("format_code", "CODE"),
+                        List.of(new ToolParamDef("code", true, "要格式化的代码内容")));
+            }
+            case "diffCode" -> {
+                return new ToolDef("diff_code",
+                        DISPLAY.getOrDefault("diff_code", "diff_code"),
+                        "对比两段代码的差异，返回不同之处的描述",
+                        GROUPS.getOrDefault("diff_code", "CODE"),
+                        List.of(new ToolParamDef("code1", true, "第一段代码"),
+                                new ToolParamDef("code2", true, "第二段代码")));
+            }
+            default -> {
+                return null;
+            }
+        }
+    }
+
     public List<String> disabledToolNames() {
         return toolService.findAll().stream()
                 .filter(t -> !Boolean.TRUE.equals(t.getEnabled()))
@@ -237,17 +245,10 @@ public class ToolRegistryService {
                 .toList();
     }
 
-    /**
-     * 判断工具是否为框架内置（HarnessAgent 自动注册，不可禁用）
-     */
     public static boolean isFrameworkTool(String toolName) {
         return ALL_FRAMEWORK_TOOLS.contains(toolName);
     }
 
-    /**
-     * 查询某个工具的启用状态
-     * <p>框架内置工具始终返回 true（不可禁用）。
-     */
     public boolean isEnabled(String toolName) {
         if (ALL_FRAMEWORK_TOOLS.contains(toolName)) {
             return true;

@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.4.1</version>
+        <version>3.5.13</version>
         <relativePath/>
     </parent>
 
@@ -15,16 +15,16 @@
     <artifactId>easy-claw</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <name>Easy Claw - AI Work Assistant</name>
-    <description>AgentScope 2.0 based AI assistant with Workspace isolation and full configurability</description>
+    <description>Embabel 1.0 based AI assistant with GOAP planning, Workspace isolation and full configurability</description>
 
     <properties>
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <agentscope.version>2.0.2</agentscope.version>
+        <embabel-agent.version>1.0.0</embabel-agent.version>
         <sqlite.version>3.47.1.0</sqlite.version>
-        <lombok.version>1.18.30</lombok.version>
+        <lombok.version>1.18.36</lombok.version>
         <jackson.version>2.16.1</jackson.version>
         <node.version>v22.13.0</node.version>
         <npm.version>10.9.2</npm.version>
@@ -32,27 +32,18 @@
 
     <dependencies>
         <!-- ========================================= -->
-        <!-- AgentScope 2.0 核心                        -->
+        <!-- Embabel Agent 1.0 GA 核心                  -->
         <!-- ========================================= -->
         <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-core</artifactId>
-            <version>${agentscope.version}</version>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter</artifactId>
+            <version>${embabel-agent.version}</version>
         </dependency>
 
         <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-harness</artifactId>
-            <version>${agentscope.version}</version>
-        </dependency>
-
-        <!-- ========================================= -->
-        <!-- 模型扩展                                  -->
-        <!-- ========================================= -->
-        <dependency>
-            <groupId>io.agentscope</groupId>
-            <artifactId>agentscope-extensions-model-openai</artifactId>
-            <version>${agentscope.version}</version>
+            <groupId>com.embabel.agent</groupId>
+            <artifactId>embabel-agent-starter-openai</artifactId>
+            <version>${embabel-agent.version}</version>
         </dependency>
 
         <!-- ========================================= -->
@@ -63,7 +54,7 @@
             <artifactId>spring-boot-starter-web</artifactId>
         </dependency>
 
-        <!-- WebSocket：流式对话改用 WS（替代 SSE，连接更稳定） -->
+        <!-- WebSocket：流式对话改用 WS（连接更稳定） -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-websocket</artifactId>
@@ -136,13 +127,6 @@
                 <configuration>
                     <source>${java.version}</source>
                     <target>${java.version}</target>
-                    <annotationProcessorPaths>
-                        <path>
-                            <groupId>org.projectlombok</groupId>
-                            <artifactId>lombok</artifactId>
-                            <version>${lombok.version}</version>
-                        </path>
-                    </annotationProcessorPaths>
                 </configuration>
             </plugin>
 

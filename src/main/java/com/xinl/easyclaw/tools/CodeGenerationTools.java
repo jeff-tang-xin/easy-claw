@@ -1,7 +1,6 @@
 package com.xinl.easyclaw.tools;
 
-import io.agentscope.core.tool.Tool;
-import io.agentscope.core.tool.ToolParam;
+import com.embabel.agent.api.annotation.LlmTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -11,9 +10,12 @@ public class CodeGenerationTools {
 
     private static final Logger log = LoggerFactory.getLogger(CodeGenerationTools.class);
 
-    @Tool(name = "analyze_code", description = "分析给定代码的复杂度，返回代码统计信息（行数、方法数、类数等）")
-    public String analyzeCode(@ToolParam(name = "code", description = "要分析的代码内容") String code,
-                              @ToolParam(name = "language", description = "编程语言，如 Java、Python、JavaScript") String language) {
+    @LlmTool(description = "对代码进行静态分析，统计行数、方法数、类数等基本指标。不执行代码，只做正则匹配。")
+    public String analyzeCode(
+            @LlmTool.Param(description = "要分析的源代码文本")
+            String code,
+            @LlmTool.Param(description = "编程语言，如 java、python、javascript 等")
+            String language) {
         log.info("分析代码: language={}, length={}", language, code.length());
         try {
             StringBuilder result = new StringBuilder();
@@ -39,8 +41,10 @@ public class CodeGenerationTools {
         }
     }
 
-    @Tool(name = "format_code", description = "将代码格式化为标准风格，移除多余空行和空格")
-    public String formatCode(@ToolParam(name = "code", description = "要格式化的代码内容") String code) {
+    @LlmTool(description = "清理代码中的多余空白行和行尾空格，美化格式。返回格式化后的代码（用 Markdown 代码块包裹）。")
+    public String formatCode(
+            @LlmTool.Param(description = "要格式化的源代码文本")
+            String code) {
         log.info("格式化代码: length={}", code.length());
         try {
             String formatted = code
@@ -56,9 +60,12 @@ public class CodeGenerationTools {
         }
     }
 
-    @Tool(name = "diff_code", description = "对比两段代码的差异，返回不同之处的描述")
-    public String diffCode(@ToolParam(name = "code1", description = "第一段代码") String code1,
-                          @ToolParam(name = "code2", description = "第二段代码") String code2) {
+    @LlmTool(description = "逐行对比两段代码的差异。返回前 20 处不同，格式为 diff 风格（- 表示删除行，+ 表示新增行）。")
+    public String diffCode(
+            @LlmTool.Param(description = "原始代码文本")
+            String code1,
+            @LlmTool.Param(description = "修改后的代码文本")
+            String code2) {
         log.info("代码对比: code1={}, code2={}", code1.length(), code2.length());
         try {
             String[] lines1 = code1.split("\n");

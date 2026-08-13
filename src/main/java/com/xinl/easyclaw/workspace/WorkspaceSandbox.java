@@ -19,10 +19,21 @@ import java.util.stream.Collectors;
 public class WorkspaceSandbox {
 
     private final List<String> forbiddenPaths;
+    private final String workspaceRoot;
 
     public WorkspaceSandbox(
-            @Value("${ai.workspace.security.forbidden-paths:}") List<String> forbiddenPaths) {
+            @Value("${ai.workspace.security.forbidden-paths:}") List<String> forbiddenPaths,
+            @Value("${easy-claw.workspace.root:${user.home}/.easyClaw/workspaces}") String workspaceRoot) {
         this.forbiddenPaths = forbiddenPaths == null ? List.of() : forbiddenPaths;
+        this.workspaceRoot = workspaceRoot;
+    }
+
+    public WorkspaceContext defaultWorkspace() {
+        return WorkspaceContext.builder()
+                .workspaceId("default")
+                .name("Default Workspace")
+                .path(Path.of(workspaceRoot))
+                .build();
     }
 
     public boolean validatePath(WorkspaceContext workspace, String requestedPath) {

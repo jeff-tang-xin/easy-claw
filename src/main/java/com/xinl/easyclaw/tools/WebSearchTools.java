@@ -1,7 +1,6 @@
 package com.xinl.easyclaw.tools;
 
-import io.agentscope.core.tool.Tool;
-import io.agentscope.core.tool.ToolParam;
+import com.embabel.agent.api.annotation.LlmTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -12,13 +11,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 
-/**
- * 网络搜索 + 网页抓取工具。
- * <ul>
- *   <li>{@code web_search}：Google Custom Search，API Key 从 GOOGLE_API_KEY / GOOGLE_SEARCH_CX 环境变量读取</li>
- *   <li>{@code fetch_webpage}：直接 HTTP GET 网页，返回纯文本</li>
- * </ul>
- */
 @Component
 public class WebSearchTools {
 
@@ -31,9 +23,10 @@ public class WebSearchTools {
                 .build();
     }
 
-    @Tool(name = "web_search", description = "通过搜索引擎检索最新信息，返回相关摘要。"
-            + " 适用于需要实时数据（新闻、版本号、价格、API 文档等）的问题。")
-    public String webSearch(@ToolParam(name = "query", description = "搜索关键词") String query) {
+    @LlmTool(description = "使用 Google Custom Search API 搜索网络信息。返回前 5 条搜索结果的 JSON 片段。需要配置 GOOGLE_API_KEY 和 GOOGLE_SEARCH_CX 环境变量。")
+    public String webSearch(
+            @LlmTool.Param(description = "搜索关键词，支持自然语言查询")
+            String query) {
         log.info("网络搜索: {}", query);
         try {
             String apiKey = System.getenv().getOrDefault("GOOGLE_API_KEY", "").trim();
@@ -66,9 +59,10 @@ public class WebSearchTools {
         }
     }
 
-    @Tool(name = "fetch_webpage", description = "获取指定 URL 的网页文本内容（自动去除 HTML 标签）。"
-            + " 适合读取文档、API 说明、博客文章等。")
-    public String fetchWebpage(@ToolParam(name = "url", description = "要获取的完整 URL") String url) {
+    @LlmTool(description = "抓取指定 URL 的网页内容并提取纯文本。返回前 6000 字符的文本内容，HTML 标签已清除。")
+    public String fetchWebpage(
+            @LlmTool.Param(description = "要抓取的网页 URL，必须以 http:// 或 https:// 开头")
+            String url) {
         log.info("获取网页: {}", url);
         try {
             HttpRequest request = HttpRequest.newBuilder()
@@ -93,7 +87,6 @@ public class WebSearchTools {
         }
     }
 
-    /** 简单去除 HTML 标签，保留可见文本（不处理 script/style 等） */
     private static String stripHtml(String html) {
         if (html == null) return "";
         String text = html.replaceAll("(?is)<script.*?>.*?</script>", "")

@@ -3,7 +3,6 @@ package com.xinl.easyclaw.workspace;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.databind.annotation.JsonSerialize;
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer;
-import io.agentscope.harness.agent.HarnessAgent;
 import lombok.Builder;
 import lombok.Data;
 
@@ -21,7 +20,8 @@ public class WorkspaceContext {
     @JsonSerialize(using = ToStringSerializer.class)
     private Path path;
     @JsonIgnore
-    private HarnessAgent agent;
+    /* TODO: migrate to Embabel */
+    private Object agent;
     private Instant createdAt;
     private Instant lastAccessed;
     @Builder.Default

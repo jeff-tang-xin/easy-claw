@@ -11,68 +11,61 @@ spring:
       max-request-size: 10MB
 
 # ============================
-# 日志级别：AgentScope 内部噪音降为 WARN，业务日志保持 INFO
+# Embabel Agent 配置
+# ============================
+embabel:
+  models:
+    default-llm: ${EMBABEL_DEFAULT_MODEL:gpt-4o-mini}
+  agent:
+    logging:
+      personality: default
+      verbosity: info
+
+# ============================
+# Easy-Claw 工作区配置
+# ============================
+easy-claw:
+  workspace:
+    root: ${user.home}/.easyClaw/workspaces
+  tools:
+    web:
+      enabled: true
+
+# ============================
+# Embabel CoreToolGroups.WEB 需要 Brave Search API Key
+# 免费申请: https://brave.com/search/api/
+# ============================
+brave:
+  search:
+    api-key: ${BRAVE_SEARCH_API_KEY:${BRAVE_API_KEY:}}
+
+# ============================
+# Spring AI / OpenAI 配置（Embabel 底层使用 Spring AI）
+# 支持任何 OpenAI 兼容 API（DeepSeek、DashScope、Moonshot、Ollama 等）
+# ============================
+spring:
+  ai:
+    openai:
+      api-key: ${OPENAI_API_KEY:${DEEPSEEK_API_KEY:}}
+      base-url: ${OPENAI_BASE_URL:${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}}
+      chat:
+        options:
+          model: ${OPENAI_MODEL:${DEEPSEEK_MODEL:deepseek-chat}}
+          temperature: 0.3
+
+# ============================
+# 日志级别：Embabel 内部噪音降为 WARN，业务日志保持 INFO
 # ============================
 logging:
   level:
     root: INFO
-    io.agentscope: DEBUG
+    com.embabel: WARN
     com.xinl.easyclaw: INFO
   charset:
     console: UTF-8
     file: UTF-8
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
-
-# ============================
-# AgentScope 模型配置（多 Provider 支持）
-# ============================
-# model.provider 为当前激活的 Provider，providers 表可配置任意多个。
-# 所有 Provider 均走 OpenAI 兼容协议，AgentScope 扩展无需额外依赖。
-# 所有配置集中在 application.yml；api-key 留空时按 <PROVIDER>_API_KEY 环境变量兜底。
-agentscope:
-  model:
-    provider: ${AGENTSCOPE_PROVIDER:}
-    api-key: ${AGENTSCOPE_API_KEY:}
-    base-url: ${AGENTSCOPE_BASE_URL:}
-    temperature: 0.3
-    stream: true
-  agent:
-    max-iters: 50
-    model-timeout-minutes: 10
-    tool-timeout-minutes: 30
-    shell-timeout-seconds: 300
-    max-shell-output-bytes: 200000
-  providers:
-    deepseek:
-      api-key:
-      base-url:
-      model-name:
-    # 推理模型：支持 thinking（推理过程可视化），速度较慢
-    deepseek-reasoner:
-      api-key:
-      base-url: https://api.deepseek.com/v1
-      model-name: deepseek-reasoner
-    openai:
-      api-key: ${OPENAI_API_KEY:}
-      base-url:
-      model-name: ark-code-latest
-    dashscope:
-      api-key: ${DASHSCOPE_API_KEY:}
-      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      model-name: qwen-plus
-    ollama:
-      api-key: ollama
-      base-url: http://localhost:11434/v1
-      model-name: qwen2.5:7b
-    moonshot:
-      api-key: ${MOONSHOT_API_KEY:}
-      base-url: https://api.moonshot.cn/v1
-      model-name: moonshot-v1-8k
-    zhipu:
-      api-key: ${ZHIPU_API_KEY:}
-      base-url: https://open.bigmodel.cn/api/paas/v4
-      model-name: glm-4-flash
 
 # ============================
 # Workspace 安全配置
@@ -86,8 +79,6 @@ ai:
         - .env
         - .idea
         - .vscode
-        # AgentScope harness 运行时数据目录（<workspace>/<userId>/agents），AI 工具不可访问
-        - default-user
         - agents
       max-file-size: 10485760
 
@@ -109,5 +100,3 @@ spring:
     hibernate:
       ddl-auto: update
     show-sql: true
-
-

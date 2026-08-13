@@ -1,6 +1,5 @@
 package com.xinl.easyclaw.workspace;
 
-import io.agentscope.harness.agent.HarnessAgent;
 import lombok.Builder;
 import lombok.Data;
 
@@ -12,7 +11,8 @@ public class SessionContext {
     private String sessionId;
     private String workspaceId;
     private String title;
-    private HarnessAgent agent;
+    /* TODO: migrate to Embabel */
+    private Object agent;
     private Instant createdAt;
     private Instant lastAccessed;
     @Builder.Default

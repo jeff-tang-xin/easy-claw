@@ -1,5 +1,6 @@
 package com.xinl.easyclaw;
 
+import com.embabel.agent.config.annotation.EnableAgents;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -18,9 +19,9 @@ import java.util.Map;
 /**
  * Easy-Claw AI 助手启动类
  * <p>
- * 基于 AgentScope 2.0 框架构建的可配置 AI 助手系统，
- * 支持多智能体协作、MCP 集成、三级记忆管理。
- * React 前端（Vite 产物打进 static）通过 REST + SSE 与后端交互。
+ * 基于 Embabel 1.0 GOAP 框架构建的可配置 AI 助手系统，
+ * 支持目标驱动规划、强类型领域模型、MCP 集成、三级记忆管理。
+ * React 前端（Vite 产物打进 static）通过 REST + WebSocket 与后端交互。
  * <p>
  * 目录约定：
  * <ul>
@@ -29,6 +30,7 @@ import java.util.Map;
  * </ul>
  */
 @SpringBootApplication
+@EnableAgents
 public class AiAssistantApplication {
 
     private static final Logger log = LoggerFactory.getLogger(AiAssistantApplication.class);
@@ -139,7 +141,7 @@ public class AiAssistantApplication {
                 ╔═══════════════════════════════════════════════════╗
                 ║                                                 ║
                 ║   🤖 Easy-Claw AI 助手启动成功！                   ║
-                ║   🔧 Powered by AgentScope 2.0                   ║
+                ║   🔧 Powered by Embabel 1.0 (GOAP)               ║
                 ║                                                 ║
                 ║   🌐 访问地址: http://%s:%s            ║
                 ║   💾 系统目录: ~/.easyClaw                      ║

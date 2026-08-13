@@ -4,10 +4,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
-import io.agentscope.core.message.ToolResultBlock;
-import io.agentscope.core.model.ToolSchema;
-import io.agentscope.core.tool.AgentTool;
-import io.agentscope.core.tool.ToolCallParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -20,24 +16,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.*;
 
-/**
- * 用户定义的 HTTP REST API 工具，作为 MCP tool 注册给 Agent 调用。
- * <p>
- * 配置 JSON 示例（存于 ToolDefinitionEntity.implementationConfig）：
- * <pre>{@code
- * {
- *   "method": "GET",
- *   "url": "https://api.weather.com/city/{city}",
- *   "headers": {"Authorization": "Bearer xxx"},
- *   "params": {"city": {"in": "path", "required": true, "type": "string", "description": "城市名"}},
- *   "body": {"mode": "json"},
- *   "timeout": 15
- * }
- * }</pre>
- * <p>
- * 参数的 {@code in} 字段：path（URL 模板变量）/ query（URL 查询参数）/ body（JSON body 字段）
- */
-public class HttpAgentTool implements AgentTool {
+public class HttpAgentTool {
 
     private static final Logger log = LoggerFactory.getLogger(HttpAgentTool.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -48,33 +27,29 @@ public class HttpAgentTool implements AgentTool {
 
     private final String name;
     private final String description;
-    private final ToolSchema schema;
+    private final Map<String, Object> parameters;
     private final HttpToolConfig config;
 
+    /* TODO: migrate to Embabel - AgentTool interface removed */
     public HttpAgentTool(ToolDefinitionEntity entity) {
         this.name = entity.getName();
         this.description = entity.getDescription() != null
                 ? entity.getDescription() : "HTTP 工具：" + entity.getName();
         this.config = HttpToolConfig.parse(entity.getImplementationConfig(), null);
-        this.schema = buildSchema();
+        this.parameters = buildSchema();
     }
 
-    /**
-     * 从 MCP HTTP_TOOL 桥接服务构建
-     * <p>
-     * McpServiceEntity.headers 会合并到 config.headers（implementationConfig 里的 headers 优先）
-     */
     public HttpAgentTool(McpServiceEntity entity) {
         this.name = entity.getName();
         this.description = entity.getDescription() != null
                 ? entity.getDescription() : "REST 桥接：" + entity.getName();
         this.config = HttpToolConfig.parse(entity.getImplementationConfig(), entity.getHeaders());
-        this.schema = buildSchema();
+        this.parameters = buildSchema();
     }
 
-    private ToolSchema buildSchema() {
-        Map<String, Object> parameters = new LinkedHashMap<>();
-        parameters.put("type", "object");
+    private Map<String, Object> buildSchema() {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("type", "object");
         Map<String, Object> props = new LinkedHashMap<>();
         List<String> required = new ArrayList<>();
         for (Map.Entry<String, ParamDef> e : config.params.entrySet()) {
@@ -86,36 +61,26 @@ public class HttpAgentTool implements AgentTool {
             props.put(e.getKey(), prop);
             if (p.required) required.add(e.getKey());
         }
-        parameters.put("properties", props);
-        if (!required.isEmpty()) parameters.put("required", required);
-        return ToolSchema.builder()
-                .name(name)
-                .description(description)
-                .parameters(parameters)
-                .build();
+        result.put("properties", props);
+        if (!required.isEmpty()) result.put("required", required);
+        return result;
     }
 
-    @Override public String getName() { return name; }
-    @Override public String getDescription() { return description; }
-    @Override public Map<String, Object> getParameters() { return schema.getParameters(); }
-    @Override public boolean isReadOnly() { return switch (config.method.toUpperCase()) {
-        case "GET", "HEAD", "OPTIONS" -> true;
-        default -> false;
-    }; }
+    public String getName() { return name; }
+    public String getDescription() { return description; }
+    public Map<String, Object> getParameters() { return parameters; }
 
-    @Override
-    public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-        Map<String, Object> input = param.getInput();
-        return reactor.core.publisher.Mono.fromCallable(() -> execute(input))
-                .map(body -> ToolResultBlock.text(body))
-                .onErrorResume(ex -> {
-                    log.error("HTTP 工具执行失败: {}", ex.getMessage());
-                    return reactor.core.publisher.Mono.just(ToolResultBlock.error("HTTP 工具调用失败: " + ex.getMessage()));
-                });
+    /* TODO: migrate to Embabel - was AgentTool.callAsync() */
+    public String execute(Map<String, Object> input) {
+        try {
+            return executeSync(input);
+        } catch (Exception ex) {
+            log.error("HTTP 工具执行失败: {}", ex.getMessage());
+            return "HTTP 工具调用失败: " + ex.getMessage();
+        }
     }
 
-    private String execute(Map<String, Object> args) throws Exception {
-        // 1. 替换 URL 模板变量
+    private String executeSync(Map<String, Object> args) throws Exception {
         String url = config.url;
         Map<String, Object> queryParams = new LinkedHashMap<>();
         Map<String, Object> bodyFields = new LinkedHashMap<>();
@@ -132,7 +97,6 @@ public class HttpAgentTool implements AgentTool {
             }
         }
 
-        // 2. 追加 query string
         if (!queryParams.isEmpty()) {
             StringJoiner sj = new StringJoiner("&");
             for (Map.Entry<String, Object> e : queryParams.entrySet()) {
@@ -142,12 +106,10 @@ public class HttpAgentTool implements AgentTool {
             url = url + (url.contains("?") ? "&" : "?") + sj;
         }
 
-        // 3. 构建请求
         HttpRequest.Builder reqBuilder = HttpRequest.newBuilder()
                 .uri(URI.create(url))
                 .timeout(Duration.ofSeconds(config.timeout));
 
-        // headers
         for (Map.Entry<String, String> h : config.headers.entrySet()) {
             reqBuilder.header(h.getKey(), h.getValue());
         }
@@ -169,7 +131,6 @@ public class HttpAgentTool implements AgentTool {
         log.info("HTTP 工具调用: {} {} ({} params)", method, url, args.size());
         HttpResponse<String> response = DEFAULT_CLIENT.send(request, HttpResponse.BodyHandlers.ofString());
 
-        // 4. 处理响应
         int status = response.statusCode();
         String respBody = response.body();
         String contentType = response.headers().firstValue("Content-Type").orElse("");
@@ -210,8 +171,6 @@ public class HttpAgentTool implements AgentTool {
         };
     }
 
-    // ==================== 配置解析 ====================
-
     static class HttpToolConfig {
         String method = "GET";
         String url = "";
@@ -247,7 +206,6 @@ public class HttpAgentTool implements AgentTool {
                     log.warn("解析 HTTP 工具配置失败: {}", ex.getMessage());
                 }
             }
-            // 合并 McpServiceEntity.headers（implementationConfig 里的同名 header 优先）
             if (extraHeadersJson != null && !extraHeadersJson.isBlank()) {
                 try {
                     Map<String, String> extra = MAPPER.readValue(extraHeadersJson, new TypeReference<>() {});
@@ -262,7 +220,7 @@ public class HttpAgentTool implements AgentTool {
     }
 
     static class ParamDef {
-        String in = "query";      // path | query | body
+        String in = "query";
         String type = "string";
         String description;
         boolean required = false;
