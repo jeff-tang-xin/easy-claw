@@ -1044,8 +1044,9 @@ public class AgentService {
     }
 
     private RuntimeContext buildContext(WorkspaceContext workspace, String sessionId) {
+        String userId = workspace.getUserId() == null ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
         return RuntimeContext.builder()
-                .userId(workspace.getUserId())
+                .userId(userId)
                 .sessionId(sessionId)
                 // 注入 Workspace 上下文给文件工具（沙箱校验），不暴露给 LLM
                 .put(WorkspaceContext.class, workspace)

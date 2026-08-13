@@ -24,6 +24,7 @@ import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.bus.WorkspaceAsyncToolRegistry;
 import io.agentscope.harness.agent.bus.WorkspaceMessageBus;
+import io.agentscope.harness.agent.IsolationScope;
 import io.agentscope.harness.agent.filesystem.AbstractFilesystem;
 import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
@@ -177,6 +178,9 @@ public class WorkspaceManager {
             if (context != null) {
                 workspaceCache.put(workspaceId, context);
             }
+        } else {
+            // 缓存命中也补齐可能被用户删除的模板文件（AGENTS.md/MEMORY.md）
+            ensureWorkspaceFiles(context.getPath().resolve(".easyClaw/agent"));
         }
         if (context != null) {
             context.setLastAccessed(Instant.now());
@@ -249,6 +253,7 @@ public class WorkspaceManager {
         fsSpec.mode(LocalFsMode.ROOTED);
         fsSpec.project(workspacePath);
         fsSpec.projectWritable(true);
+        fsSpec.isolationScope(IsolationScope.GLOBAL);
         AgentScopeProperties.Agent agentCfg = agentScopeProperties.getAgent();
         fsSpec.executeTimeoutSeconds(agentCfg.getShellTimeoutSeconds());
         fsSpec.maxOutputBytes(agentCfg.getMaxShellOutputBytes());
@@ -621,13 +626,111 @@ public class WorkspaceManager {
     }
 
     /**
-     * 按 Easy-Claw 规范初始化 Workspace 结构（Agent 相关内容严格集中）：
-     * <ul>
-     *   <li>{@code .easyClaw/agent/}：harness workspace 根（AGENTS.md / MEMORY.md / skills / subagents / 运行时数据）</li>
-     *   <li>{@code .easyClaw/agent/state/}：Agent 状态存储根（按 userId/sessionId 持久化）</li>
-     * </ul>
-     * 用户指定目录（workspace 根）仅保留项目文件，零污染。
-     * 旧版本 workspace 根的 AGENTS.md/MEMORY.md/skills/subagents 与旧 .agentscope 目录会自动迁移到 .easyClaw/agent。
+     * 补齐 .easyClaw/agent 下的模板文件（仅在不存在时创建，不覆盖用户修改）。
+     * 每次 getWorkspace 缓存命中时也调用，确保用户删掉后能重新生成。
+     */
+    private void ensureWorkspaceFiles(Path agentDir) {
+        try {
+            Files.createDirectories(agentDir);
+            Files.createDirectories(agentDir.resolve("state"));
+            Files.createDirectories(agentDir.resolve("skills"));
+            Files.createDirectories(agentDir.resolve("subagents"));
+
+            Path agentsFile = agentDir.resolve("AGENTS.md");
+            if (!Files.exists(agentsFile)) {
+                Files.writeString(agentsFile, """
+                        # AI 编程助手工作规范
+
+                        ## 角色
+                        你是 Easy-Claw AI 编程助手，当前工作区的主控 Agent。你拥有代码编写、文件操作、网络搜索、MCP 扩展工具等能力，并可调度专项子 Agent 协同完成复杂任务。
+
+                        ## 目标
+                        帮助用户高效完成当前工作区的编程与文件任务，包括但不限于：功能开发、Bug 修复、代码重构、代码审查、项目配置、文件批量处理、资料检索与分析。
+
+                        ## 工作空间（最重要）
+                        - 你的一切文件操作都限制在当前工作区内（用户指定的项目目录）
+                        - 所有路径基于工作区根目录，使用相对路径（如 src/main/...），禁止访问工作区之外的任何路径
+                        - 系统目录 `.easyClaw/` 存放 Agent 配置与运行时数据，**不要修改或删除**，包括：
+                          - `.easyClaw/agent/subagents/` — 子 Agent 声明文件
+                          - `.easyClaw/agent/skills/` — 技能定义与操作指南
+                          - `.easyClaw/agent/state/` — 会话状态存储
+                        - 优先使用工作区内已有工具完成任务，避免引入不必要的外部依赖
+
+                        ## 子 Agent 编排
+                        你可以调度专项子 Agent 在同一工作区内协同工作，当前可用的子 Agent 及其职责由系统动态注入。调度原则：
+                        - 当任务适合交给专项子 Agent 时（如大量代码审查、深度研究分析），优先调度子 Agent 协同完成，而不是自己硬做
+                        - 调度子 Agent 时给出明确的任务目标和输出要求，而不是模糊指令
+                        - 同一子 Agent 最多调度 2 次；若子 Agent 无法完成，请自己直接处理，禁止重复调度同一子 Agent
+                        - 子 Agent 返回结果后，你负责整合、补充和最终交付
+
+                        ## 行为准则
+                        - **专业准确** — 回答有条理，代码可运行，不确定时坦诚说明，不编造信息
+                        - **理解先行** — 修改代码前先阅读相关文件，理清上下文和依赖关系，遵循项目已有的命名风格和编码约定
+                        - **小步验证** — 每次聚焦一个明确目标，修改后及时验证（编译、测试、lint），确认无副作用再继续
+                        - **文件安全** — 批量操作前先列出影响范围；编辑文件保留原有缩进、换行符和编码；大文件使用分页读取
+                        - **主动沟通** — 遇到错误先自行排查（读报错、看日志、搜代码），无法解决再询问用户；主动识别用户意图，在合理范围内提供额外价值
+                        - **Shell 规范** — Windows 环境使用兼容语法（cmd /c），长命令注意超时，优先用内置工具快速定位
+                        """);
+                log.info("已生成 AGENTS.md: {}", agentsFile);
+            }
+
+            Path memoryFile = agentDir.resolve("MEMORY.md");
+            if (!Files.exists(memoryFile)) {
+                Files.writeString(memoryFile, """
+                        # 工作区记忆
+
+                        > 本文件由 Agent 自动维护，用于沉淀跨会话的重要信息。
+                        > 仅在发现有长期价值的内容时更新，不要记录临时或一次性信息。
+
+                        ## 项目概览
+                        - 项目类型与技术栈：
+                        - 构建工具与命令：
+                        - 目录结构说明：
+
+                        ## 代码约定
+                        - 命名风格：
+                        - 编码规范：
+                        - 特殊模式或惯用写法：
+
+                        ## 用户偏好
+                        - 语言与输出风格：
+                        - 工具使用习惯：
+                        - 禁忌或特殊要求：
+
+                        ## 关键决策记录
+                        | 日期 | 决策内容 | 原因/背景 |
+                        |------|---------|----------|
+                        |      |         |          |
+
+                        ## 已知问题与 TODO
+                        - [ ] 
+                        """);
+                log.info("已生成 MEMORY.md: {}", memoryFile);
+            }
+
+            Path reviewerFile = agentDir.resolve("subagents").resolve("reviewer.md");
+            if (!Files.exists(reviewerFile)) {
+                Files.writeString(reviewerFile, """
+                        ---
+                        description: 代码审查专家，负责检查代码质量、发现 Bug 与改进建议
+                        steps: 8
+                        tools: [read_file, list_directory, search_files]
+                        ---
+                        你是一名资深的代码审查专家。收到任务后：
+                        1. 先阅读相关文件，理解上下文
+                        2. 逐段检查代码质量、潜在 Bug、安全隐患
+                        3. 给出带文件与行号的改进建议
+                        4. 结论用中文，简洁清晰
+                        """);
+            }
+        } catch (IOException e) {
+            log.warn("补齐 Workspace 模板文件失败: {}", agentDir, e);
+        }
+    }
+
+    /**
+     * 按 Easy-Claw 规范初始化 Workspace 结构（仅首次创建或迁移时调用）：
+     * 迁移旧目录 → 创建基础目录 → 补齐模板文件 → 清理遗留目录。
      */
     private void initWorkspaceStructure(Path workspacePath, Path easyClawDir) {
         try {
@@ -666,70 +769,8 @@ public class WorkspaceManager {
             migrateDirIfAbsent(workspacePath.resolve("skills"), agentDir.resolve("skills"));
             migrateDirIfAbsent(workspacePath.resolve("subagents"), agentDir.resolve("subagents"));
 
-            // 示例子 Agent 声明（仅首次创建，用户可修改）
-            Path reviewerFile = agentDir.resolve("subagents").resolve("reviewer.md");
-            if (!Files.exists(reviewerFile)) {
-                Files.writeString(reviewerFile, """
-                        ---
-                        description: 代码审查专家，负责检查代码质量、发现 Bug 与改进建议
-                        steps: 8
-                        tools: [read_file, list_directory, search_files]
-                        ---
-                        你是一名资深的代码审查专家。收到任务后：
-                        1. 先阅读相关文件，理解上下文
-                        2. 逐段检查代码质量、潜在 Bug、安全隐患
-                        3. 给出带文件与行号的改进建议
-                        4. 结论用中文，简洁清晰
-                        """);
-            }
-
-            // AGENTS.md：Agent 人格定义（harness 从 workspace 根=.easyClaw/agent 自动加载，仅在不存在时创建）
-            Path agentsFile = agentDir.resolve("AGENTS.md");
-            if (!Files.exists(agentsFile)) {
-                Files.writeString(agentsFile, """
-                        # Agent 人格定义
-
-                        ## 角色
-                        你是当前工作区的 AI 编程助手（主控 Agent）
-
-                        ## 目标
-                        帮助用户高效完成当前工作区的编程与文件任务
-
-                        ## 工作空间（最重要）
-                        - 你的一切文件操作都限制在当前工作区内（用户指定的工作目录）
-                        - 所有路径基于工作区根目录，禁止访问工作区之外的任何路径
-                        - 你的配置与能力集中在 .easyClaw/agent/ 下（skills/ 操作指南、subagents/ 子 Agent 声明），由系统管理，不要修改
-
-                        ## 子 Agent 编排
-                        你有多个子 Agent 可以调度，它们与你在同一工作区内工作：
-                        - reviewer：代码审查专家（检查代码质量、发现 Bug、改进建议）
-                        当任务适合交给专项子 Agent 时，优先调度子 Agent 协同完成，而不是自己硬做。
-                        注意：同一子 Agent 最多调度 2 次；若子 Agent 无法完成，请自己直接处理，禁止重复调度同一子 Agent。
-
-                        ## 行为准则
-                        - 保持专业、友好
-                        - 主动提供帮助，不确定时主动询问
-                        - 修改代码前先阅读相关文件，理解上下文
-                        - 优先使用工作区内已有工具（文件读写、代码分析、网络搜索）
-                        """);
-            }
-
-            // MEMORY.md：工作区长期记忆（harness 自动加载）
-            Path memoryFile = agentDir.resolve("MEMORY.md");
-            if (!Files.exists(memoryFile)) {
-                Files.writeString(memoryFile, """
-                        # 工作区记忆
-
-                        ## 项目信息
-                        （自动沉淀）
-
-                        ## 用户偏好
-                        （自动沉淀）
-
-                        ## 历史决策
-                        （自动沉淀）
-                        """);
-            }
+            // 补齐模板文件（AGENTS.md/MEMORY.md/reviewer.md）
+            ensureWorkspaceFiles(agentDir);
 
             // 清理 harness 旧版在 workspace 根生成的用户目录（default-user）
             cleanupLegacyDirs(workspacePath);
