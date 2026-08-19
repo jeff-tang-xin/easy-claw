@@ -30,7 +30,7 @@ public class MemoryExtractor {
     /**
      * 从对话轮次中提取记忆命题
      */
-    public int extractFromConversation(String userId, String userMessage, String aiResponse) {
+    public int extractFromConversation(String userId, String workspaceId, String userMessage, String aiResponse) {
         if (!properties.isExtractionEnabled()) {
             return 0;
         }
@@ -38,15 +38,15 @@ public class MemoryExtractor {
         int extracted = 0;
 
         // 从用户消息中提取意图与偏好
-        extracted += extractFromUserMessage(userId, userMessage);
+        extracted += extractFromUserMessage(userId, workspaceId, userMessage);
 
         // 从 AI 响应中提取事实
-        extracted += extractFromAIResponse(userId, aiResponse);
+        extracted += extractFromAIResponse(userId, workspaceId, aiResponse);
 
         return extracted;
     }
 
-    private int extractFromUserMessage(String userId, String message) {
+    private int extractFromUserMessage(String userId, String workspaceId, String message) {
         int count = 0;
 
         if (message == null || message.isBlank()) {
@@ -55,21 +55,21 @@ public class MemoryExtractor {
 
         // 提取偏好: "我喜欢"、"我倾向于"、"我希望"
         if (containsAny(message, "喜欢", "倾向于", "偏好", "偏爱", "更爱")) {
-            memoryService.remember(userId, message, PropositionType.PREFERENCE, 0.9,
+            memoryService.remember(userId, workspaceId, message, PropositionType.PREFERENCE, 0.9,
                     List.of("preference"), List.of("user-preference"), null);
             count++;
         }
 
         // 提取意图: "我想"、"我要"、"我打算"、"帮我"
         if (containsAny(message, "我想", "我要", "我打算", "帮我", "需要", "想让")) {
-            memoryService.remember(userId, message, PropositionType.INTENT, 0.85,
+            memoryService.remember(userId, workspaceId, message, PropositionType.INTENT, 0.85,
                     List.of("intent"), List.of("user-intent"), null);
             count++;
         }
 
         // 提取事实陈述
         if (containsAny(message, "是", "有", "在", "叫", "用")) {
-            memoryService.remember(userId, message, PropositionType.FACT, 0.7,
+            memoryService.remember(userId, workspaceId, message, PropositionType.FACT, 0.7,
                     null, List.of("user-fact"), null);
             count++;
         }
@@ -77,13 +77,13 @@ public class MemoryExtractor {
         return count;
     }
 
-    private int extractFromAIResponse(String userId, String response) {
+    private int extractFromAIResponse(String userId, String workspaceId, String response) {
         if (response == null || response.isBlank()) {
             return 0;
         }
 
         // 提取 AI 确认的事实
-        memoryService.remember(userId, response, PropositionType.FACT, 0.6,
+        memoryService.remember(userId, workspaceId, response, PropositionType.FACT, 0.6,
                 null, List.of("ai-response"), null);
 
         return 1;

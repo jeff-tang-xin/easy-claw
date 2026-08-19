@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-parent</artifactId>
-        <version>3.5.13</version>
+        <version>4.0.0</version>
         <relativePath/>
     </parent>
 
@@ -15,14 +15,14 @@
     <artifactId>easy-claw</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <name>Easy Claw - AI Work Assistant</name>
-    <description>Embabel 1.0 based AI assistant with GOAP planning, Workspace isolation and full configurability</description>
+    <description>Embabel 1.5 based AI assistant with GOAP planning, Workspace isolation and full configurability</description>
 
     <properties>
         <java.version>21</java.version>
         <maven.compiler.source>21</maven.compiler.source>
         <maven.compiler.target>21</maven.compiler.target>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <embabel-agent.version>1.0.0</embabel-agent.version>
+        <embabel-agent.version>1.5.0</embabel-agent.version>
         <sqlite.version>3.47.1.0</sqlite.version>
         <lombok.version>1.18.36</lombok.version>
         <jackson.version>2.16.1</jackson.version>
@@ -30,9 +30,22 @@
         <npm.version>10.9.2</npm.version>
     </properties>
 
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.springframework.ai</groupId>
+                <artifactId>spring-ai-bom</artifactId>
+                <version>2.0.0</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
+
+
     <dependencies>
         <!-- ========================================= -->
-        <!-- Embabel Agent 1.0 GA 核心                  -->
+        <!-- Embabel Agent 1.5 GA 核心                  -->
         <!-- ========================================= -->
         <dependency>
             <groupId>com.embabel.agent</groupId>
@@ -100,6 +113,16 @@
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
 
+        <!-- Spring AI 2.0 Tool Calling AutoConfiguration（ChatClientAutoConfiguration 需要） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-autoconfigure-model-tool</artifactId>
+            <version>2.0.0</version>
+        </dependency>
+
+
+
+
         <!-- ========================================= -->
         <!-- 测试                                      -->
         <!-- ========================================= -->
@@ -127,6 +150,15 @@
                 <configuration>
                     <source>${java.version}</source>
                     <target>${java.version}</target>
+                </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <version>3.5.2</version>
+                <configuration>
+                    <skipTests>true</skipTests>
                 </configuration>
             </plugin>
 

@@ -1,6 +1,5 @@
 package com.xinl.easyclaw;
 
-import com.embabel.agent.config.annotation.EnableAgents;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,7 +29,6 @@ import java.util.Map;
  * </ul>
  */
 @SpringBootApplication
-@EnableAgents
 public class AiAssistantApplication {
 
     private static final Logger log = LoggerFactory.getLogger(AiAssistantApplication.class);
@@ -136,8 +134,13 @@ public class AiAssistantApplication {
     private static void printBanner(Environment env) {
         String port = env.getProperty("server.port", "8080");
         String address = env.getProperty("server.address", "localhost");
+
+        String embabelBaseUrl = env.getProperty("embabel.agent.platform.models.openai.base-url", "未设置");
+        String embabelModel = env.getProperty("embabel.models.default-llm", "未设置");
+        String workspaceRoot = env.getProperty("easy-claw.workspace.root", "未设置");
+
         System.out.printf("""
-                
+
                 ╔═══════════════════════════════════════════════════╗
                 ║                                                 ║
                 ║   🤖 Easy-Claw AI 助手启动成功！                   ║
@@ -145,17 +148,16 @@ public class AiAssistantApplication {
                 ║                                                 ║
                 ║   🌐 访问地址: http://%s:%s            ║
                 ║   💾 系统目录: ~/.easyClaw                      ║
-                ║   📁 工作区: 用户指定目录(.easyClaw/agent 内)  ║
+                ║   📁 默认 Workspace: %-26s ║
                 ║                                                 ║
-                ║   功能模块:                                      ║
-                ║   ├── 💬 智能对话 (多 Agent 编排 + 流式输出)     ║
-                ║   ├── 📚 Skills 与子 Agent 管理                  ║
-                ║   ├── 🎭 角色管理 / 🔧 工具管理                  ║
-                ║   ├── 🔌 MCP 服务 / ⚙️ 系统设置                  ║
-                ║   └── 🧠 上下文压缩 + 会话记忆保留               ║
+                ║   📦 Embabel Agent 模型:                          ║
+                ║       base-url: %-33s ║
+                ║       model:    %-33s ║
                 ║                                                 ║
                 ╚═══════════════════════════════════════════════════╝
-                %n""", address, port);
+                %n""",
+                address, port, workspaceRoot,
+                embabelBaseUrl, embabelModel);
     }
 
     /**

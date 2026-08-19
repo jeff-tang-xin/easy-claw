@@ -51,6 +51,7 @@ public class MemoryServiceImpl implements MemoryService {
     @Transactional
     public PropositionEntity remember(
             String userId,
+            String workspaceId,
             String content,
             PropositionType type,
             Double confidence,
@@ -60,6 +61,7 @@ public class MemoryServiceImpl implements MemoryService {
     ) {
         PropositionEntity entity = PropositionEntity.builder()
                 .userId(userId)
+                .workspaceId(workspaceId)
                 .content(content)
                 .type(type)
                 .confidence(confidence)
@@ -72,8 +74,10 @@ public class MemoryServiceImpl implements MemoryService {
 
     @Override
     @Transactional(readOnly = true)
-    public List<PropositionEntity> recall(String userId, String queryText, List<String> topics) {
-        List<PropositionEntity> candidates = repository.findByUserId(userId);
+    public List<PropositionEntity> recall(String userId, String workspaceId, String queryText, List<String> topics) {
+        List<PropositionEntity> candidates = repository.findByUserId(userId).stream()
+                .filter(p -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(p.getWorkspaceId()))
+                .toList();
         if (candidates.isEmpty()) {
             return List.of();
         }
@@ -106,12 +110,14 @@ public class MemoryServiceImpl implements MemoryService {
 
     @Override
     @Transactional
-    public int forget(String userId) {
+    public int forget(String userId, String workspaceId) {
         Instant threshold = Instant.now().minus(properties.getForgetDays(), ChronoUnit.DAYS);
         List<PropositionEntity> stale = repository
                 .findByUserIdAndLastAccessedBeforeAndReferenceCountLessThan(
                         userId, threshold, properties.getMinReferenceCount()
-                );
+                ).stream()
+                .filter(p -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(p.getWorkspaceId()))
+                .toList();
         if (stale.isEmpty()) {
             return 0;
         }
@@ -122,20 +128,26 @@ public class MemoryServiceImpl implements MemoryService {
 
     @Override
     @Transactional(readOnly = true)
-    public long count(String userId) {
-        return repository.countByUserId(userId);
+    public long count(String userId, String workspaceId) {
+        return repository.findByUserId(userId).stream()
+                .filter(p -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(p.getWorkspaceId()))
+                .count();
     }
 
     @Override
     @Transactional(readOnly = true)
-    public List<PropositionEntity> findRecent(String userId, Instant since) {
-        return repository.findRecentByUserId(userId, since);
+    public List<PropositionEntity> findRecent(String userId, String workspaceId, Instant since) {
+        return repository.findRecentByUserId(userId, since).stream()
+                .filter(p -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(p.getWorkspaceId()))
+                .toList();
     }
 
     @Override
     @Transactional(readOnly = true)
-    public List<PropositionEntity> findByUserId(String userId) {
-        return repository.findByUserId(userId);
+    public List<PropositionEntity> findByUserId(String userId, String workspaceId) {
+        return repository.findByUserId(userId).stream()
+                .filter(p -> workspaceId == null || workspaceId.isBlank() || workspaceId.equals(p.getWorkspaceId()))
+                .toList();
     }
 
     @Override

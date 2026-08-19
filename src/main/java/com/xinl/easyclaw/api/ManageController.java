@@ -3,6 +3,8 @@ package com.xinl.easyclaw.api;
 import com.xinl.easyclaw.config.SettingsService;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
+import com.xinl.easyclaw.mcp.entity.McpToolEntity;
+import com.xinl.easyclaw.mcp.repository.McpToolRepository;
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
 import com.xinl.easyclaw.memory.entity.PropositionEntity;
 import com.xinl.easyclaw.memory.service.MemoryService;
@@ -38,6 +40,7 @@ public class ManageController {
     private final ToolManagementService toolService;
     private final ToolRegistryService toolRegistryService;
     private final McpConnectionService mcpService;
+    private final McpToolRepository mcpToolRepo;
     private final MemoryService memoryService;
     private final WorkspaceManager workspaceManager;
     private final SettingsService settingsService;
@@ -46,6 +49,7 @@ public class ManageController {
                             ToolManagementService toolService,
                             ToolRegistryService toolRegistryService,
                             McpConnectionService mcpService,
+                            McpToolRepository mcpToolRepo,
                             MemoryService memoryService,
                             WorkspaceManager workspaceManager,
                             SettingsService settingsService) {
@@ -53,6 +57,7 @@ public class ManageController {
         this.toolService = toolService;
         this.toolRegistryService = toolRegistryService;
         this.mcpService = mcpService;
+        this.mcpToolRepo = mcpToolRepo;
         this.memoryService = memoryService;
         this.workspaceManager = workspaceManager;
         this.settingsService = settingsService;
@@ -351,7 +356,66 @@ public class ManageController {
                                              @RequestBody(required = false) CopyFromTemplateRequest req) {
         String scope = (req != null && req.scope != null) ? req.scope : "GLOBAL";
         String workspaceId = req != null ? req.workspaceId : null;
-        return mcpService.copyFromTemplate(id, scope, workspaceId);
+        McpServiceEntity copied = mcpService.copyFromTemplate(id, scope, workspaceId);
+        // 级联复制 McpTool 子记录
+        try {
+            List<McpToolEntity> tools = mcpToolRepo.findByServiceIdOrderBySortOrderAsc(id);
+            for (McpToolEntity t : tools) {
+                McpToolEntity newTool = McpToolEntity.builder()
+                        .service(copied)
+                        .toolName(t.getToolName())
+                        .displayName(t.getDisplayName())
+                        .description(t.getDescription())
+                        .toolConfig(t.getToolConfig())
+                        .enabled(t.getEnabled())
+                        .sortOrder(t.getSortOrder())
+                        .build();
+                mcpToolRepo.save(newTool);
+            }
+        } catch (Exception e) {
+            // 模板可能还没有 tools，忽略
+        }
+        return copied;
+    }
+
+    // ----- McpTool 子端点 -----
+
+    @GetMapping("/mcp/{serviceId}/tools")
+    public List<McpToolEntity> listTools(@PathVariable Long serviceId) {
+        return mcpToolRepo.findByServiceIdOrderBySortOrderAsc(serviceId);
+    }
+
+    @PostMapping("/mcp/{serviceId}/tools")
+    public McpToolEntity createTool(@PathVariable Long serviceId, @RequestBody McpToolEntity entity) {
+        McpServiceEntity svc = mcpService.findById(serviceId).orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: " + serviceId));
+        entity.setId(null);
+        entity.setService(svc);
+        McpToolEntity saved = mcpToolRepo.save(entity);
+        mcpService.notifyChanged();
+        return saved;
+    }
+
+    @PutMapping("/mcp/tools/{toolId}")
+    public ResponseEntity<?> updateTool(@PathVariable Long toolId, @RequestBody McpToolEntity entity) {
+        return mcpToolRepo.findById(toolId).map(existing -> {
+            existing.setToolName(entity.getToolName());
+            existing.setDisplayName(entity.getDisplayName());
+            existing.setDescription(entity.getDescription());
+            existing.setToolConfig(entity.getToolConfig());
+            existing.setEnabled(entity.getEnabled());
+            existing.setSortOrder(entity.getSortOrder());
+            mcpToolRepo.save(existing);
+            mcpService.notifyChanged();
+            return ResponseEntity.ok(existing);
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/mcp/tools/{toolId}")
+    public ResponseEntity<?> deleteTool(@PathVariable Long toolId) {
+        if (!mcpToolRepo.existsById(toolId)) return ResponseEntity.notFound().build();
+        mcpToolRepo.deleteById(toolId);
+        mcpService.notifyChanged();
+        return ResponseEntity.noContent().build();
     }
 
     // ================= 设置（YAML 原文编辑器） =================
@@ -391,8 +455,9 @@ public class ManageController {
     // ================= 记忆 =================
 
     @GetMapping("/memory")
-    public List<PropositionEntity> memory(@RequestParam String userId) {
-        return memoryService.findByUserId(userId);
+    public List<PropositionEntity> memory(@RequestParam String userId,
+                                          @RequestParam(required = false) String workspaceId) {
+        return memoryService.findByUserId(userId, workspaceId);
     }
 
     @DeleteMapping("/memory/{id}")

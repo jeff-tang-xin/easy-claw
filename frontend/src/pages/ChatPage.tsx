@@ -3,16 +3,21 @@ import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
-import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem} from '../chatStore';
+import type {AgentGroup, AttachmentPayload, ChatMessage, ExecStatus, ExecutionLogEntry, LlmEntry, PendingConfirm, PlanState, PlanStep, QueueItem, ToolEntry, ActionEntry, SubagentEntry, PlanValidation} from '../chatStore';
 import {
     chatKey,
     getActiveSession,
     getChatSession,
+    groupByProcess,
+    newMessageId,
     setActiveSession,
     updateChatSession,
     useChatSession
 } from '../chatStore';
 import {getChatSocket, subscribeChatSocket} from '../chatSocket';
+import {PlanProgressBar} from '../components/PlanProgressBar';
+import {ExecutionStream} from '../components/ExecutionStream';
+import {LiveActions} from '../components/LiveActions';
 
 // ============ 类型 ============
 interface Workspace { workspaceId: string; name: string; agentName?: string; path: string; description: string; }
@@ -82,11 +87,81 @@ function formatSize(bytes: number): string {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
 }
 
+/**
+ * 错误信息友好化：把技术错误翻译成用户能懂的话
+ * 返回 { friendly: 友好文案, isTransformed: 是否做了转换 }
+ */
+function friendlyError(error: string): string {
+  if (!error) return '';
+  const e = error.toLowerCase();
+  if (e.includes('network') || e.includes('failed to fetch') || e.includes('连接')) {
+    return '🌐 网络连接失败，请检查网络后重试';
+  }
+  if (e.includes('timeout') || e.includes('超时')) {
+    return '⏰ 请求超时，请稍后再试';
+  }
+  if (e.includes('401') || e.includes('403') || e.includes('unauthorized') || e.includes('权限')) {
+    return '🔐 权限不足，请检查设置后重试';
+  }
+  if (e.includes('404') || e.includes('not found')) {
+    return '🔍 资源不存在，可能已被删除或路径错误';
+  }
+  if (e.includes('500') || e.includes('internal server error') || e.includes('nullpointer') || e.includes('exception')) {
+    return '⚙️ 服务端出现了一点小问题，请稍后再试';
+  }
+  if (e.includes('rate limit') || e.includes('限流') || e.includes('429')) {
+    return '⏳ 请求太频繁了，请稍等片刻再试';
+  }
+  return error;
+}
+
 const mdCache = new Map<string, string>();
 const mdCacheMax = 256;
 
-// 收到这些事件说明 Agent 正在输出，可用于重连后自动恢复 running 状态
-const DATA_EVENT_TYPES = new Set(['text', 'reasoning', 'tool', 'tool_args', 'tool_result', 'subagent', 'subagent_text']);
+// ============ 事件路由表 ============
+// 明确每个事件类型应该去往哪个视图
+// - chat:    仅进入聊天消息列表（reduceMessage 处理）
+// - exec:    仅进入执行流瀑布流（execEvents 收集）
+// - both:    两个视图都要
+// - control: 仅控制逻辑处理，不进入任何视图
+const EVENT_ROUTE: Record<string, 'chat' | 'exec' | 'both' | 'control'> = {
+  // 对话输出 → 两个视图都要
+  text: 'both',
+  reasoning: 'both',
+  // 工具调用 → 聊天视图 + 执行流
+  tool: 'chat',
+  tool_args: 'chat',
+  tool_result: 'chat',
+  // 子 Agent → 聊天视图（简化显示）
+  subagent: 'chat',
+  subagent_text: 'chat',
+  // 执行流专属事件（瀑布流展示）
+  plan: 'exec',
+  step: 'exec',
+  tool_call: 'exec',
+  llm_call: 'exec',
+  agent_action: 'exec',
+  subagent_lifecycle: 'exec',
+  llm_thinking: 'exec',
+  progress_update: 'exec',
+  goal_achieved: 'exec',
+  tool_loop: 'exec',
+  state_transition: 'exec',
+  replan_requested: 'exec',
+  llm_invocation: 'exec',
+  // 控制事件
+  confirm: 'control',
+  error: 'control',
+  pending_info: 'control',
+  tool_end: 'control',
+  subagent_end: 'control',
+  subagent_failed: 'control',
+};
+
+// 这些事件说明 Agent 正在输出，可用于重连后自动恢复 running 状态
+const DATA_EVENT_TYPES = new Set([
+  ...Object.keys(EVENT_ROUTE).filter(k => EVENT_ROUTE[k] !== 'control'),
+]);
 function md(raw: string): string {
   if (!raw) return '';
   const cached = mdCache.get(raw);
@@ -118,7 +193,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         }
         next[lastIdx] = { ...last, segments: segs };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'text', content: evt.content }] });
+        next.push({ id: newMessageId(), role: 'ai', segments: [{ type: 'text', content: evt.content }] });
       }
       break;
     }
@@ -133,7 +208,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         }
         next[lastIdx] = { ...last, segments: segs };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'reasoning', content: evt.content }] });
+        next.push({ id: newMessageId(), role: 'ai', segments: [{ type: 'reasoning', content: evt.content }] });
       }
       break;
     }
@@ -148,7 +223,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         }
         next[lastIdx] = { ...last, segments: segs };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'tool', content: `── ${evt.content} ──` }] });
+        next.push({ id: newMessageId(), role: 'ai', segments: [{ type: 'tool', content: `── ${evt.content} ──` }] });
       }
       break;
     }
@@ -179,7 +254,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         const segs = [...last.segments, { type: 'subagent', name: evt.content, content: '' }];
         next[lastIdx] = { ...last, segments: segs };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'subagent', name: evt.content, content: '' }] });
+        next.push({ id: newMessageId(), role: 'ai', segments: [{ type: 'subagent', name: evt.content, content: '' }] });
       }
       break;
     }
@@ -221,55 +296,91 @@ function FoldBlock({ title, children, className, loading }: {
   );
 }
 
-const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, activeTools, activeSubagents }: {
-  msg: ChatMessage; isStreaming?: boolean; agentLabel?: string;
-  activeTools: string[]; activeSubagents: string[];
+const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, running }: {
+  msg: ChatMessage; isStreaming?: boolean; agentLabel?: string; running?: boolean;
 }) {
-  const toolIdxRef = useRef(0);
-  toolIdxRef.current = 0;
   const label = agentLabel || 'AI';
-  // 判断某个 tool segment 是否正在执行：检查 activeTools 中是否包含该工具名
-  const isToolActive = (segContent: string): boolean => {
-    for (const t of activeTools) {
-      if (segContent.includes(t)) return true;
-    }
-    return false;
-  };
-  const isSubagentActive = (name: string): boolean => activeSubagents.includes(name);
+  const hasText = msg.segments.some(s => s.type === 'text' && s.content.trim());
+  const hasFlow = !!msg.plan || (!!msg.executionLog && msg.executionLog.length > 0);
+  const hasRunningEntries = running && msg.executionLog && msg.executionLog.some(e => e.status === 'running');
+
   return (
     <div className="chat-block ai">
-      <div className="chat-meta">🤖 {label}</div>
       <div className="chat-row">
         <div className="chat-avatar">🤖</div>
-        <div className="chat-bubble">
-          {msg.segments.map((seg, i) => {
-            switch (seg.type) {
-              case 'text':
-                return isStreaming ? (
-                  <div key={i} className="md-content-wrap">
-                    <div className="md-content" style={{ whiteSpace: 'pre-wrap' }}>{seg.content}</div>
-                    {i === msg.segments.length - 1 ? <span className="typing-cursor" /> : null}
-                  </div>
-                ) : (
-                  <div key={i} className="md-content-wrap">
-                    <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content) }} />
-                  </div>
-                );
-              case 'reasoning':
-                return <FoldBlock key={i} title="🧠 思考过程" className="reasoning">{seg.content}</FoldBlock>;
-              case 'tool': {
-                toolIdxRef.current += 1;
-                const loading = isToolActive(seg.content);
-                return <FoldBlock key={i} title={`🔧 工具调用 #${toolIdxRef.current}`} loading={loading}>{seg.content}</FoldBlock>;
-              }
-              case 'subagent': {
-                const loading = isSubagentActive(seg.name || '');
-                return <FoldBlock key={i} title={`🤖 子 Agent [${seg.name}]`} className="subagent" loading={loading}>{seg.content}</FoldBlock>;
-              }
-              default:
-                return null;
-            }
-          })}
+        <div className="chat-bubble-wrap">
+          <div className="chat-bubble-header">
+            <span className="chat-bubble-name">{label}</span>
+            {running && <span className="chat-bubble-status"><span className="spinner-tiny" />执行中</span>}
+          </div>
+          <div className="chat-bubble">
+            {/* 🔴 醒目的 Plan 进度条 */}
+              <details
+                className="plan-details"
+                open={running || (msg.plan?.steps?.some(s => s.status === 'running' || s.status === 'pending') ?? false)}
+              >
+                <summary>🎯 执行计划</summary>
+            {msg.plan && msg.plan.steps.length > 0 && (
+              <PlanProgressBar plan={msg.plan} />
+            )}
+
+            {/* 🔴 实时动作反馈（运行中显示，消除黑盒感） */}
+            {running && msg.executionLog && msg.executionLog.length > 0 && (
+              <LiveActions entries={msg.executionLog!} running={running} />
+            )}
+
+            {/* 详细执行日志（默认折叠，用户主动展开查看） */}
+            {hasFlow && (
+              <details className="exec-details">
+                <summary className="exec-details-summary">
+                  🔍 查看详细执行日志
+                  <span className="exec-details-stats">
+                    {msg.executionLog?.length || 0} 条记录
+                  </span>
+                </summary>
+                <AgentPanels plan={msg.plan} entries={msg.executionLog || []} running={!!running} />
+              </details>
+            )}
+
+              {/* 🧠 LLM 思考过程 */}
+              {msg.segments.filter(s => s.type === 'reasoning' && s.content.trim()).map((seg, i) => (
+                <>
+
+                <details key={i} className="reasoning-block" open={isStreaming}>
+                  <summary>🧠 LLM 思考过程</summary>
+                  <div className="reasoning-content">{seg.content}</div>
+                </details>
+
+              {/* 🤖 子 Agent 输出内容 */}
+              {msg.segments.filter(s => s.type === 'subagent' && s.content.trim()).map((seg, i) => (
+                <div key={i} className="subagent-output">
+                  <div className="subagent-output-title">🤖 {seg.name || '子 Agent'}</div>
+                  <div className="subagent-output-content">{seg.content}</div>
+                </div>
+              ))}
+                </>
+
+              ))}
+
+            {msg.segments.filter(s => s.type === 'text').map((seg, i) => (
+              isStreaming ? (
+                <div key={i} className="md-content-wrap">
+                  <div className="md-content" style={{ whiteSpace: 'pre-wrap' }}>{seg.content}</div>
+                  {i === msg.segments.filter(s => s.type === 'text').length - 1 ? <span className="typing-cursor" /> : null}
+                </div>
+              ) : (
+                <div key={i} className="md-content-wrap">
+                  <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content) }} />
+                </div>
+              )
+            ))}
+            {/* 没有任何内容也没有执行信息时，才显示极简思考态 */}
+            {!hasFlow && !hasText && (
+              <div className="ai-thinking">🧠 思考中…</div>
+            )}
+            </details>
+
+          </div>
         </div>
       </div>
     </div>
@@ -277,33 +388,224 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, active
 }, (prev, next) => {
   if (prev.isStreaming !== next.isStreaming) return false;
   if (prev.agentLabel !== next.agentLabel) return false;
-  if (prev.activeTools.length !== next.activeTools.length) return false;
-  if (prev.activeSubagents.length !== next.activeSubagents.length) return false;
+  if (prev.running !== next.running) return false;
   if (prev.msg.segments.length !== next.msg.segments.length) return false;
   for (let i = 0; i < prev.msg.segments.length; i++) {
     const a = prev.msg.segments[i], b = next.msg.segments[i];
-    if (a.type !== b.type || a.content !== b.content || a.name !== b.name) return false;
+    if (a.type !== b.type || a.content !== b.content) return false;
+  }
+  // executionLog 长度或内容变化（tool 从 running→done 等）都要重渲染
+  const prevLog = prev.msg.executionLog;
+  const nextLog = next.msg.executionLog;
+  if ((prevLog?.length || 0) !== (nextLog?.length || 0)) return false;
+  if (prevLog && nextLog) {
+    for (let i = 0; i < prevLog.length; i++) {
+      if (prevLog[i].status !== nextLog[i].status) return false;
+      // tool 名称变化也要重渲染（running 时 tool 名可能尚未可知）
+      if ('tool' in prevLog[i] && 'tool' in nextLog[i] && (prevLog[i] as any).tool !== (nextLog[i] as any).tool) return false;
+    }
+  }
+  // plan 步骤变化
+  const prevPlan = prev.msg.plan;
+  const nextPlan = next.msg.plan;
+  if ((prevPlan?.steps.length || 0) !== (nextPlan?.steps.length || 0)) return false;
+  if (prevPlan && nextPlan) {
+    for (let i = 0; i < prevPlan.steps.length; i++) {
+      if (prevPlan.steps[i].status !== nextPlan.steps[i].status) return false;
+      if (prevPlan.steps[i].name !== nextPlan.steps[i].name) return false;
+    }
+    if (prevPlan.goal !== nextPlan.goal) return false;
   }
   return true;
 });
 
+// ==================== 执行时间线（合并 Plan + ExecutionLog） ====================
+
+function formatDuration(ms?: number): string {
+  if (ms == null) return '';
+  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`;
+  return `${ms}ms`;
+}
+
+function statusIcon(s: string): string {
+  if (s === 'running') return '◉';
+  if (s === 'done') return '✓';
+  if (s === 'failed') return '✕';
+  return '·';
+}
+
+function statusText(s: string): string {
+  if (s === 'running') return '运行中';
+  if (s === 'done') return '完成';
+  if (s === 'failed') return '失败';
+  return '待执行';
+}
+
+function AgentPanels({ entries, plan, running }: { entries: ExecutionLogEntry[]; plan?: PlanState; running?: boolean }) {
+  const groups = groupByProcess(entries);
+  const [openAgents, setOpenAgents] = useState<Set<string>>(() => new Set(
+    groups.filter(g => g.status === 'running').map(g => g.processId)
+  ));
+
+  if (groups.length === 0) return null;
+
+  const totalLlm = entries.filter(e => e.kind === 'llm').length;
+  const totalTool = entries.filter(e => e.kind === 'tool').length;
+  const runningCount = groups.filter(g => g.status === 'running').length;
+  const totalDuration = groups.reduce((sum, g) => {
+    if (g.endedAt && g.startedAt) return sum + (g.endedAt - g.startedAt);
+    if (g.startedAt) return sum + (Date.now() - g.startedAt);
+    return sum;
+  }, 0);
+
+  const toggleAgent = (pid: string) => {
+    setOpenAgents(prev => {
+      const next = new Set(prev);
+      if (next.has(pid)) next.delete(pid); else next.add(pid);
+      return next;
+    });
+  };
+
+  return (
+    <div className={`exec-timeline ${running ? 'running' : ''}`}>
+      {(plan?.goal || totalLlm > 0 || totalTool > 0) && (
+        <div className="exec-timeline-summary">
+          {plan?.goal && <span className="exec-timeline-goal">🎯 {plan.goal}</span>}
+          <span className="exec-timeline-stats">
+            🤖{groups.length}
+            {runningCount > 0 && <span className="exec-live-dot">● 运行中 {runningCount}</span>}
+            {totalLlm > 0 && <span>🧠{totalLlm}</span>}
+            {totalTool > 0 && <span>🔧{totalTool}</span>}
+            {totalDuration > 0 && <span className="exec-timeline-cost">{formatDuration(totalDuration)}</span>}
+          </span>
+        </div>
+      )}
+      <div className="exec-timeline-list">
+        {groups.map((g) => (
+            <div key={g.processId} className={g.parentProcessId || g.agentName?.startsWith('subagent_') ? 'exec-agent-child' : 'exec-agent-root'}>
+          <AgentPanel
+            key={g.processId}
+            group={g}
+            open={openAgents.has(g.processId) || g.status === 'running'}
+            onToggle={() => toggleAgent(g.processId)}
+          />
+            </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AgentPanel({ group, open, onToggle }: { group: AgentGroup; open: boolean; onToggle: () => void }) {
+  const llmEntries = group.entries.filter(e => e.kind === 'llm') as LlmEntry[];
+  const toolEntries = group.entries.filter(e => e.kind === 'tool') as ToolEntry[];
+  const actionEntries = group.entries.filter(e => e.kind === 'action') as ActionEntry[];
+  const runningEntryCount = group.entries.filter(e => e.status === 'running').length;
+  const durationMs = group.endedAt && group.startedAt ? group.endedAt - group.startedAt : undefined;
+
+  return (
+    <div className={`exec-agent ${group.status}`}>
+      <div className="exec-agent-head" onClick={onToggle}>
+        <span className={`exec-agent-dot ${group.status}`}>{statusIcon(group.status)}</span>
+        <span className="exec-agent-name">🤖 {group.agentName}</span>
+        {group.actionName && group.actionName !== group.agentName && (
+          <span className="exec-agent-action">· {group.actionName}</span>
+        )}
+        <span className="exec-agent-stats">
+          {llmEntries.length > 0 && <span>🧠{llmEntries.length}</span>}
+          {toolEntries.length > 0 && <span>🔧{toolEntries.length}</span>}
+        </span>
+        {durationMs != null && <span className="exec-agent-cost">{formatDuration(durationMs)}</span>}
+        {runningEntryCount > 0 && <span className="exec-agent-live">● {runningEntryCount} 进行中</span>}
+        <span className={`exec-agent-caret ${open ? 'open' : ''}`}>▸</span>
+      </div>
+      {open && group.entries.length > 0 && (
+        <div className="exec-agent-body">
+          {actionEntries.map((e, i) => <ActionRow key={`a-${i}`} entry={e} />)}
+          {llmEntries.map((e, i) => <LlmRow key={`l-${i}`} entry={e} />)}
+          {toolEntries.map((e, i) => <ToolRow key={`t-${i}`} entry={e} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ActionRow({ entry }: { entry: ActionEntry }) {
+  return (
+    <div className={`exec-row action ${entry.status}`}>
+      <div className="exec-row-head">
+        <span className="exec-row-icon">🎯</span>
+        <span className="exec-row-title">{entry.name}</span>
+        {entry.durationMs != null && <span className="exec-row-cost">{formatDuration(entry.durationMs)}</span>}
+        <span className={`exec-row-badge ${entry.status}`}>{statusText(entry.status)}</span>
+      </div>
+    </div>
+  );
+}
+
+function LlmRow({ entry }: { entry: LlmEntry }) {
+  const [open, setOpen] = useState(entry.status === 'running');
+  return (
+    <div className={`exec-row llm ${entry.status}`}>
+      <div className="exec-row-head" onClick={() => setOpen(v => !v)}>
+        <span className="exec-row-icon">🧠</span>
+        <span className="exec-row-title">LLM · {entry.model}</span>
+        {entry.durationMs != null && <span className="exec-row-cost">{formatDuration(entry.durationMs)}</span>}
+        <span className={`exec-row-badge ${entry.status}`}>{statusText(entry.status)}</span>
+        <span className={`exec-panel-caret ${open ? 'open' : ''}`}>▸</span>
+      </div>
+      {open && (
+        <div className="exec-row-body">
+          {entry.promptPreview && <details className="exec-block"><summary>Prompt</summary><pre>{entry.promptPreview}</pre></details>}
+          {entry.responsePreview && <details className="exec-block" open><summary>Response</summary><pre>{entry.responsePreview}</pre></details>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ToolRow({ entry }: { entry: ToolEntry }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div className={`exec-row tool ${entry.status}`}>
+      <div className="exec-row-head" onClick={() => setOpen(v => !v)}>
+        <span className="exec-row-icon">🔧</span>
+        <span className="exec-row-title">{entry.tool}</span>
+        {entry.durationMs != null && <span className="exec-row-cost">{formatDuration(entry.durationMs)}</span>}
+        <span className={`exec-row-badge ${entry.status}`}>{statusText(entry.status)}</span>
+        <span className={`exec-panel-caret ${open ? 'open' : ''}`}>▸</span>
+      </div>
+      {open && (
+        <div className="exec-row-body">
+          {entry.input && <details className="exec-block"><summary>Input</summary><pre>{entry.input}</pre></details>}
+          {entry.output && <details className="exec-block" open><summary>Output</summary><pre>{entry.output}</pre></details>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
   return (
     <div className="chat-block user">
-      <div className="chat-meta" style={{ textAlign: 'right' }}>你</div>
       <div className="chat-row user">
         <div className="chat-avatar">👤</div>
-        <div className="chat-bubble">
-          {msg.attachments && msg.attachments.length > 0 && (
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-              {msg.attachments.map((a, i) => (
-                <span key={i} className="attach-chip">📎 {a.name}</span>
-              ))}
-            </div>
-          )}
-          {msg.segments.map((s, i) => (
-            <div key={i} style={{ whiteSpace: 'pre-wrap' }}>{s.content}</div>
-          ))}
+        <div className="chat-bubble-wrap">
+          <div className="chat-bubble-header user">
+            <span className="chat-bubble-name">你</span>
+          </div>
+          <div className="chat-bubble">
+            {msg.attachments && msg.attachments.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                {msg.attachments.map((a, i) => (
+                  <span key={i} className="attach-chip">📎 {a.name}</span>
+                ))}
+              </div>
+            )}
+            {msg.segments.map((s, i) => (
+              <div key={i} style={{ whiteSpace: 'pre-wrap' }}>{s.content}</div>
+            ))}
+          </div>
         </div>
       </div>
     </div>
@@ -327,19 +629,47 @@ function ConfirmDialog({ pending, onDecide, onClose }: {
   onDecide: (action: 'once' | 'turn' | 'always' | 'deny') => void;
   onClose: () => void;
 }) {
+  // 工具影响级别判断
+  const getImpact = (toolName: string): { level: 'read' | 'write' | 'execute'; label: string; icon: string } => {
+    const lower = toolName.toLowerCase();
+    if (lower.includes('delete') || lower.includes('remove') || lower.includes('drop'))
+      return { level: 'write', label: '高风险：删除操作', icon: '⚠️' };
+    if (lower.includes('write') || lower.includes('create') || lower.includes('edit') || lower.includes('append') || lower.includes('move') || lower.includes('rename'))
+      return { level: 'write', label: '写入操作', icon: '✏️' };
+    if (lower.includes('exec') || lower.includes('run') || lower.includes('command') || lower.includes('shell') || lower.includes('bash'))
+      return { level: 'execute', label: '执行操作', icon: '⚡' };
+    return { level: 'read', label: '读取操作', icon: '📖' };
+  };
+
+  const hasWrite = pending.tools.some(t => getImpact(t.name).level !== 'read');
+
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>🔐 工具执行确认</h3>
-        <div className="hint" style={{ marginBottom: 8 }}>
-          AI 请求执行以下写/执行操作（读操作不会打扰你）。请选择放行方式：
+
+        {/* 上下文说明 */}
+        <div className="confirm-context">
+          <span className="context-label">为什么需要确认</span>
+          AI 正在处理你的请求，需要执行以下
+          <strong>{hasWrite ? '写/执行' : '读取'}</strong>
+          操作。这些操作
+          <strong>{hasWrite ? '可能会修改文件或运行命令' : '不会对你的系统造成任何影响'}</strong>，
+          请确认后放行。
         </div>
-        {pending.tools.map((t, i) => (
-          <div key={i} className="tool-card">
-            <div className="tool-name">{t.name}</div>
-            <pre>{t.input}</pre>
-          </div>
-        ))}
+
+        {pending.tools.map((t, i) => {
+          const impact = getImpact(t.name);
+          return (
+            <div key={i} className="tool-card">
+              <div className="tool-name">{impact.icon} {t.name}</div>
+              <div className={`tool-impact ${impact.level}`}>
+                {impact.label}
+              </div>
+              <pre>{t.input}</pre>
+            </div>
+          );
+        })}
         <div className="modal-actions">
           <button className="btn primary" onClick={() => onDecide('once')}>✅ 允许这一次</button>
           <button className="btn" onClick={() => onDecide('turn')}>🔄 本回合允许</button>
@@ -347,9 +677,10 @@ function ConfirmDialog({ pending, onDecide, onClose }: {
           <button className="btn danger" onClick={() => onDecide('deny')}>🚫 拒绝</button>
         </div>
         <div className="modal-hint">
-          · 允许这一次：仅当前这次调用
-          · 本回合允许：本次对话中同类操作不再询问
-          · 永久允许：本工作区以后都不再询问（可在会话侧栏「🔐 授权」撤销）
+          · 允许这一次：仅当前这次调用<br />
+          · 本回合允许：本次对话中同类操作不再询问<br />
+          · 永久允许：本工作区以后都不再询问（可在会话侧栏「🔐 授权」撤销）<br />
+          · 拒绝：AI 会收到拒绝信息，可能会尝试其他方案或终止任务
         </div>
       </div>
     </div>
@@ -365,19 +696,28 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [tab, setTab] = useState<'sessions' | 'auth' | 'files'>('sessions');
+  const [tab, setTab] = useState<'sessions' | 'files'>('sessions');
+    const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
+    const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string }[]>([]);
   const [statusHint, setStatusHint] = useState('');
-  const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
-  const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string }[]>([]);
+  
+  
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState('');
   interface OpenFile { entry: FileEntry; kind: 'text' | 'image'; content?: string; error?: string; loading: boolean; }
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFileTab, setActiveFileTab] = useState<string | null>(null);
-  const [panelWidth, setPanelWidth] = useState(320);
-  const [resizing, setResizing] = useState(false);
+  const [panelWidth, setPanelWidth] = useState(260);
+  const [resizing, setResizing] = useState<'left' | 'right' | null>(null);
   const [skillName, setSkillName] = useState<string>('');
   const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; scope: string }[]>([]);
+  const [traceWidth, setTraceWidth] = useState(380);
+  const [traceCollapsed, setTraceCollapsed] = useState<boolean>(() => {
+    try { return localStorage.getItem('chat:trace-collapsed') === '1'; } catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('chat:trace-collapsed', traceCollapsed ? '1' : '0'); } catch {}
+  }, [traceCollapsed]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickRef = useRef(true);
@@ -446,49 +786,96 @@ export default function ChatPage() {
     }, 32);
   }, [flushNow]);
 
+  const [viewMode, setViewMode] = useState<'chat' | 'stream'>('chat');
+  const [execEvents, setExecEvents] = useState<import('../components/ExecutionStream').StreamEvent[]>([]);
+  const execEventsRef = useRef(execEvents);
+  execEventsRef.current = execEvents;
+
   const handleWsEvent = useCallback((evt: StreamEvent) => {
     lastEventAtRef.current = Date.now();
-    // 刷新/重连后 running=false，但后端 Agent 可能仍在运行 —— 收到数据事件即自动复位
+
+    // 根据事件路由表判断去向
+    const route = EVENT_ROUTE[evt.type] || 'exec';
+
+    // 1. 收集到执行流瀑布流（exec + both）
+    if (route === 'exec' || route === 'both') {
+      const streamEvtData: any = {
+        type: evt.type,
+        timestamp: Date.now(),
+        content: evt.content,
+      };
+      // 解析 content JSON 获取 agentName、processId、data 等
+      try {
+        if (evt.content) {
+          const parsed = JSON.parse(evt.content);
+          if (parsed && typeof parsed === 'object') {
+            // 尝试从嵌套字段提取 data
+            if (parsed.data && typeof parsed.data === 'object') {
+              streamEvtData.data = parsed.data;
+            } else {
+              streamEvtData.data = parsed;
+            }
+            streamEvtData.agentName = parsed.agentName || parsed.agent;
+            streamEvtData.processId = parsed.processId;
+            streamEvtData.parentProcessId = parsed.parentProcessId;
+          }
+        }
+      } catch {
+        // content 不是 JSON，直接用 content 作为文本
+      }
+      setExecEvents((prev) => [...prev, streamEvtData].slice(-500));
+    }
+
+    // 2. 刷新/重连后 running=false，但后端 Agent 可能仍在运行 —— 收到数据事件即自动复位
     if (DATA_EVENT_TYPES.has(evt.type)) {
       const cur = getChatSession(key);
       if (!cur.running) {
         patch({ running: true, error: '' });
       }
     }
-    if (evt.type === 'tool') {
-      // 工具开始执行：加入活跃集合
-      updateChatSession(key, (c) => ({
-        ...c,
-        activeTools: c.activeTools.includes(evt.content) ? c.activeTools : [...c.activeTools, evt.content],
-      }));
-      flushNow();
-      pendingEvtsRef.current.push(evt);
-      scheduleFlush();
-    } else if (evt.type === 'tool_end') {
+
+    // 3. 聊天视图事件（chat + both）走 reduceMessage
+    if (route === 'chat' || route === 'both') {
+      if (evt.type === 'tool') {
+        // 工具开始执行：先入队 + 更新活跃集合，再 flush 保证一起渲染（避免闪烁）
+        pendingEvtsRef.current.push(evt);
+        updateChatSession(key, (c) => ({
+          ...c,
+          activeTools: c.activeTools.includes(evt.content) ? c.activeTools : [...c.activeTools, evt.content],
+        }));
+        flushNow();
+      } else if (evt.type === 'subagent') {
+        // 子 Agent 开始：先入队 + 更新活跃集合，再 flush 保证一起渲染
+        pendingEvtsRef.current.push(evt);
+        updateChatSession(key, (c) => ({
+          ...c,
+          activeSubagents: c.activeSubagents.includes(evt.content) ? c.activeSubagents : [...c.activeSubagents, evt.content],
+        }));
+        flushNow();
+      } else if (evt.type === 'text' || evt.type === 'reasoning') {
+        // text/reasoning 增量走统一批量渲染（32ms 节流）
+        pendingEvtsRef.current.push(evt);
+        scheduleFlush();
+      } else if (['tool_args', 'tool_result', 'subagent_text'].includes(evt.type)) {
+        // 其他 chat 视图事件也走批量渲染
+        pendingEvtsRef.current.push(evt);
+        scheduleFlush();
+      }
+    }
+
+    // 4. 控制事件（独立处理，不受路由影响）
+    if (evt.type === 'tool_end') {
       // 工具执行结束：从活跃集合移除
       updateChatSession(key, (c) => ({
         ...c,
         activeTools: c.activeTools.filter((t: string) => t !== evt.content),
       }));
-    } else if (evt.type === 'subagent') {
-      // 子 Agent 开始：加入活跃集合
-      updateChatSession(key, (c) => ({
-        ...c,
-        activeSubagents: c.activeSubagents.includes(evt.content) ? c.activeSubagents : [...c.activeSubagents, evt.content],
-      }));
-      flushNow();
-      pendingEvtsRef.current.push(evt);
-      scheduleFlush();
     } else if (evt.type === 'subagent_end') {
       // 子 Agent 结束：从活跃集合移除
       updateChatSession(key, (c) => ({
         ...c,
         activeSubagents: c.activeSubagents.filter((s: string) => s !== evt.content),
       }));
-    } else if (evt.type === 'text') {
-      // text 增量走统一批量渲染（32ms 节流，比打字机快且不丢帧）
-      pendingEvtsRef.current.push(evt);
-      scheduleFlush();
     } else if (evt.type === 'confirm') {
       flushNow();
       patch({ running: false }); // Agent 已暂停等待确认，复位"输出中"状态
@@ -503,8 +890,29 @@ export default function ChatPage() {
       }
     } else if (evt.type === 'error') {
       flushNow();
-      // 只显示一次（error-box），不再追加到消息流避免重复
-      patch({ error: evt.content });
+      // Plan 校验消息：更新 plan 的 validation 字段，让 PlanProgressBar 显示警告
+      if (evt.content.includes('Plan 校验')) {
+        try {
+          const jsonStr = evt.content.replace(/^⚠️ Plan 校验:\s*/, '');
+          const validation = JSON.parse(jsonStr);
+          updateChatSession(key, (c) => {
+            const msgs = [...c.messages];
+            // 搜索所有带 plan 的 AI 消息，从后往前找到最近的一个
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              if (msgs[i].role === 'ai' && msgs[i].plan) {
+                msgs[i] = { ...msgs[i], plan: { ...msgs[i].plan!, validation } };
+                return { ...c, messages: msgs, error: '' };
+              }
+            }
+            // 没找到 plan 消息（时序竞争：error 先于 plan 到达），存到 error 字段兜底
+            return { ...c, error: evt.content };
+          });
+        } catch {
+          patch({ error: evt.content });
+        }
+      } else {
+        patch({ error: evt.content });
+      }
     } else if (evt.type === 'pending_info') {
       // 轮询兜底：SSE/WS confirm 事件丢失时也能弹窗
       try {
@@ -566,9 +974,131 @@ export default function ChatPage() {
     } else if (evt.type === 'disconnected') {
       setStatusHint('⚠️ 连接断开，正在重连...');
       console.log('[ws] 连接断开，等待重连');
+    } else if (evt.type === 'agent_action' || evt.type === 'tool_call' || evt.type === 'llm_call' || evt.type === 'subagent_lifecycle') {
+      try {
+        const json = JSON.parse(evt.content);
+        const now = Date.now();
+        updateChatSession(key, (c) => {
+          const msgs = [...c.messages];
+          const lastIdx = msgs.length - 1;
+          let msg = lastIdx >= 0 && msgs[lastIdx].role === 'ai' ? msgs[lastIdx] : null;
+          if (!msg) {
+            msg = { role: 'ai', segments: [] };
+            msgs.push(msg);
+          }
+          const log: ExecutionLogEntry[] = msg.executionLog ? [...msg.executionLog] : [];
+          const pid = json.processId;
+          const parentPid = json.parentProcessId;
+          const agentName = json.agentName;
+
+          if (evt.type === 'agent_action') {
+            const status = (json.status === 'running') ? 'running' : (json.status === 'failed' ? 'failed' : 'done');
+            const idx = log.findIndex(e => e.kind === 'action' && e.processId === pid && e.name === json.name && e.status === 'running');
+            const entry: ActionEntry = {
+              kind: 'action', name: json.name || '', description: json.description,
+              index: json.index, total: json.total, durationMs: json.durationMs,
+              status, timestamp: now, processId: pid, parentProcessId: parentPid, agentName,
+            };
+            if (idx >= 0) { log[idx] = { ...log[idx], ...entry, timestamp: log[idx].timestamp || now }; }
+            else { log.push(entry); }
+          } else if (evt.type === 'subagent_lifecycle') {
+            const subPid = pid;
+            if (json.status === 'start') {
+              log.push({ kind: 'subagent', name: json.name || '', lifecycle: 'start', status: 'running', timestamp: now, processId: subPid, parentProcessId: parentPid, agentName } as SubagentEntry);
+            } else {
+              const idx = log.findIndex((e): e is SubagentEntry => e.kind === 'subagent' && e.processId === subPid && (e as SubagentEntry).lifecycle === 'start');
+              if (idx >= 0) {
+                log[idx] = { ...(log[idx] as SubagentEntry), lifecycle: 'end', status: 'done', durationMs: json.durationMs };
+              } else {
+                log.push({ kind: 'subagent', name: json.name || '', lifecycle: 'end', status: 'done', durationMs: json.durationMs, timestamp: now, processId: subPid, parentProcessId: parentPid, agentName } as SubagentEntry);
+              }
+            }
+          } else if (evt.type === 'tool_call') {
+            const toolStatus = json.type === 'tool_call_start' ? 'running' : 'done';
+            const entry: ToolEntry = {
+              kind: 'tool', tool: json.tool || '', input: json.input || '',
+              output: json.output, durationMs: json.durationMs,
+              status: toolStatus, correlationId: json.correlationId, action: json.action,
+              timestamp: now, processId: pid, parentProcessId: parentPid, agentName,
+            };
+            if (toolStatus === 'running') {
+              log.push(entry);
+            } else {
+              const idx = log.findIndex((e): e is ToolEntry => e.kind === 'tool' && e.processId === pid && (e as ToolEntry).tool === json.tool && e.status === 'running');
+              if (idx >= 0) { log[idx] = { ...(log[idx] as ToolEntry), output: json.output, durationMs: json.durationMs, status: 'done' }; }
+              else { log.push(entry); }
+            }
+          } else if (evt.type === 'llm_call') {
+            const llmStatus = json.type === 'llm_call_start' ? 'running' : 'done';
+            const entry: LlmEntry = {
+              kind: 'llm', model: json.model || '', action: json.action,
+              promptPreview: json.promptPreview, messageCount: json.messageCount,
+              responsePreview: json.responsePreview, responseLength: json.responseLength,
+              durationMs: json.durationMs,
+              status: llmStatus, timestamp: now, processId: pid, parentProcessId: parentPid, agentName,
+            };
+            if (llmStatus === 'running') {
+              log.push(entry);
+            } else {
+              const idx = log.findIndex((e): e is LlmEntry => e.kind === 'llm' && e.processId === pid && (e as LlmEntry).model === json.model && e.status === 'running');
+              if (idx >= 0) { log[idx] = { ...(log[idx] as LlmEntry), responsePreview: json.responsePreview, responseLength: json.responseLength, durationMs: json.durationMs, status: 'done' }; }
+              else { log.push(entry); }
+            }
+          }
+
+          msgs[lastIdx] = { ...msg, executionLog: log };
+          return { ...c, messages: msgs };
+        });
+      } catch { /* ignore */ }
+    } else if (evt.type === 'plan' || evt.type === 'step') {
+      try {
+        const json = JSON.parse(evt.content);
+        updateChatSession(key, (c) => {
+          const msgs = [...c.messages];
+          const lastIdx = msgs.length - 1;
+          let msg = lastIdx >= 0 && msgs[lastIdx].role === 'ai' ? msgs[lastIdx] : null;
+          if (!msg) {
+            msg = { role: 'ai', segments: [] };
+            msgs.push(msg);
+          }
+          let plan = msg.plan;
+          if (evt.type === 'plan') {
+            const steps = (json.steps || []).map((s: any, i: number) => ({
+              name: s.name || '', description: s.description || '',
+              status: 'pending' as const, index: i,
+              preconditions: s.preconditions || {},
+              effects: s.effects || {},
+            }));
+            plan = {
+              goal: json.goal || '', goalDescription: json.goalDescription || '',
+              goalPreconditions: json.goalPreconditions || {},
+              goalKnownConditions: json.goalKnownConditions || [],
+              totalSteps: json.totalSteps || steps.length, steps,
+              agent: json.agent || undefined,
+            };
+          } else if (evt.type === 'step' && plan) {
+            const stepStatus = (json.status || 'pending') as PlanStep['status'];
+            if (typeof json.index === 'number' && json.index >= 0 && json.index < plan.steps.length) {
+              plan = { ...plan, steps: plan.steps.map((s, i) =>
+                i === json.index ? { ...s, status: stepStatus, ...(json.name ? { name: json.name } : {}) } : s
+              ) };
+            } else if (json.name) {
+              const idx = plan.steps.findIndex(s => s.name === json.name);
+              if (idx >= 0) {
+                plan = { ...plan, steps: plan.steps.map((s, i) =>
+                  i === idx ? { ...s, status: stepStatus } : s
+                ) };
+              }
+            }
+          }
+          msgs[lastIdx] = { ...msg, plan };
+          return { ...c, messages: msgs };
+        });
+      } catch { /* ignore */ }
     } else if (evt.type === 'end') {
       flushNow();
       patch({ running: false, activeTools: [], activeSubagents: [] });
+      // executionLog 保留到下一轮开始时再清，让用户能回看；在 text 事件第一次出现时清空
       if (hangTimerRef.current) {
         clearInterval(hangTimerRef.current);
         hangTimerRef.current = null;
@@ -653,7 +1183,6 @@ export default function ChatPage() {
           setSessions([created]);
           setSessionId(created.id);
         }
-        loadAuth(workspaceId);
         loadFiles(workspaceId, '');
         loadSkills(workspaceId);
       } catch (e) {
@@ -667,29 +1196,184 @@ export default function ChatPage() {
       const box = await getJson<BoxMessage[]>(`/api/chat/history?workspaceId=${wid}&sessionId=${sid}`);
       const msgs: ChatMessage[] = [];
       let cur: ChatMessage | null = null;
+      let pendingPlan: PlanState | null = null;
+      let pendingValidation: PlanValidation | null = null;
+      const pendingSteps: PlanStep[] = [];
       for (const b of box) {
         if (b.type === 'USER') {
           cur = null;
-          msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
-        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'SUBAGENT') {
+          msgs.push({ id: newMessageId(), role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
+          pendingPlan = null;
+          pendingSteps.length = 0;
+        } else if (b.type === 'PLAN') {
+          try {
+            const pj = JSON.parse(b.content);
+            const steps: PlanStep[] = (pj.steps || []).map((s: any, i: number) => ({
+              name: s.name || '', description: s.description || '',
+              status: 'pending', index: i,
+              preconditions: s.preconditions || {},
+              effects: s.effects || {},
+            }));
+            pendingPlan = {
+              goal: pj.goal || '', goalDescription: pj.goalDescription || '',
+              goalPreconditions: pj.goalPreconditions || {},
+              goalKnownConditions: pj.goalKnownConditions || [],
+              totalSteps: pj.totalSteps || steps.length, steps,
+              agent: pj.agent || undefined,
+              validation: pendingValidation || undefined,
+            };
+            // 应用后清除暂存
+            pendingValidation = null;
+            pendingSteps.length = 0;
+            pendingSteps.push(...steps);
+          } catch { /* 忽略格式错误 */ }
+        } else if (b.type === 'STEP') {
+          try {
+            const sj = JSON.parse(b.content);
+            if (pendingPlan && typeof sj.index === 'number' && sj.index >= 0 && sj.index < pendingPlan.steps.length) {
+              pendingPlan.steps[sj.index].status = (sj.status || 'pending') as PlanStep['status'];
+              if (sj.name) pendingPlan.steps[sj.index].name = sj.name;
+            } else if (pendingPlan && sj.name) {
+              const idx = pendingPlan.steps.findIndex(s => s.name === sj.name);
+              if (idx >= 0) {
+                pendingPlan.steps[idx].status = (sj.status || 'pending') as PlanStep['status'];
+              }
+            }
+              if (!cur) { cur = { role: 'ai', segments: [] }; msgs.push(cur); }
+              if (!cur.executionLog) cur.executionLog = [];
+              cur.executionLog.push({
+                kind: 'action',
+                name: sj.name || '',
+                description: sj.description || '',
+                index: sj.index,
+                total: sj.total,
+                durationMs: sj.durationMs,
+                status: (sj.status === 'failed' ? 'failed' : 'done') as ExecStatus,
+                processId: sj.processId,
+                parentProcessId: sj.parentProcessId,
+                agentName: sj.agentName,
+                timestamp: b.seq,
+              });
+          } catch { /* 忽略 */ }
+        } else if (b.type === 'TOOL_CALL') {
+          if (!cur) { cur = { role: 'ai', segments: [] }; msgs.push(cur); }
+          if (!cur.executionLog) cur.executionLog = [];
+          try {
+            const tj = JSON.parse(b.content);
+            cur.executionLog.push({
+              kind: 'tool',
+              tool: tj.tool || b.toolName || '',
+              input: tj.input || b.toolArgs || '',
+              output: tj.output || b.toolResult,
+              durationMs: tj.durationMs,
+              status: 'done' as const,
+              correlationId: tj.correlationId,
+              action: tj.action,
+              processId: tj.processId,
+              parentProcessId: tj.parentProcessId,
+              agentName: tj.agentName,
+              timestamp: b.seq,
+            });
+          } catch {
+            cur.executionLog.push({
+              kind: 'tool',
+              tool: b.toolName || '',
+              input: b.toolArgs || '',
+              output: b.toolResult,
+              status: 'done' as const,
+              timestamp: b.seq,
+            });
+          }
+        } else if (b.type === 'LLM_CALL') {
+          if (!cur) { cur = { role: 'ai', segments: [] }; msgs.push(cur); }
+          if (!cur.executionLog) cur.executionLog = [];
+          try {
+            const lj = JSON.parse(b.content);
+            cur.executionLog.push({
+              kind: 'llm',
+              model: lj.model || '',
+              promptPreview: lj.promptPreview,
+              responsePreview: lj.responsePreview,
+              responseLength: lj.responseLength,
+              durationMs: lj.durationMs,
+              status: 'done' as const,
+              action: lj.action,
+              processId: lj.processId,
+              parentProcessId: lj.parentProcessId,
+              agentName: lj.agentName,
+              timestamp: b.seq,
+            });
+          } catch { /* 忽略 */ }
+        } else if (b.type === 'AGENT_ACTION') {
+          if (!cur) { cur = { role: 'ai', segments: [] }; msgs.push(cur); }
+          if (!cur.executionLog) cur.executionLog = [];
+          try {
+            const aj = JSON.parse(b.content);
+            const rawStatus = (aj.status === 'running') ? 'running' : (aj.status === 'failed' ? 'failed' : 'done');
+            cur.executionLog.push({
+              kind: 'action',
+              name: aj.name || '',
+              description: aj.description,
+              index: aj.index,
+              total: aj.total,
+              durationMs: aj.durationMs,
+              status: rawStatus as ExecStatus,
+              processId: aj.processId,
+              parentProcessId: aj.parentProcessId,
+              agentName: aj.agentName,
+              timestamp: b.seq,
+            });
+          } catch { /* 忽略 */ }
+          } else if (b.type === 'SUBAGENT_LIFECYCLE') {
+            if (!cur) { cur = { role: 'ai', segments: [] }; msgs.push(cur); }
+            if (!cur.executionLog) cur.executionLog = [];
+            try {
+              const sj = JSON.parse(b.content);
+              cur.executionLog.push({
+                kind: 'subagent',
+                name: sj.name || '',
+                lifecycle: sj.status === 'start' ? 'start' : 'end',
+                status: sj.status === 'failed' ? 'failed' : (sj.status === 'start' ? 'running' : 'done'),
+                processId: sj.processId,
+                parentProcessId: sj.parentProcessId,
+                agentName: sj.name || '',
+                durationMs: sj.durationMs,
+                timestamp: b.seq,
+              } as SubagentEntry);
+            } catch { /* 忽略 */ }
+        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'SUBAGENT' || b.type === 'TOOL_RESULT') {
           if (!cur) {
-            cur = { role: 'ai', segments: [] };
-            msgs.push(cur);
+            if (pendingPlan) {
+              cur = { role: 'ai', segments: [], plan: pendingPlan };
+              pendingPlan = null;
+              msgs.push(cur);
+            } else {
+              cur = { role: 'ai', segments: [] };
+              msgs.push(cur);
+            }
+          } else if (pendingPlan && !cur.plan) {
+            cur.plan = pendingPlan;
+            pendingPlan = null;
           }
           if (b.type === 'AI_TEXT') cur.segments.push({ type: 'text', content: b.content });
           else if (b.type === 'THINKING') cur.segments.push({ type: 'reasoning', content: b.content });
-          else if (b.type === 'TOOL_CALL') {
-            const lastTool = cur.segments[cur.segments.length - 1];
-            if (lastTool && lastTool.type === 'tool') {
-              lastTool.content += `\n\n── ${b.toolName} ──\n参数: ${b.toolArgs}`;
-            } else {
-              cur.segments.push({ type: 'tool', content: `── ${b.toolName} ──\n参数: ${b.toolArgs}` });
-            }
-          } else {
-            cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content });
-          }
+          else if (b.type === 'SUBAGENT') cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content });
+        } else if (b.type === 'PLAN_VALIDATION') {
+          try {
+            const vj = JSON.parse(b.content);
+            pendingValidation = {
+              valid: vj.valid ?? false,
+              invalidSteps: vj.invalidSteps || [],
+              validSteps: vj.validSteps || [],
+              availableActions: vj.availableActions || [],
+              message: vj.message || '',
+            };
+          } catch { /* 忽略 */ }
+        } else if (b.type === 'SYSTEM' || b.type === 'CONFIRM') {
+          // SYSTEM 不进入消息流；CONFIRM 也不
         }
       }
+      // 最后一条 AI 消息如果只有 plan/executionLog 没有 segments，也保留
       updateChatSession(chatKey(wid, sid), (c) => ({ ...c, messages: msgs }));
       // 历史加载完后同步运行状态（HTTP 接口兜底，WS status 事件可能稍后到达）
       syncSessionStatus(wid, sid);
@@ -734,10 +1418,15 @@ export default function ChatPage() {
 
   const loadSkills = async (wid: string) => {
     try {
-      const all = await getJson<{ scope: string; name: string; description: string }[]>(
-        `/api/skills?workspaceId=${encodeURIComponent(wid)}`);
+      const [all, roleRes] = await Promise.all([
+          getJson<{ scope: string; name: string; description: string }[]>(
+        `/api/skills?workspaceId=${encodeURIComponent(wid)}`),
+          getJson<{ name: string; displayName: string; role: string; active: boolean }[]>('/api/roles'),
+        ]);
       // 包含 system/global/workspace 三级
-      setAvailableSkills(all.filter(s => s.scope === 'system' || s.scope === 'global' || s.scope === 'workspace'));
+      const skills = all.filter(s => s.scope === 'system' || s.scope === 'global' || s.scope === 'workspace');
+        const roles = roleRes.filter(r => r.active).map(r => ({ scope: 'role', name: r.name, description: r.displayName || r.role || '角色' }));
+        setAvailableSkills([...roles, ...skills]);
     } catch {
       setAvailableSkills([]);
     }
@@ -782,6 +1471,9 @@ export default function ChatPage() {
           return;
         }
         const text = await res.text();
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+      });
         setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false, content: text } : f));
       } catch (e) {
         setOpenFiles((prev) => prev.map((f) => f.entry.path === entry.path ? { ...f, loading: false, error: String(e) } : f));
@@ -891,9 +1583,13 @@ export default function ChatPage() {
     if (!workspaceId || !sessionId) return;
     patchMsgs((prev) => [
       ...prev,
-      { role: 'user', segments: [{ type: 'text', content: text }], attachments: myAtts.map((a) => ({ name: a.name, mimeType: a.mimeType })) },
+      { id: newMessageId(), role: 'user', segments: [{ type: 'text', content: text }], attachments: myAtts.map((a) => ({ name: a.name, mimeType: a.mimeType })) },
     ]);
     patch({ running: true, error: '', pending: null }); // 新对话开始：关闭可能残留的确认弹窗
+    setExecEvents([]); // 新对话清空上一轮执行流
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
+      });
     setStatusHint('');
     lastEventAtRef.current = Date.now();
     if (hangTimerRef.current) clearInterval(hangTimerRef.current);
@@ -1099,105 +1795,128 @@ export default function ChatPage() {
   const chatArea = (
     <div className="chat-main">
       <div className="chat-topbar">
-        <span className="ws-name">💬 {workspace?.name}</span>
-        {workspace?.agentName && <span className="agent-badge">🤖 {workspace.agentName}</span>}
-        {running && (
-          <span className="status-badge running">
-            <span className="spinner-tiny" /> 主 Agent 运行中
-          </span>
-        )}
-        {activeSubagents.length > 0 && activeSubagents.map((s) => (
-          <span key={s} className="status-badge subagent">
-            <span className="spinner-tiny" /> 🤖 {s}
-          </span>
-        ))}
-        {activeTools.length > 0 && activeTools.map((t) => (
-          <span key={t} className="status-badge tool">
-            <span className="spinner-tiny" /> 🔧 {t}
-          </span>
-        ))}
-        <span className="ws-path">{workspace?.path}</span>
-        <button
-            className="btn refresh-env-btn"
-            onClick={async () => {
-              const btn = document.querySelector('.refresh-env-btn') as HTMLButtonElement;
-              if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
-              try {
-                const res = await postJson<{success: boolean; pathSegments?: number; error?: string}>(
-                    `/api/workspaces/${workspaceId}/refresh-env`, {});
-                if (res.success) {
-                  if (btn) { btn.textContent = `✅ 已刷新 (${res.pathSegments} 段 PATH)`; }
-                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 2500);
-                } else {
-                  if (btn) { btn.textContent = `❌ ${res.error || '刷新失败'}`; }
-                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 3000);
-                }
-              } catch (e) {
-                if (btn) { btn.textContent = `❌ ${String(e)}`; btn.disabled = false; }
-                setTimeout(() => { if (btn) { btn.textContent = '🔄 刷新运行环境'; btn.disabled = false; } }, 3000);
-              }
-            }}
-            title="运行中安装/切换语言（node/python/java）后点击，让 execute 感知最新 PATH"
-        >🔄 刷新运行环境</button>
+        <div className="topbar-left">
+          <span className="ws-name">💬 {workspace?.name}</span>
+          {workspace?.agentName && <span className="agent-badge">🤖 {workspace.agentName}</span>}
+          <span className="ws-path">{workspace?.path}</span>
+        </div>
+
+        {/* 视图切换：从消息流里移到顶栏，避免挤压聊天内容 */}
+        <div className="view-mode-tabs topbar-tabs">
+          <button
+            className={`view-tab ${viewMode === 'chat' ? 'active' : ''}`}
+            onClick={() => setViewMode('chat')}
+            title="聊天视图"
+          >💬 聊天</button>
+          <button
+            className={`view-tab ${viewMode === 'stream' ? 'active' : ''}`}
+            onClick={() => { setViewMode('stream'); setTraceCollapsed(false); }}
+            title="执行流视图（也可展开右侧面板）"
+          >⚡ 执行流 <span className="tab-count">{execEvents.length}</span></button>
+        </div>
+
+        {/* 运行状态胶囊：Agent / 子 Agent / Tool 合并为紧凑一行 */}
+        <div className="topbar-right">
+          {running && (
+            <span className="status-badge running">
+              <span className="spinner-tiny" /> 主 Agent 运行中
+            </span>
+          )}
+          {activeSubagents.length > 0 && (
+            <span className="status-badge subagent cluster" title={'子 Agent：' + activeSubagents.join('、')}>
+              🤖 ×{activeSubagents.length}
+            </span>
+          )}
+          {activeTools.length > 0 && (
+            <span className="status-badge tool cluster" title={'运行中工具：' + activeTools.join('、')}>
+              🔧 ×{activeTools.length}
+            </span>
+          )}
+        </div>
       </div>
+
       <div className="chat-scroll" ref={scrollRef} onScroll={(e) => {
         const el = e.currentTarget;
         stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 150;
       }}>
         <div className="chat-messages">
-          {messages.length === 0 && !running && (
+          {messages.length === 0 && !running && viewMode === 'chat' && (
             <div className="empty">
               <h3>开始对话</h3>
               <p className="hint">AI 只能在你指定的工作区目录内工作</p>
+              <p className="hint">右侧是 ⚡ 执行流面板：实时显示 LLM 调用、工具调用、子 Agent 运行轨迹</p>
             </div>
           )}
-          {messages.map((m, i) => (
-            m.role === 'user'
-              ? <UserMessage key={i} msg={m} />
-              : <AiMessage key={i} msg={m} isStreaming={running && i === messages.length - 1} agentLabel={workspace?.agentName || workspace?.name} activeTools={activeTools} activeSubagents={activeSubagents} />
-          ))}
+
+          {viewMode === 'stream' ? (
+            <ExecutionStream
+              events={execEvents}
+              workspaceId={workspaceId}
+              sessionId={sessionId}
+              completed={!running}
+            />
+          ) : (
+            <>
+              {messages.map((m, i) => {
+                if (m.role === 'user') return <UserMessage key={m.id || i} msg={m} />;
+                if (m.role === 'ai' && m.segments.length === 0 && !m.plan && (!m.executionLog || m.executionLog.length === 0)) {
+                  return null;
+                }
+                const prev = i > 0 && messages[i - 1].role === 'user' ? messages[i - 1] : null;
+                void prev;
+                return <AiMessage key={m.id || i} msg={m} isStreaming={running && i === messages.length - 1} agentLabel={workspace?.agentName || workspace?.name} running={running && i === messages.length - 1} />;
+              })}
+            </>
+          )}
         </div>
       </div>
 
+      {/* 输入 dock：压缩为 2 行。第一行：状态 + 待发队列胶囊；第二行：附件条/错误/skill/textarea/按钮 */}
       <div className="chat-input-dock">
-        <div className="chat-status">
-          {running
-            ? (statusHint || '🤖 AI 正在输出...')
-            : (pending ? '🔐 AI 正在等待你的确认...' : '💬 输入消息开始对话')}
+        <div className="dock-row-1">
+          <div className="chat-status">
+            {running
+              ? (statusHint || '🤖 AI 正在输出...')
+              : (pending ? '🔐 AI 正在等待你的确认...' : '💬 输入消息开始对话')}
+          </div>
           {chat.messageQueue.length > 0 && (
-            <span style={{ marginLeft: 8, color: 'var(--accent)' }}>
+            <span className="queue-pill" title={chat.messageQueue.map(q => q.text).join('\n')}>
               📥 {chat.messageQueue.length} 条待发
             </span>
           )}
         </div>
-        {/* 队列展示 */}
+
         {chat.messageQueue.length > 0 && (
-          <div className="queue-bar">
+          <div className="queue-bar compact">
             {chat.messageQueue.map((item, i) => (
               <div key={item.id} className={`queue-item ${i === 0 ? 'next' : ''}`}>
                 <span className="queue-num">{i === 0 ? '▶' : i + 1}</span>
                 <span className="queue-text" title={item.text}>{item.text}</span>
                 {item.guides.length > 0 && <span className="queue-guides" title={item.guides.join(', ')}>🧭 {item.guides.length}</span>}
                 {(running || pending) && (
-                  <button
-                    className="queue-intervene"
-                    title="提到队首（等 LLM 输出完成后优先发送）"
-                    onClick={() => interveneQueueItem(i)}
-                  >⚡插队</button>
+                  <button className="queue-intervene" title="插队" onClick={() => interveneQueueItem(i)}>⚡</button>
                 )}
-                {i === 0 && running && (
-                  <button className="queue-del" onClick={() => updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.slice(1) }))}>✕</button>
-                )}
-                {i !== 0 && (
-                  <button className="queue-del" onClick={() => updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.filter((_, j) => j !== i) }))}>✕</button>
-                )}
+                <button className="queue-del" onClick={() => {
+                  if (i === 0) updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.slice(1) }));
+                  else updateChatSession(key, (c) => ({ ...c, messageQueue: c.messageQueue.filter((_, j) => j !== i) }));
+                }}>✕</button>
               </div>
             ))}
           </div>
         )}
-        {error && <div className="error-box" style={{ margin: '4px 0' }}>{error}</div>}
+
+        {error && <div className="error-box compact">
+          {friendlyError(error)}
+          {error !== friendlyError(error) && (
+            <details style={{ marginTop: 4, fontSize: 11 }}>
+              <summary style={{ cursor: 'pointer', color: 'var(--text-tertiary)' }}>技术详情</summary>
+              <pre style={{ margin: '4px 0 0', padding: 8, background: 'rgba(0,0,0,0.05)', borderRadius: 4, overflow: 'auto', maxHeight: 120 }}>{error}</pre>
+            </details>
+          )}
+        </div>}
+
         {attachments.length > 0 && (
-          <div className="attachment-bar">
+          <div className="attachment-bar compact">
             {attachments.map((a, i) => (
               <span key={i} className="attach-chip">
                 📎 {a.name}
@@ -1206,33 +1925,32 @@ export default function ChatPage() {
             ))}
           </div>
         )}
-        <div className="chat-mode-bar">
-          {availableSkills.length > 0 && (
-            <>
-              <span className="hint" style={{ marginRight: 4 }}>Skill:</span>
-              <select
-                className="skill-select"
-                value={skillName}
-                onChange={(e) => setSkillName(e.target.value)}
-                title="加载 Skill 作为本轮对话的操作指南"
-              >
-                <option value="">— 不指定 —</option>
-                {availableSkills.map((s) => (
-                  <option key={s.scope + ':' + s.name} value={s.name}>
-                    {s.name}{s.description ? ` — ${s.description}` : ''}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
-        </div>
-        <div className="input-row">
-          <label className="btn small" style={{ alignSelf: 'flex-end', marginBottom: 6 }}>
-            📎 附件
+
+        <div className="dock-row-2">
+          <label className="btn small dock-btn" title="上传附件">
+            📎
             <input type="file" multiple style={{ display: 'none' }} onChange={pickFiles} />
           </label>
+
+          {availableSkills.length > 0 && (
+            <select
+              className="skill-select dock-btn"
+              value={skillName}
+              onChange={(e) => setSkillName(e.target.value)}
+              title="选择角色或 Skill"
+            >
+              <option value="">🧭 默认</option>
+              {availableSkills.map((s) => (
+                <option key={s.scope + ':' + s.name} value={s.name}>
+                  🧭 {s.name}{s.description ? ` — ${s.description}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+
           <textarea
             ref={textareaRef}
+            className="dock-textarea"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onPaste={onPaste}
@@ -1247,50 +1965,51 @@ export default function ChatPage() {
               }
             }}
             placeholder={running
-              ? `运行中 — Enter 入队，Ctrl+Enter 插队，Shift+Enter 换行`
+              ? `运行中 — Enter 入队 · Ctrl+Enter 插队 · Shift+Enter 换行`
               : '输入消息，Enter 发送，Shift+Enter 换行，可粘贴截图'}
             rows={1}
           />
+
           {running && (
             <button
-              className="btn danger"
-              style={{ alignSelf: 'flex-end', marginBottom: 6 }}
+              className="btn danger dock-btn"
               onClick={() => {
                 getChatSocket().send({ type: 'stop', workspaceId, sessionId });
                 console.log('[ws-send] stop');
               }}
               title="停止当前回复"
-            >⏹ 停止</button>
+            >⏹</button>
           )}
           {running && (input.trim() || attachments.length > 0) && (
-            <button
-              className="btn intervene-btn"
-              style={{ alignSelf: 'flex-end', marginBottom: 6 }}
-              onClick={interveneNow}
-              title="插队：等 LLM 输出完成后优先发送（Ctrl+Enter）"
-            >⚡插队</button>
+            <button className="btn intervene-btn dock-btn" onClick={interveneNow} title="插队：Ctrl+Enter">⚡</button>
           )}
-          <button className={`btn ${running ? 'primary' : 'primary'}`} style={{ alignSelf: 'flex-end', marginBottom: 6 }} onClick={submit}>
-            {running ? '📥 入队' : '➤ 发送'}
+          <button className="btn primary dock-btn send-btn" onClick={submit} title={running ? '加入队列' : '发送消息'}>
+            {running ? '📥' : '➤'}
           </button>
         </div>
       </div>
     </div>
   );
 
-  // resizer 拖拽
-  const onResizerDown = (e: React.MouseEvent) => {
+  // resizer 拖拽：左侧栏（'left'）和右侧 Trace 栏（'right'）
+  const onResizerDown = (side: 'left' | 'right') => (e: React.MouseEvent) => {
     e.preventDefault();
-    setResizing(true);
+    e.stopPropagation();
+    setResizing(side);
     const startX = e.clientX;
-    const startW = panelWidth;
+    const startWLeft = panelWidth;
+    const startWRight = traceWidth;
     const onMove = (ev: MouseEvent) => {
-      const delta = startX - ev.clientX;
-      const newW = Math.max(240, Math.min(600, startW + delta));
-      setPanelWidth(newW);
+      if (side === 'left') {
+        const delta = startX - ev.clientX;
+        setPanelWidth(Math.max(220, Math.min(420, startWLeft + delta)));
+      } else {
+        const delta = ev.clientX - startX;
+        setTraceWidth(Math.max(320, Math.min(640, startWRight + delta)));
+      }
     };
     const onUp = () => {
-      setResizing(false);
+      setResizing(null);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
     };
@@ -1373,23 +2092,17 @@ export default function ChatPage() {
             </div>
           </>
         );
-      case 'auth':
-        return authPanel;
       case 'files':
         return filePanel;
     }
   };
 
   return (
-    <div className={`chat-page ${resizing ? 'resizing' : ''}`}>
-      {chatArea}
-
-      <div className="chat-resizer" onMouseDown={onResizerDown} title="拖拽调整" />
-
-      <div className="chat-side" style={{ width: panelWidth }}>
+    <div className={`chat-page ${resizing ? `resizing-${resizing}` : ''}`}>
+      {/* 左栏：会话 / 文件 / 工具白名单 */}
+      <div className="chat-side left-side" style={{ width: panelWidth }}>
         <div className="side-tabs">
           <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
-          <button className={`btn small ${tab === 'auth' ? 'primary' : ''}`} onClick={() => setTab('auth')}>🔐 授权</button>
           <button className={`btn small ${tab === 'files' ? 'primary' : ''}`} onClick={() => setTab('files')}>📁 文件</button>
           {openFiles.length > 0 && (
             <button className="btn small" onClick={() => { setOpenFiles([]); setActiveFileTab(null); }} title="关闭所有文件">📑 ×</button>
@@ -1399,6 +2112,62 @@ export default function ChatPage() {
           {renderToolPanel()}
         </div>
       </div>
+
+      <div className="chat-resizer left-resizer" onMouseDown={onResizerDown('left')} title="拖拽调整左栏宽度" />
+
+      {/* 中栏：聊天主区 */}
+      {chatArea}
+
+      {/* 右栏：⚡ 执行流 Trace（Cursor 风格） */}
+      {!traceCollapsed && (
+        <>
+          <div className="chat-resizer right-resizer" onMouseDown={onResizerDown('right')} title="拖拽调整 Trace 宽度" />
+          <aside className="trace-panel" style={{ width: traceWidth }}>
+            <div className="trace-header">
+              <div className="trace-title">
+                <span className="trace-icon">⚡</span>
+                <span>执行流</span>
+                <span className="trace-count">{execEvents.length}</span>
+                {running && <span className="trace-running">
+                  <span className="spinner-tiny" /> 运行中
+                </span>}
+              </div>
+              <div className="trace-actions">
+                <button
+                  className="btn small"
+                  onClick={() => setViewMode(viewMode === 'stream' ? 'chat' : 'stream')}
+                  title={viewMode === 'stream' ? '切换中栏到聊天' : '切换中栏到执行流'}
+                >
+                  {viewMode === 'stream' ? '💬' : '⚡'}
+                </button>
+                <button
+                  className="btn small trace-close"
+                  onClick={() => setTraceCollapsed(true)}
+                  title="折叠执行流面板（Alt+X）"
+                >×</button>
+              </div>
+            </div>
+            <div className="trace-body">
+              <ExecutionStream
+                events={execEvents}
+                workspaceId={workspaceId}
+                sessionId={sessionId}
+                completed={!running}
+              />
+            </div>
+          </aside>
+        </>
+      )}
+      {traceCollapsed && (
+        <button
+          className="trace-fab"
+          onClick={() => setTraceCollapsed(false)}
+          title="展开执行流面板（Alt+X）"
+        >
+          ⚡ <span className="trace-fab-count">{execEvents.length}</span>
+          {running && <span className="spinner-tiny" />}
+        </button>
+      )}
 
       {pending && (
         <ConfirmDialog

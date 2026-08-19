@@ -47,6 +47,16 @@ public class WorkspaceEntity {
     @Column(name = "updated_at")
     private Instant updatedAt;
     
+    @Column(length = 32)
+    @Builder.Default
+    private String intent = "general";
+
+    @Column(name = "active_skills", columnDefinition = "TEXT")
+    private String activeSkills;
+
+    @Column(name = "scenario_id", length = 64)
+    private String scenarioId;
+
     @Column(columnDefinition = "TEXT")
     private String metadata;
 }

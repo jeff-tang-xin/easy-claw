@@ -46,6 +46,33 @@ public class AgentRoleEntity {
     @Column(name = "model", length = 64)
     private String model;
 
+    /**
+     * 角色类型：
+     * <ul>
+     *   <li>MARKDOWN：使用 MarkdownSubagent 动态创建 Agent（默认）</li>
+     *   <li>BUILTIN：关联一个已有的 @Agent 类</li>
+     * </ul>
+     */
+    @Column(name = "role_type", length = 16)
+    @Builder.Default
+    private String roleType = "MARKDOWN";
+
+    /** BUILTIN 类型时，关联的 @Agent 类全限定名 */
+    @Column(name = "agent_class_name", length = 255)
+    private String agentClassName;
+
+    /** 角色默认推荐的 Skill 列表（JSON 数组） */
+    @Column(name = "default_skills", columnDefinition = "TEXT")
+    private String defaultSkills;
+
+    /** 角色允许调用的子 Agent 类型列表（JSON 数组） */
+    @Column(name = "allowed_agents", columnDefinition = "TEXT")
+    private String allowedAgents;
+
+    /** 角色允许调用的 MCP 工具/服务列表（JSON 数组） */
+    @Column(name = "allowed_mcp", columnDefinition = "TEXT")
+    private String allowedMcp;
+
     @Column(name = "is_active")
     private Boolean active;
 

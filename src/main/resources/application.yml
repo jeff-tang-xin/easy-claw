@@ -1,5 +1,6 @@
 server:
   port: 18080
+
 spring:
   profiles:
     active: dev-sqlite
@@ -15,57 +16,37 @@ spring:
 # ============================
 embabel:
   models:
-    default-llm: ${EMBABEL_DEFAULT_MODEL:gpt-4o-mini}
+    default-llm: ${EMBABEL_DEFAULT_MODEL:ark-code-latest}
+    default-embedding-model: text-embedding-3-small
   agent:
-    logging:
-      personality: default
-      verbosity: info
+    platform:
+      test:
+        mock-mode: false
+      models:
+        openai:
+          api-key:
+          base-url:
+          completions: /chat/completions
+          embeddings-path: /embeddings
 
 # ============================
 # Easy-Claw 工作区配置
 # ============================
 easy-claw:
   workspace:
-    root: ${user.home}/.easyClaw/workspaces
+    # 默认 workspace 根目录（仅用于 WorkspaceSandbox 无上下文的兜底场景）
+    # 实际 workspace 路径由前端创建并存入 SQLite
+    root: ${user.dir}/workspaces
   tools:
     web:
       enabled: true
 
 # ============================
-# Embabel CoreToolGroups.WEB 需要 Brave Search API Key
-# 免费申请: https://brave.com/search/api/
+# Brave Search (Embabel Web 工具)
 # ============================
 brave:
   search:
     api-key: ${BRAVE_SEARCH_API_KEY:${BRAVE_API_KEY:}}
-
-# ============================
-# Spring AI / OpenAI 配置（Embabel 底层使用 Spring AI）
-# 支持任何 OpenAI 兼容 API（DeepSeek、DashScope、Moonshot、Ollama 等）
-# ============================
-spring:
-  ai:
-    openai:
-      api-key: ${OPENAI_API_KEY:${DEEPSEEK_API_KEY:}}
-      base-url: ${OPENAI_BASE_URL:${DEEPSEEK_BASE_URL:https://api.deepseek.com/v1}}
-      chat:
-        options:
-          model: ${OPENAI_MODEL:${DEEPSEEK_MODEL:deepseek-chat}}
-          temperature: 0.3
-
-# ============================
-# 日志级别：Embabel 内部噪音降为 WARN，业务日志保持 INFO
-# ============================
-logging:
-  level:
-    root: INFO
-    com.embabel: WARN
-    com.xinl.easyclaw: INFO
-  charset:
-    console: UTF-8
-    file: UTF-8
-  pattern:
-    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
 
 # ============================
 # Workspace 安全配置
@@ -80,13 +61,22 @@ ai:
         - .idea
         - .vscode
         - agents
-      max-file-size: 10485760
 
 # ============================
-# SQLite 系统元数据库（~/.easyClaw 目录，由启动类初始化）
-# 所有 Workspace 共用；Workspace 自身的状态/对话数据存放在其指定目录的 .easyClaw/agent/ 下
+# 日志级别
 # ============================
+logging:
+  level:
+    root: INFO
+    com.embabel: DEBUG
+    com.embabel.plan: DEBUG
+    com.xinl.easyclaw: DEBUG
+  charset:
+    console: UTF-8
 
+# ============================
+# SQLite profile
+# ============================
 ---
 spring:
   config:

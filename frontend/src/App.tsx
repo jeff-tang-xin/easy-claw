@@ -6,14 +6,18 @@ import RolesPage from './pages/RolesPage';
 import ToolsPage from './pages/ToolsPage';
 import McpPage from './pages/McpPage';
 import SettingsPage from './pages/SettingsPage';
+import MemoriesPage from './pages/MemoriesPage';
+import ScenariosPage from './pages/ScenariosPage';
 import './chatSocket';
 
 const menu = [
   { to: '/workspaces', icon: '📁', label: '工作区' },
+  { to: '/scenarios', icon: '🎯', label: '场景' },
   { to: '/skills', icon: '📚', label: 'Skills' },
   { to: '/roles', icon: '🎭', label: '角色' },
   { to: '/tools', icon: '🔧', label: '工具' },
   { to: '/mcp', icon: '🔌', label: 'MCP' },
+  { to: '/memories', icon: '🧠', label: '记忆' },
   { to: '/settings', icon: '⚙️', label: '设置' },
 ];
 
@@ -41,17 +45,19 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar-footer">AgentScope 2.0</div>
+        <div className="sidebar-footer">Embabel 1.5 · Easy-Claw</div>
       </aside>
       <main className="app-main">
         <Routes>
           <Route path="/" element={<Navigate to="/workspaces" replace />} />
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/chat/:workspaceId" element={<ChatPage />} />
+          <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/roles" element={<RolesPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/mcp" element={<McpPage />} />
+          <Route path="/memories" element={<MemoriesPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>

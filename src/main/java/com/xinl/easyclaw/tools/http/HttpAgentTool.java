@@ -3,6 +3,7 @@ package com.xinl.easyclaw.tools.http;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
+import com.xinl.easyclaw.mcp.entity.McpToolEntity;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -47,6 +48,19 @@ public class HttpAgentTool {
         this.parameters = buildSchema();
     }
 
+    /**
+     * 从 McpToolEntity（子 endpoint）构造，自动合并父 McpService 的共享 headers。
+     */
+    public HttpAgentTool(McpToolEntity tool) {
+        this.name = tool.getToolName();
+        this.description = tool.getDescription() != null
+                ? tool.getDescription()
+                : (tool.getDisplayName() != null ? tool.getDisplayName() : tool.getToolName());
+        String parentHeaders = tool.getService() != null ? tool.getService().getHeaders() : null;
+        this.config = HttpToolConfig.parse(tool.getToolConfig(), parentHeaders);
+        this.parameters = buildSchema();
+    }
+
     private Map<String, Object> buildSchema() {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("type", "object");
@@ -54,6 +68,7 @@ public class HttpAgentTool {
         List<String> required = new ArrayList<>();
         for (Map.Entry<String, ParamDef> e : config.params.entrySet()) {
             ParamDef p = e.getValue();
+            if (!p.exposeToLlm) continue;
             Map<String, Object> prop = new LinkedHashMap<>();
             prop.put("type", p.type);
             prop.put("description", p.description != null ? p.description : e.getKey());
@@ -88,8 +103,17 @@ public class HttpAgentTool {
         for (Map.Entry<String, ParamDef> e : config.params.entrySet()) {
             String key = e.getKey();
             ParamDef p = e.getValue();
-            Object value = args.get(key);
-            if (value == null) continue;
+            Object value;
+            if (!p.exposeToLlm) {
+                value = p.defaultValue;
+                if (value == null || (value instanceof String s && s.isBlank())) continue;
+            } else {
+                value = args.get(key);
+                if (value == null) {
+                    value = p.defaultValue;
+                }
+                if (value == null || (value instanceof String s && s.isBlank())) continue;
+            }
             switch (p.in) {
                 case "path" -> url = url.replace("{" + key + "}", URLEncoder.encode(String.valueOf(value), StandardCharsets.UTF_8));
                 case "query" -> queryParams.put(key, value);
@@ -225,6 +249,10 @@ public class HttpAgentTool {
         String description;
         boolean required = false;
         List<String> enumValues;
+        /** 是否暴露给 LLM 作为工具参数（默认 true）。false 时作为固定参数，使用 defaultValue */
+        boolean exposeToLlm = true;
+        /** 固定参数值（exposeToLlm=false 时使用；exposeToLlm=true 时作为 LLM 未传参时的 fallback） */
+        Object defaultValue;
 
         static ParamDef parse(Map<String, Object> m) {
             ParamDef p = new ParamDef();
@@ -233,6 +261,8 @@ public class HttpAgentTool {
             if (m.get("description") != null) p.description = String.valueOf(m.get("description"));
             if (m.get("required") instanceof Boolean b) p.required = b;
             if (m.get("enum") instanceof List<?> l) p.enumValues = l.stream().map(String::valueOf).toList();
+            if (m.get("exposeToLlm") instanceof Boolean b) p.exposeToLlm = b;
+            if (m.get("defaultValue") != null) p.defaultValue = m.get("defaultValue");
             return p;
         }
     }

@@ -36,7 +36,15 @@ interface WorkspaceRef {
 
 interface KVRow { key: string; value: string; }
 
-interface ParamRow { name: string; in: 'path' | 'query' | 'body'; type: string; required: boolean; description: string; }
+interface ParamRow {
+  name: string;
+  in: 'path' | 'query' | 'body';
+  type: string;
+  required: boolean;
+  description: string;
+  exposeToLlm: boolean;
+  defaultValue?: string;
+}
 
 function parseJsonObj(text: string | undefined): KVRow[] {
   if (!text) return [];
@@ -114,10 +122,12 @@ interface HttpToolForm {
   url: string;
   bodyMode: string;
   params: ParamRow[];
+  preconditions: string[];
+  effects: string[];
 }
 
 function parseHttpToolConfig(json: string | undefined, fallbackUrl?: string): HttpToolForm {
-  const form: HttpToolForm = {method: 'GET', url: fallbackUrl || '', bodyMode: 'json', params: []};
+  const form: HttpToolForm = {method: 'GET', url: fallbackUrl || '', bodyMode: 'json', params: [], preconditions: [], effects: []};
   if (!json) return form;
   try {
     const cfg = JSON.parse(json);
@@ -125,6 +135,9 @@ function parseHttpToolConfig(json: string | undefined, fallbackUrl?: string): Ht
     if (cfg.url) form.url = cfg.url;
     else if (cfg.urlTemplate) form.url = cfg.urlTemplate;
     if (cfg.bodyMode) form.bodyMode = cfg.bodyMode;
+    if (cfg.preconditions && Array.isArray(cfg.preconditions)) form.preconditions = cfg.preconditions.map(String);
+    if (cfg.effects && Array.isArray(cfg.effects)) form.effects = cfg.effects.map(String);
+    else if (cfg.postconditions && Array.isArray(cfg.postconditions)) form.effects = cfg.postconditions.map(String);
     if (cfg.params && typeof cfg.params === 'object') {
       form.params = Object.entries(cfg.params).map(([name, def]: [string, any]) => ({
         name,
@@ -132,6 +145,8 @@ function parseHttpToolConfig(json: string | undefined, fallbackUrl?: string): Ht
         type: def.type || 'string',
         required: !!def.required,
         description: def.description || '',
+        exposeToLlm: def.exposeToLlm !== false,
+        defaultValue: def.defaultValue !== undefined ? String(def.defaultValue) : '',
       }));
     }
   } catch {}
@@ -142,12 +157,20 @@ function buildHttpToolConfig(form: HttpToolForm): string {
   const params: Record<string, any> = {};
   form.params.forEach(p => {
     if (!p.name.trim()) return;
-    const def: any = {in: p.in, type: p.type || 'string'};
+    const def: any = {in: p.in, type: p.type || 'string', exposeToLlm: p.exposeToLlm};
     if (p.required) def.required = true;
     if (p.description) def.description = p.description;
+    if (p.defaultValue !== undefined && p.defaultValue !== '') {
+      const v = p.defaultValue;
+      if (def.type === 'boolean') def.defaultValue = v === 'true';
+      else if (def.type === 'integer' || def.type === 'number') def.defaultValue = Number(v);
+      else def.defaultValue = v;
+    }
     params[p.name.trim()] = def;
   });
   const obj: any = {method: form.method, url: form.url, bodyMode: form.bodyMode, params};
+  if (form.preconditions?.length) obj.preconditions = form.preconditions.filter(s => s.trim());
+  if (form.effects?.length) obj.effects = form.effects.filter(s => s.trim());
   return JSON.stringify(obj);
 }
 
@@ -163,7 +186,7 @@ export default function McpPage() {
   const [editing, setEditing] = useState<McpService | null>(null);
   const [editMode, setEditMode] = useState<'form' | 'json' | 'copy'>('form');
   const [jsonText, setJsonText] = useState('');
-  const [httpForm, setHttpForm] = useState<HttpToolForm>({method: 'GET', url: '', bodyMode: 'json', params: []});
+  const [httpForm, setHttpForm] = useState<HttpToolForm>({method: 'GET', url: '', bodyMode: 'json', params: [], preconditions: [], effects: []});
   const [copyTarget, setCopyTarget] = useState<{templateId: number; scope: string; workspaceId: string} | null>(null);
 
   const load = async () => {
@@ -306,7 +329,7 @@ export default function McpPage() {
       url: '', headers: '{}',
       scope: 'GLOBAL', workspaceId: '',
     });
-    setHttpForm({method: 'GET', url: '', bodyMode: 'json', params: []});
+    setHttpForm({method: 'GET', url: '', bodyMode: 'json', params: [], preconditions: [], effects: []});
     setEditMode('form');
   };
 
@@ -660,37 +683,84 @@ export default function McpPage() {
                   <div className="field">
                     <label>参数定义</label>
                     <div style={{fontSize: 11, color: '#888', marginBottom: 4}}>
-                      <code>in</code>：path（URL 模板变量 {'{xxx}'}）/ query（?key=val）/ body（JSON body 字段）
+                      <code>in</code>：path（URL 模板变量 {'{xxx}'}）/ query（?key=val）/ body（JSON body 字段）；
+                      <code>暴露给 LLM</code>：关闭则 Agent 看不到此参数，用固定值填充
                     </div>
-                    <div style={{display: 'flex', flexDirection: 'column', gap: 4}}>
+                    <div style={{display: 'flex', flexDirection: 'column', gap: 6}}>
                       {httpForm.params.map((p, i) => (
-                        <div key={i} style={{display: 'flex', gap: 4, alignItems: 'center', fontSize: 12}}>
-                          <input value={p.name} onChange={e => {
-                            const copy = [...httpForm.params]; copy[i] = {...p, name: e.target.value}; setHttpForm({...httpForm, params: copy});
-                          }} placeholder="参数名" style={{flex: 1, padding: '4px 6px'}} />
-                          <select value={p.in} onChange={e => {
-                            const copy = [...httpForm.params]; copy[i] = {...p, in: e.target.value as any}; setHttpForm({...httpForm, params: copy});
-                          }} style={{padding: '4px 2px'}}>
-                            {PARAM_IN.map(v => <option key={v} value={v}>{v}</option>)}
-                          </select>
-                          <select value={p.type} onChange={e => {
-                            const copy = [...httpForm.params]; copy[i] = {...p, type: e.target.value}; setHttpForm({...httpForm, params: copy});
-                          }} style={{padding: '4px 2px'}}>
-                            {PARAM_TYPES.map(t => <option key={t}>{t}</option>)}
-                          </select>
-                          <label style={{display: 'flex', alignItems: 'center', gap: 2, whiteSpace: 'nowrap'}}>
-                            <input type="checkbox" checked={p.required} onChange={e => {
-                              const copy = [...httpForm.params]; copy[i] = {...p, required: e.target.checked}; setHttpForm({...httpForm, params: copy});
-                            }} /> 必填
-                          </label>
-                          <input value={p.description} onChange={e => {
-                            const copy = [...httpForm.params]; copy[i] = {...p, description: e.target.value}; setHttpForm({...httpForm, params: copy});
-                          }} placeholder="描述（给 Agent 看的）" style={{flex: 2, padding: '4px 6px'}} />
-                          <button className="btn small danger" style={{padding: '2px 8px'}} onClick={() => setHttpForm({...httpForm, params: httpForm.params.filter((_, idx) => idx !== i)})}>×</button>
+                        <div key={i} style={{
+                          display: 'flex', flexDirection: 'column', gap: 4,
+                          padding: '6px 8px', border: '1px solid #e0e0e0', borderRadius: 4, background: '#fafafa',
+                        }}>
+                          <div style={{display: 'flex', gap: 4, alignItems: 'center', fontSize: 12}}>
+                            <input value={p.name} onChange={e => {
+                              const copy = [...httpForm.params]; copy[i] = {...p, name: e.target.value}; setHttpForm({...httpForm, params: copy});
+                            }} placeholder="参数名" style={{flex: 1, padding: '4px 6px'}} />
+                            <select value={p.in} onChange={e => {
+                              const copy = [...httpForm.params]; copy[i] = {...p, in: e.target.value as any}; setHttpForm({...httpForm, params: copy});
+                            }} style={{padding: '4px 2px'}}>
+                              {PARAM_IN.map(v => <option key={v} value={v}>{v}</option>)}
+                            </select>
+                            <select value={p.type} onChange={e => {
+                              const copy = [...httpForm.params]; copy[i] = {...p, type: e.target.value}; setHttpForm({...httpForm, params: copy});
+                            }} style={{padding: '4px 2px'}}>
+                              {PARAM_TYPES.map(t => <option key={t}>{t}</option>)}
+                            </select>
+                            <label style={{display: 'flex', alignItems: 'center', gap: 2, whiteSpace: 'nowrap'}}>
+                              <input type="checkbox" checked={p.required} onChange={e => {
+                                const copy = [...httpForm.params]; copy[i] = {...p, required: e.target.checked}; setHttpForm({...httpForm, params: copy});
+                              }} /> 必填
+                            </label>
+                            <button className="btn small danger" style={{padding: '2px 8px'}} onClick={() => setHttpForm({...httpForm, params: httpForm.params.filter((_, idx) => idx !== i)})}>×</button>
+                          </div>
+                          <div style={{display: 'flex', gap: 6, alignItems: 'center', fontSize: 12}}>
+                            <input value={p.description} onChange={e => {
+                              const copy = [...httpForm.params]; copy[i] = {...p, description: e.target.value}; setHttpForm({...httpForm, params: copy});
+                            }} placeholder="描述（给 Agent 看的）" style={{flex: 2, padding: '4px 6px'}} />
+                            <label style={{display: 'flex', alignItems: 'center', gap: 2, whiteSpace: 'nowrap', padding: '0 4px', borderRight: '1px solid #ddd'}} title="关闭则 Agent 看不到此参数，自动使用固定值">
+                              <input type="checkbox" checked={p.exposeToLlm} onChange={e => {
+                                const copy = [...httpForm.params]; copy[i] = {...p, exposeToLlm: e.target.checked}; setHttpForm({...httpForm, params: copy});
+                              }} /> 暴露给 LLM
+                            </label>
+                            <div style={{display: 'flex', alignItems: 'center', gap: 2, whiteSpace: 'nowrap'}}>
+                              <span className="hint" style={{fontSize: 11}}>{p.exposeToLlm ? 'fallback' : '固定值'}:</span>
+                              <input value={p.defaultValue || ''} onChange={e => {
+                                const copy = [...httpForm.params]; copy[i] = {...p, defaultValue: e.target.value}; setHttpForm({...httpForm, params: copy});
+                              }} placeholder={p.exposeToLlm ? 'LLM 未传时使用' : '始终使用此值'} style={{width: 140, padding: '4px 6px'}} />
+                            </div>
+                          </div>
                         </div>
                       ))}
                     </div>
-                    <button className="btn small" style={{marginTop: 4}} onClick={() => setHttpForm({...httpForm, params: [...httpForm.params, {name: '', in: 'query', type: 'string', required: false, description: ''}]})}>＋ 添加参数</button>
+                    <button className="btn small" style={{marginTop: 4}} onClick={() => setHttpForm({...httpForm, params: [...httpForm.params, {name: '', in: 'query', type: 'string', required: false, description: '', exposeToLlm: true, defaultValue: ''}]})}>＋ 添加参数</button>
+                  </div>
+
+                  {/* GOAP 元数据 */}
+                  <div className="field">
+                    <label>GOAP 规划元数据（可选）</label>
+                    <div style={{fontSize: 11, color: '#888', marginBottom: 4}}>
+                      用于 GOAP 规划器决定何时调用此工具。不填则自动生成默认值。
+                    </div>
+                    <div style={{display: 'flex', gap: 10}}>
+                      <div style={{flex: 1}}>
+                        <div style={{fontSize: 11, color: '#666', marginBottom: 2}}>前置条件（每行一个）</div>
+                        <textarea
+                          value={httpForm.preconditions.join('\n')}
+                          onChange={e => setHttpForm({...httpForm, preconditions: e.target.value.split('\n')})}
+                          style={{width: '100%', fontSize: 12, minHeight: 50, fontFamily: 'monospace', padding: 6, boxSizing: 'border-box'}}
+                          placeholder="已认证&#10;有项目权限"
+                        />
+                      </div>
+                      <div style={{flex: 1}}>
+                        <div style={{fontSize: 11, color: '#666', marginBottom: 2}}>执行效果（每行一个）</div>
+                        <textarea
+                          value={httpForm.effects.join('\n')}
+                          onChange={e => setHttpForm({...httpForm, effects: e.target.value.split('\n')})}
+                          style={{width: '100%', fontSize: 12, minHeight: 50, fontFamily: 'monospace', padding: 6, boxSizing: 'border-box'}}
+                          placeholder="创建了 Jira issue&#10;发送了邮件"
+                        />
+                      </div>
+                    </div>
                   </div>
                 </>
               )}

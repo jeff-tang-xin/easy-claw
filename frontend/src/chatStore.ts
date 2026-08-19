@@ -11,6 +11,13 @@
 //   · activeTools / pending 是瞬时 UI 状态，重连后清空
 import {useEffect, useReducer} from 'react';
 
+let msgIdSeed = 0;
+export function newMessageId(): string {
+  msgIdSeed += 1;
+  return `msg-${Date.now()}-${msgIdSeed}`;
+}
+
+
 export interface Segment {
   type: string;
   content: string;
@@ -18,9 +25,12 @@ export interface Segment {
 }
 
 export interface ChatMessage {
+  id?: string;
   role: 'user' | 'ai';
   segments: Segment[];
   attachments?: { name: string; mimeType: string }[];
+  executionLog?: ExecutionLogEntry[];
+  plan?: PlanState;
 }
 
 export interface PendingConfirm {
@@ -46,12 +56,171 @@ export interface ChatSessionState {
   running: boolean;
   pending: PendingConfirm | null;
   error: string;
-  /** 当前正在执行的工具名集合（tool 事件添加，tool_end 事件移除） */
   activeTools: string[];
-  /** 当前正在运行的子 Agent 名集合（subagent 事件添加，subagent_end 事件移除） */
   activeSubagents: string[];
-  /** 用户输入队列：running 时新消息入队，end 后自动发送 */
   messageQueue: QueueItem[];
+}
+
+// ===== Timeline 数据模型 =====
+
+export type ExecStatus = 'running' | 'done' | 'failed';
+
+export interface ExecEntryBase {
+  timestamp?: number;
+  processId?: string;
+  parentProcessId?: string;
+  agentName?: string;
+  status: ExecStatus;
+}
+
+export interface LlmEntry extends ExecEntryBase {
+  kind: 'llm';
+  action?: string;
+  model: string;
+  promptPreview?: string;
+  messageCount?: number;
+  responsePreview?: string;
+  responseLength?: number;
+  durationMs?: number;
+}
+
+export interface ToolEntry extends ExecEntryBase {
+  kind: 'tool';
+  action?: string;
+  tool: string;
+  input: string;
+  output?: string;
+  correlationId?: string;
+  durationMs?: number;
+}
+
+export interface ActionEntry extends ExecEntryBase {
+  kind: 'action';
+  name: string;
+  description?: string;
+  index?: number;
+  total?: number;
+  durationMs?: number;
+}
+
+export interface SubagentEntry extends ExecEntryBase {
+  kind: 'subagent';
+  name: string;
+  lifecycle: 'start' | 'end';
+  durationMs?: number;
+}
+
+export type ExecutionLogEntry = LlmEntry | ToolEntry | ActionEntry | SubagentEntry;
+
+/**
+ * AgentGroup：按 processId 平铺分组的智能体面板数据。
+ * 多智能体并行，不区分主子，每个 AgentGroup 是一个独立面板。
+ */
+export interface AgentGroup {
+  processId: string;
+  agentName: string;
+  parentProcessId?: string;
+  entries: ExecutionLogEntry[];
+  status: ExecStatus;
+  startedAt: number;
+  endedAt?: number;
+  actionName?: string;
+}
+
+/** 扁平 entries → 按 processId 平铺分组（不嵌套，所有智能体平等并列） */
+export function groupByProcess(entries: ExecutionLogEntry[]): AgentGroup[] {
+  const groups = new Map<string, AgentGroup>();
+  const order: string[] = [];
+
+  const getOrCreate = (pid: string): AgentGroup => {
+    let g = groups.get(pid);
+    if (!g) {
+      g = { processId: pid, agentName: '', entries: [], status: 'running', startedAt: Date.now() };
+      groups.set(pid, g);
+      order.push(pid);
+    }
+    return g;
+  };
+
+  for (const e of entries) {
+    const pid = e.processId || '__root__';
+    const g = getOrCreate(pid);
+
+    if (e.agentName && !g.agentName) g.agentName = e.agentName;
+    if (e.parentProcessId && !g.parentProcessId) g.parentProcessId = e.parentProcessId;
+    if (e.timestamp) {
+      if (!g.startedAt || e.timestamp < g.startedAt) g.startedAt = e.timestamp;
+      if (!g.endedAt || e.timestamp > g.endedAt) g.endedAt = e.timestamp;
+    }
+
+    if (e.kind === 'action') {
+      if (!g.actionName) g.actionName = e.name;
+      if (e.status === 'done' || e.status === 'failed') g.status = e.status;
+      g.entries.push(e);
+    } else if (e.kind === 'subagent') {
+      if (e.lifecycle === 'end') g.status = e.status;
+      g.entries.push(e);
+    } else {
+      g.entries.push(e);
+      if (e.status === 'done' || e.status === 'failed') {
+        g.status = (g.status === 'running') ? e.status : g.status;
+      }
+    }
+  }
+
+  for (const g of groups.values()) {
+    if (!g.agentName) g.agentName = g.actionName || g.processId;
+    g.entries.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+      // 只要还有 running 条目，就不能显示为“完成”
+      const hasRunning = g.entries.some((e) => e.status === 'running');
+      const hasFailed = g.entries.some((e) => e.status === 'failed');
+      g.status = hasRunning ? 'running' : (hasFailed ? 'failed' : 'done');
+  }
+
+  order.sort((a, b) => {
+    const ga = groups.get(a)!;
+    const gb = groups.get(b)!;
+    if (ga.status === 'running' && gb.status !== 'running') return -1;
+    if (gb.status === 'running' && ga.status !== 'running') return 1;
+    return ga.startedAt - gb.startedAt;
+  });
+
+  return order.map((pid) => groups.get(pid)!);
+}
+
+export interface PlanState {
+  goal: string;
+  goalDescription: string;
+  goalPreconditions: Record<string, string>;
+  goalKnownConditions: string[];
+  totalSteps: number;
+  steps: PlanStep[];
+  agent?: PlanAgentInfo;
+  validation?: PlanValidation;
+}
+
+export interface PlanValidation {
+  valid: boolean;
+  invalidSteps: string[];
+  validSteps: string[];
+  availableActions: string[];
+  message: string;
+}
+
+export interface PlanAgentInfo {
+  name: string;
+  description: string;
+  actions: { name: string; description: string }[];
+  goals: string[];
+}
+
+export interface PlanStep {
+  name: string;
+  description: string;
+  status: 'pending' | 'running' | 'done' | 'failed';
+  index: number;
+  preconditions: Record<string, string>;
+  effects: Record<string, string>;
 }
 
 interface ChatStoreShape {

@@ -290,6 +290,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (workspaceId.isEmpty() && warnedEmptyWorkspace.add(sessionId)) {
             log.warn("WS sendJson workspaceId 为空（仅首次）: sessionId={}, type={}", sessionId, evt == null ? "?" : evt.type());
         }
+        String evtType = evt == null ? "?" : evt.type();
+        if ("plan".equals(evtType) || "agent_action".equals(evtType) || "tool_call".equals(evtType)
+                || "llm_call".equals(evtType) || "subagent_lifecycle".equals(evtType)
+                || "step".equals(evtType) || "error".equals(evtType) || "complete".equals(evtType)) {
+            log.info("WS SEND: type={}, sessionId={}, jsonLen={}, hasConnection={}",
+                    evtType, sessionId, json.length(), hasOpenSession());
+        }
         if (!hasOpenSession()) {
             bufferEvent(sessionId, json);
             return;

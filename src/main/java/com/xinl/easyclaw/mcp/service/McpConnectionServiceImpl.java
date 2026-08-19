@@ -3,11 +3,17 @@ package com.xinl.easyclaw.mcp.service;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
+
+
 import com.xinl.easyclaw.mcp.repository.McpServiceRepository;
+import com.xinl.easyclaw.scenario.ActionRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.io.IOException;
 import java.time.Instant;
@@ -21,13 +27,43 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     private static final ObjectMapper mapper = new ObjectMapper();
 
     private final McpServiceRepository repository;
+
+    private final List<McpConnector> mcpConnectors;
+    private final ActionRegistry actionRegistry;
     /** 已建立连接的外部 MCP 客户端缓存 */
     private final Map<Long, Object> clientCache = new ConcurrentHashMap<>();
-    /** 已激活的 HTTP_TOOL 桥接工具缓存 */
-    private final Map<Long, Object> httpToolCache = new ConcurrentHashMap<>();
 
-    public McpConnectionServiceImpl(McpServiceRepository repository) {
+
+
+    public McpConnectionServiceImpl(McpServiceRepository repository,
+                                    List<McpConnector> mcpConnectors,
+                                    @Lazy ActionRegistry actionRegistry) {
         this.repository = repository;
+        this.mcpConnectors = mcpConnectors;
+        this.actionRegistry = actionRegistry;
+    }
+
+    private void notifyMcpChanged() {
+        notifyChanged();
+    }
+
+    @Override
+    public void notifyChanged() {
+        Runnable refresh = () -> {
+            try {
+                actionRegistry.refreshMcpActions();
+            } catch (Exception e) {
+                log.warn("刷新 MCP Action 注册表失败: {}", e.getMessage());
+            }
+        };
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() { refresh.run(); }
+            });
+        } else {
+            refresh.run();
+        }
     }
 
     @Override
@@ -50,6 +86,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         McpServiceEntity saved = repository.save(service);
         log.info("创建 MCP 服务: name={}, scope={}, workspaceId={}, transport={}",
                 service.getName(), scope, service.getWorkspaceId(), service.getTransport());
+        notifyMcpChanged();
         return saved;
     }
 
@@ -81,6 +118,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                     }
                     McpServiceEntity updated = repository.save(existing);
                     log.info("更新 MCP 服务: id={}, name={}", id, existing.getName());
+                    notifyMcpChanged();
                     return updated;
                 })
                 .orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: id=" + id));
@@ -96,6 +134,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
             closeClient(id);
             repository.delete(entity);
             log.info("删除 MCP 服务: id={}, name={}", id, entity.getName());
+            notifyMcpChanged();
         });
     }
 
@@ -143,9 +182,11 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                             existing.setLastConnected(Instant.now());
                             existing.setServerName(existing.getName());
                             existing.setServerVersion("internal-http-bridge");
+                            connectWith(existing);
                             repository.save(existing);
                             return existing;
                         }
+                        connectWith(existing);
                         existing.setIsConnected(true);
                         existing.setLastConnected(Instant.now());
                         repository.save(existing);
@@ -166,7 +207,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         return repository.findById(id)
                 .map(existing -> {
                     closeClient(id);
-                    httpToolCache.remove(id);
+                    disconnectWith(id);
                     existing.setIsConnected(false);
                     McpServiceEntity updated = repository.save(existing);
                     log.info("断开 MCP 服务: id={}, name={}", id, existing.getName());
@@ -177,8 +218,45 @@ public class McpConnectionServiceImpl implements McpConnectionService {
 
     @Override
     public List<Object> getHttpTools() {
-        return new ArrayList<>(httpToolCache.values());
+        List<Object> all = new ArrayList<>();
+        try {
+            for (McpServiceEntity svc : repository.findByIsConnectedTrue()) {
+                for (McpConnector connector : mcpConnectors) {
+                    if (connector.supports(svc)) {
+                        all.addAll(connector.getTools(svc.getId()));
+                    }
+                }
+        }
+        } catch (Exception e) {
+            log.warn("获取 HTTP 工具失败: {}", e.getMessage());
+        }
+        return all;
     }
+
+    private void connectWith(McpServiceEntity service) {
+        for (McpConnector connector : mcpConnectors) {
+            if (connector.supports(service)) {
+                connector.connect(service);
+                return;
+            }
+        }
+        log.warn("没有找到支持该传输类型的 MCP 连接器: name={}, transport={}",
+                service.getName(), service.resolveTransport());
+    }
+
+    private void disconnectWith(Long serviceId) {
+        for (McpConnector connector : mcpConnectors) {
+            try {
+                connector.disconnect(serviceId);
+            } catch (Exception e) {
+                log.warn("断开 MCP 连接器失败: connector={}, id={}, err={}",
+                        connector.getClass().getSimpleName(), serviceId, e.getMessage());
+            }
+        }
+    }
+
+
+
 
     private String inferTransport(McpServiceEntity service) {
         if (service.getCommand() != null && !service.getCommand().isBlank()) {
@@ -192,6 +270,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
 
     private void closeClient(Long id) {
         clientCache.remove(id);
+        disconnectWith(id);
         log.info("MCP 客户端已从缓存移除: id={}", id);
     }
 

@@ -28,6 +28,9 @@ public class PropositionEntity {
     @Column(name = "user_id", nullable = false, length = 64)
     private String userId;
 
+    @Column(name = "workspace_id", length = 64)
+    private String workspaceId;
+
     @Column(name = "content", nullable = false, length = 2000)
     private String content;
 

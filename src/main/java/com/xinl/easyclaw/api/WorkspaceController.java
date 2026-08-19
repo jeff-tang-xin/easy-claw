@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.api;
 
 import com.xinl.easyclaw.agent.AgentService;
+import com.xinl.easyclaw.agent.embabel.PresetIntent;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.workspace.*;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
@@ -33,7 +34,8 @@ public class WorkspaceController {
         this.sandbox = sandbox;
     }
 
-    public record CreateWorkspaceRequest(String name, String description, String path) {
+    public record CreateWorkspaceRequest(String name, String description, String path,
+                                          String intent, List<String> activeSkills, String scenarioId) {
     }
 
     public record CreateSessionRequest(String title) {
@@ -63,16 +65,48 @@ public class WorkspaceController {
         return workspaceManager.getUserWorkspaces(com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID);
     }
 
+    @GetMapping("/{id}")
+    public ResponseEntity<WorkspaceSummary> get(@PathVariable String id) {
+        WorkspaceSummary ws = workspaceManager.getWorkspaceSummary(id);
+        if (ws == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(ws);
+    }
+
     @PostMapping
     public WorkspaceContext create(@RequestBody CreateWorkspaceRequest req) {
         return workspaceManager.createWorkspace(
                 com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID,
-                req.name(), req.description(), req.path());
+                req.name(), req.description(), req.path(), req.intent(), req.activeSkills(), req.scenarioId());
     }
 
     @DeleteMapping("/{id}")
     public void delete(@PathVariable String id) {
         workspaceManager.deleteWorkspace(id);
+    }
+
+    public record UpdateWorkspaceRequest(String intent, List<String> activeSkills, String scenarioId) {}
+
+    @PutMapping("/{id}")
+    public ResponseEntity<WorkspaceSummary> update(@PathVariable String id,
+                                                     @RequestBody UpdateWorkspaceRequest req) {
+        WorkspaceSummary updated = workspaceManager.updateIntent(id, req.intent(), req.activeSkills(), req.scenarioId());
+        if (updated == null) return ResponseEntity.notFound().build();
+        return ResponseEntity.ok(updated);
+    }
+
+    @GetMapping("/presets/intents")
+    public List<Map<String, Object>> listPresetIntents() {
+        List<Map<String, Object>> result = new ArrayList<>();
+        for (Map.Entry<String, PresetIntent.IntentMeta> e : PresetIntent.INTENT_META.entrySet()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("key", e.getKey());
+            m.put("displayName", e.getValue().displayName());
+            m.put("description", e.getValue().description());
+            m.put("emoji", e.getValue().emoji());
+            m.put("defaultSkills", PresetIntent.INTENT_DEFAULT_SKILLS.getOrDefault(e.getKey(), List.of()));
+            result.add(m);
+        }
+        return result;
     }
 
     @GetMapping("/{id}/sessions")

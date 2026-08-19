@@ -40,4 +40,9 @@ public interface McpConnectionService {
     List<McpServiceEntity> findAllTemplates();
 
     McpServiceEntity copyFromTemplate(Long templateId, String scope, String workspaceId);
+
+    /**
+     * 内部使用：McpTool CRUD 后通知刷新 ActionRegistry。
+     */
+    void notifyChanged();
 }

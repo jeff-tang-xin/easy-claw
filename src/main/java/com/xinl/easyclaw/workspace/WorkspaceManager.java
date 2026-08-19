@@ -1,10 +1,11 @@
 package com.xinl.easyclaw.workspace;
 
 import com.xinl.easyclaw.agent.SubagentLoader;
+import com.xinl.easyclaw.agent.embabel.PresetIntent;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AppConstants;
-import com.xinl.easyclaw.config.SystemHomePaths;
-
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
@@ -23,9 +24,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -84,7 +88,8 @@ public class WorkspaceManager {
         }
     }
 
-    public WorkspaceContext createWorkspace(String userId, String name, String description, String customPath) {
+    public WorkspaceContext createWorkspace(String userId, String name, String description, String customPath,
+                                            String intent, List<String> activeSkills, String scenarioId) {
         if (workspaceRepository.existsByPath(customPath)) {
             throw new WorkspaceExceptions.WorkspacePathExistsException(
                     "目录已被占用: " + customPath + "，请选择其他目录");
@@ -105,29 +110,57 @@ public class WorkspaceManager {
         }
 
         String workspaceId = generateWorkspaceId(name);
+        String normalizedIntent = normalizeIntent(intent);
+        List<String> finalSkills = (activeSkills != null && !activeSkills.isEmpty())
+                ? new ArrayList<>(activeSkills)
+                : PresetIntent.resolveActiveSkills(normalizedIntent, null);
+        // 如果前端传了 scenarioId（包括自定义场景），直接用；否则按 intent 自动映射
+        String finalScenarioId = (scenarioId != null && !scenarioId.isBlank())
+                ? scenarioId
+                : intentToScenarioId(normalizedIntent);
 
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         initWorkspaceStructure(workspacePath, easyClawDir);
 
-        /* TODO: migrate to Embabel - buildAgent disabled */
         WorkspaceContext context = WorkspaceContext.builder()
                 .workspaceId(workspaceId)
                 .userId(userId)
                 .name(name)
                 .description(description)
                 .path(workspacePath)
-                .agent(null)
                 .createdAt(Instant.now())
                 .lastAccessed(Instant.now())
+                .intent(normalizedIntent)
+                .activeSkills(finalSkills)
+                .scenarioId(finalScenarioId)
                 .build();
 
         workspaceCache.put(workspaceId, context);
 
-        saveWorkspaceMetadata(context);
+        saveWorkspaceMetadata(context, normalizedIntent, finalScenarioId, finalSkills);
 
-        log.info("Workspace 创建成功: id={}, path={}, model={}",
-                workspaceId, customPath, agentFactory.getModelId());
+        log.info("Workspace 创建成功: id={}, path={}, intent={}, scenarioId={}, skills={}",
+                workspaceId, customPath, normalizedIntent, finalScenarioId, finalSkills);
         return context;
+    }
+
+    // ===================== Intent / ScenarioId 映射 =====================
+    /** intent 合法性归一：不在 PresetIntent.INTENT_META 中的一律回退 GENERAL，避免拼错 scenarioId */
+    static String normalizeIntent(String intent) {
+        if (intent == null || intent.isBlank()) return PresetIntent.GENERAL;
+        Set<String> valid = new LinkedHashSet<>(PresetIntent.INTENT_META.keySet());
+        return valid.contains(intent) ? intent : PresetIntent.GENERAL;
+    }
+
+    /** intent → scenarioId（和 ScenarioService.normalizePresets 中第一个参数 id 完全对应：preset_general / preset_coding / preset_mail-triage ...） */
+    static String intentToScenarioId(String intent) {
+        return "preset_" + normalizeIntent(intent);
+    }
+
+    static String serializeActiveSkills(List<String> skills) {
+        if (skills == null) return null;
+        try { return MAPPER.writeValueAsString(skills); }
+        catch (Exception e) { return "[]"; }
     }
 
     public WorkspaceContext getWorkspace(String workspaceId) {
@@ -165,18 +198,52 @@ public class WorkspaceManager {
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         initWorkspaceStructure(workspacePath, easyClawDir);
 
-        /* TODO: migrate to Embabel - buildAgent disabled */
+        // ===================== 旧库兼容：空 scenarioId 自动根据 intent 修复写库 =====================
+        String intent = resolveIntent(meta);
+        String expectedScenarioId = intentToScenarioId(intent);
+        String scenarioId = meta.getScenarioId();
+        boolean scenarioBroken = scenarioId == null || scenarioId.isBlank() || !scenarioId.equals(expectedScenarioId);
+        if (scenarioBroken) {
+            log.info("Workspace 场景不匹配/缺失，自动修复: id={}, oldScenarioId={}, intent={}, fix→{}",
+                    workspaceId, scenarioId, intent, expectedScenarioId);
+            meta.setScenarioId(expectedScenarioId);
+            scenarioId = expectedScenarioId;
+            if (meta.getIntent() == null || meta.getIntent().isBlank()) meta.setIntent(intent);
+            meta.setUpdatedAt(Instant.now());
+            workspaceRepository.save(meta);
+        }
+        List<String> activeSkills = resolveActiveSkills(meta);
+
         return WorkspaceContext.builder()
                 .workspaceId(workspaceId)
                 .userId(meta.getUserId())
                 .name(meta.getName())
                 .description(meta.getDescription())
                 .path(workspacePath)
-                .agent(null)
                 .createdAt(meta.getCreatedAt())
                 .lastAccessed(Instant.now())
                 .restored(true)
+                .intent(intent)
+                .activeSkills(activeSkills)
+                .scenarioId(scenarioId)
                 .build();
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private String resolveIntent(WorkspaceEntity meta) {
+        String intent = meta.getIntent();
+        return intent == null || intent.isBlank() ? PresetIntent.GENERAL : intent;
+    }
+
+    private List<String> resolveActiveSkills(WorkspaceEntity meta) {
+        String json = meta.getActiveSkills();
+        if (json == null || json.isBlank()) return PresetIntent.resolveActiveSkills(resolveIntent(meta), null);
+        try {
+            List<String> parsed = MAPPER.readValue(json, new TypeReference<>() {});
+            if (parsed != null && !parsed.isEmpty()) return parsed;
+        } catch (Exception ignored) {}
+        return PresetIntent.resolveActiveSkills(resolveIntent(meta), null);
     }
 
     public void rebuildAgent(String workspaceId) {
@@ -184,20 +251,22 @@ public class WorkspaceManager {
     }
 
     public void rebuildAgent(String workspaceId, String sysPromptAugment) {
+        // Embabel 架构下 Agent 由 RoleAgentFactory 按需解析，rebuild 仅刷新 workspaceCache 确保配置变更生效
         workspaceCache.remove(workspaceId);
         WorkspaceContext rebuilt = restoreWorkspace(workspaceId, sysPromptAugment);
         if (rebuilt != null) {
             workspaceCache.put(workspaceId, rebuilt);
-            log.info("Workspace Agent 已重建 (no-op): {}, augment={}", workspaceId,
+            log.info("Workspace cache refreshed: {}, augment={}", workspaceId,
                     sysPromptAugment == null ? "none" : sysPromptAugment.length() + " chars");
         }
     }
 
     public void rebuildAllAgents() {
+        // Embabel 架构下：清除所有 workspace cache 让下次请求拿到最新配置
         for (String id : new java.util.ArrayList<>(workspaceCache.keySet())) {
             rebuildAgent(id);
         }
-        log.info("已重建 {} 个 Workspace 的 Agent (no-op)", workspaceCache.size());
+        log.info("Refreshed {} Workspace caches", workspaceCache.size());
     }
 
     public void deleteWorkspace(String workspaceId) {
@@ -214,6 +283,44 @@ public class WorkspaceManager {
                 .stream()
                 .map(this::toSummary)
                 .collect(Collectors.toList());
+    }
+
+    public WorkspaceSummary getWorkspaceSummary(String workspaceId) {
+        WorkspaceEntity entity = workspaceRepository.findById(workspaceId).orElse(null);
+        if (entity == null) return null;
+        return toSummary(entity);
+    }
+
+    public WorkspaceSummary updateIntent(String workspaceId, String intent, List<String> activeSkills, String scenarioId) {
+        WorkspaceEntity entity = workspaceRepository.findById(workspaceId).orElse(null);
+        if (entity == null) return null;
+        String normalized = normalizeIntent(intent);
+        entity.setIntent(normalized);
+        // 如果前端传了 scenarioId（包括自定义场景），直接用；否则按 intent 自动映射
+        String finalScenarioId = (scenarioId != null && !scenarioId.isBlank())
+                ? scenarioId
+                : intentToScenarioId(normalized);
+        entity.setScenarioId(finalScenarioId);
+        if (activeSkills == null) {
+            entity.setActiveSkills(serializeActiveSkills(PresetIntent.resolveActiveSkills(normalized, null)));
+        } else {
+            try {
+                entity.setActiveSkills(serializeActiveSkills(activeSkills));
+            } catch (Exception e) {
+                log.warn("序列化 activeSkills 失败", e);
+            }
+        }
+        entity.setUpdatedAt(java.time.Instant.now());
+        workspaceRepository.save(entity);
+
+        WorkspaceContext ctx = workspaceCache.get(workspaceId);
+        if (ctx != null) {
+            ctx.setIntent(normalized);
+            ctx.setScenarioId(finalScenarioId);
+            if (activeSkills != null) ctx.setActiveSkills(new ArrayList<>(activeSkills));
+            else ctx.setActiveSkills(PresetIntent.resolveActiveSkills(normalized, null));
+        }
+        return toSummary(entity);
     }
 
     public PathValidationResult validatePath(String path) {
@@ -257,7 +364,6 @@ public class WorkspaceManager {
                 .sessionId(sessionId)
                 .workspaceId(workspaceId)
                 .title(title)
-                .agent(null)
                 .createdAt(Instant.now())
                 .lastAccessed(Instant.now())
                 .build();
@@ -286,7 +392,6 @@ public class WorkspaceManager {
                             .sessionId(entity.getId())
                             .workspaceId(entity.getWorkspaceId())
                             .title(entity.getTitle())
-                            .agent(null)
                             .createdAt(entity.getCreatedAt())
                             .lastAccessed(Instant.now())
                             .restored(true)
@@ -302,6 +407,14 @@ public class WorkspaceManager {
     }
 
     private void saveWorkspaceMetadata(WorkspaceContext ctx) {
+        // 兼容模式：如果调用方没传 intent/scenarioId，根据 ctx.intent 兜底
+        String intent = ctx.getIntent() != null ? ctx.getIntent() : PresetIntent.GENERAL;
+        String scenarioId = ctx.getScenarioId() != null ? ctx.getScenarioId() : intentToScenarioId(intent);
+        List<String> skills = ctx.getActiveSkills() != null ? ctx.getActiveSkills() : PresetIntent.resolveActiveSkills(intent, null);
+        saveWorkspaceMetadata(ctx, intent, scenarioId, skills);
+    }
+
+    private void saveWorkspaceMetadata(WorkspaceContext ctx, String intent, String scenarioId, List<String> activeSkills) {
         WorkspaceEntity entity = WorkspaceEntity.builder()
                 .id(ctx.getWorkspaceId())
                 .userId(ctx.getUserId())
@@ -309,6 +422,9 @@ public class WorkspaceManager {
                 .description(ctx.getDescription())
                 .path(ctx.getPath().toString())
                 .status("active")
+                .intent(intent == null || intent.isBlank() ? PresetIntent.GENERAL : intent)
+                .scenarioId(scenarioId)
+                .activeSkills(serializeActiveSkills(activeSkills))
                 .createdAt(ctx.getCreatedAt())
                 .lastAccessedAt(Instant.now())
                 .build();
@@ -316,15 +432,21 @@ public class WorkspaceManager {
     }
 
     private WorkspaceSummary toSummary(WorkspaceEntity entity) {
+        String intent = entity.getIntent();
+        if (intent == null || intent.isBlank()) intent = PresetIntent.GENERAL;
+        List<String> skills = resolveActiveSkills(entity);
         return WorkspaceSummary.builder()
                 .workspaceId(entity.getId())
                 .name(entity.getName())
                 .agentName(resolveAgentDisplayName(entity.getName()))
                 .description(entity.getDescription())
-                .path(entity.getPath())
+                .path(Path.of(entity.getPath()))
                 .status(entity.getStatus())
                 .createdAt(entity.getCreatedAt())
                 .lastAccessed(entity.getLastAccessedAt())
+                .intent(intent)
+                .scenarioId(entity.getScenarioId())
+                .activeSkills(skills)
                 .build();
     }
 

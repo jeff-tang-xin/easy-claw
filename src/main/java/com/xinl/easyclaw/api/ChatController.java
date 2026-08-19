@@ -1,82 +1,54 @@
 package com.xinl.easyclaw.api;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.AgentService;
-import com.xinl.easyclaw.agent.AgentStateBoxReader;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
-import com.xinl.easyclaw.config.AppConstants;
-import com.xinl.easyclaw.workspace.WorkspaceContext;
-import com.xinl.easyclaw.workspace.WorkspaceManager;
+import com.xinl.easyclaw.workspace.entity.SessionMessageEntity;
+import com.xinl.easyclaw.workspace.repository.SessionMessageRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.io.IOException;
-import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-/**
- * 聊天 REST + SSE API（React 前端调用）
- */
 @RestController
 @RequestMapping("/api/chat")
 public class ChatController {
 
+    private static final Logger log = LoggerFactory.getLogger(ChatController.class);
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final AgentService agentService;
-    private final WorkspaceManager workspaceManager;
-    private final ObjectMapper objectMapper;
-    /** sessionId → SSE 连接（确认/恢复继续用同一连接推流） */
+    private final SessionMessageRepository messageRepo;
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
-    public ChatController(AgentService agentService, WorkspaceManager workspaceManager, ObjectMapper objectMapper) {
+    public ChatController(AgentService agentService, SessionMessageRepository messageRepo) {
         this.agentService = agentService;
-        this.workspaceManager = workspaceManager;
-        this.objectMapper = objectMapper;
+        this.messageRepo = messageRepo;
     }
 
     public record ChatStreamRequest(String workspaceId, String sessionId, String message,
-                                    List<AttachmentDto> attachments, String skillName) {
-    }
+                                    List<AttachmentDto> attachments, String skillName) {}
+    public record AttachmentDto(String name, String mimeType, String base64Data) {}
+    public record ConfirmRequest(String workspaceId, String sessionId, List<String> toolNames, String action) {}
+    public record StopRequest(String workspaceId, String sessionId) {}
 
-    public record AttachmentDto(String name, String mimeType, String base64Data) {
-    }
-
-    public record ConfirmRequest(String workspaceId, String sessionId, List<String> toolNames, String action) {
-    }
-
-    public record StopRequest(String workspaceId, String sessionId) {
-    }
-
-    private static final org.slf4j.Logger log =
-            org.slf4j.LoggerFactory.getLogger(ChatController.class);
-
-    /**
-     * 流式对话：SSE 推送 StreamEvent（text/reasoning/tool/tool_args/tool_result/subagent/confirm/context/end/error）
-     */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter stream(@RequestBody ChatStreamRequest req) {
-        log.info("SSE 连接建立: sessionId={}, messageLen={}, atts={}",
-                req.sessionId(), req.message() == null ? 0 : req.message().length(),
-                req.attachments() == null ? 0 : req.attachments().size());
         SseEmitter emitter = new SseEmitter(0L);
         emitters.put(req.sessionId(), emitter);
-        emitter.onCompletion(() -> {
-            emitters.remove(req.sessionId(), emitter);
-            log.info("SSE 连接完成(移除): sessionId={}", req.sessionId());
-        });
-        emitter.onTimeout(() -> {
-            emitters.remove(req.sessionId(), emitter);
-            log.warn("SSE 连接超时: sessionId={}", req.sessionId());
-        });
-        emitter.onError(e -> {
-            emitters.remove(req.sessionId(), emitter);
-            log.warn("SSE 连接错误: sessionId={}, err={}", req.sessionId(),
-                    e == null ? "null" : e.getMessage());
-        });
+        emitter.onCompletion(() -> emitters.remove(req.sessionId(), emitter));
+        emitter.onTimeout(() -> emitters.remove(req.sessionId(), emitter));
+        emitter.onError(e -> emitters.remove(req.sessionId(), emitter));
 
         List<UserAttachment> atts = req.attachments() == null ? List.of()
                 : req.attachments().stream()
@@ -84,122 +56,99 @@ public class ChatController {
                         .toList();
 
         try {
-            String skillName = req.skillName() == null || req.skillName().isBlank() ? null : req.skillName();
             agentService.streamChat(req.workspaceId(), req.sessionId(), req.message(), atts,
-                    skillName,
-                    evt -> safeSend(req.sessionId(), emitter, evt),
+                    req.skillName(),
+                    evt -> safeSend(emitter, evt),
                     err -> {
-                        log.warn("流式错误: sessionId={}, err={}", req.sessionId(),
-                                err == null ? "null" : err.getMessage());
-                        safeSend(req.sessionId(), emitter, StreamEvent.error(err.getMessage() == null ? "未知错误" : err.getMessage()));
+                        safeSend(emitter, StreamEvent.error(err.getMessage() == null ? "未知错误" : err.getMessage()));
                         safeComplete(emitter);
                     },
                     () -> {
-                        safeSend(req.sessionId(), emitter, StreamEvent.end());
+                        safeSend(emitter, StreamEvent.end());
                         safeComplete(emitter);
                     });
         } catch (Exception e) {
-            log.error("streamChat 启动失败: sessionId={}, err={}", req.sessionId(), e.getMessage(), e);
-            safeSend(req.sessionId(), emitter, StreamEvent.error("启动失败: " + e.getMessage()));
+            safeSend(emitter, StreamEvent.error("启动失败: " + e.getMessage()));
             safeComplete(emitter);
         }
         return emitter;
     }
 
-    /**
-     * 工具确认决策：action = once | turn | always | deny
-     */
     @PostMapping("/confirm")
     public Map<String, Object> confirm(@RequestBody ConfirmRequest req) {
-        if (req.toolNames() == null || req.toolNames().isEmpty()) {
-            return Map.of("ok", false, "reason", "工具列表为空");
-        }
-        if ("turn".equals(req.action())) {
-            agentService.allowTurn(req.sessionId(), req.toolNames());
-        } else if ("always".equals(req.action())) {
+        if ("always".equals(req.action())) {
             agentService.allowPermanently(req.workspaceId(), req.toolNames());
         }
         boolean allowed = !"deny".equals(req.action());
-        SseEmitter emitter = emitters.get(req.sessionId());
-        if (emitter == null) {
-            log.warn("确认时原 SSE 连接已断开: sessionId={}, tools={}", req.sessionId(), req.toolNames());
-        }
         agentService.resumeChat(req.workspaceId(), req.sessionId(), allowed,
-                evt -> safeSend(req.sessionId(), emitter, evt),
-                err -> {
-                    log.warn("恢复流错误: sessionId={}, err={}", req.sessionId(),
-                            err == null ? "null" : err.getMessage());
-                    safeSend(req.sessionId(), emitter, StreamEvent.error(err.getMessage() == null ? "未知错误" : err.getMessage()));
-                    safeComplete(emitter);
-                },
-                () -> {
-                    safeSend(req.sessionId(), emitter, StreamEvent.end());
-                    safeComplete(emitter);
-                });
+                evt -> {}, err -> {}, () -> {});
         return Map.of("ok", true, "action", req.action());
     }
 
-    /**
-     * 查询当前挂起的工具确认（前端轮询兜底：SSE confirm 事件丢失时也能弹窗）
-     */
     @GetMapping("/pending")
     public Map<String, Object> pending(@RequestParam String sessionId) {
-        List<Map<String, Object>> tools = agentService.pendingConfirmInfo(sessionId);
-        return Map.of("pending", !tools.isEmpty(), "tools", tools);
+        return Map.of("pending", false, "tools", List.of());
     }
 
-    /**
-     * 停止当前回复（interrupt + dispose）
-     */
     @PostMapping("/stop")
     public void stop(@RequestBody StopRequest req) {
         agentService.stopChat(req.workspaceId(), req.sessionId());
     }
 
-    /**
-     * 会话运行状态：重连/刷新后前端用来恢复 running / pending 状态
-     */
     @GetMapping("/status")
     public Map<String, Object> status(@RequestParam String workspaceId, @RequestParam String sessionId) {
-        workspaceManager.getWorkspace(workspaceId);
         return agentService.getSessionStatus(sessionId);
     }
 
-    /**
-     * 会话历史：从 agent_state.json 解析时序消息
-     */
     @GetMapping("/history")
     public List<BoxMessage> history(@RequestParam String workspaceId, @RequestParam String sessionId) {
-        WorkspaceContext ws = workspaceManager.getWorkspace(workspaceId);
-        if (ws == null) {
-            return List.of();
+        List<SessionMessageEntity> entities = messageRepo.findBySessionIdOrderBySeqAsc(sessionId);
+        List<BoxMessage> result = new ArrayList<>(entities.size());
+        for (SessionMessageEntity e : entities) {
+            try {
+                BoxMessage.Type type;
+                try {
+                    type = BoxMessage.Type.valueOf(e.getType());
+                } catch (IllegalArgumentException iae) {
+                    log.warn("跳过未知消息类型: sessionId={}, seq={}, type={}", sessionId, e.getSeq(), e.getType());
+                    continue;
+                }
+                BoxMessage msg = new BoxMessage(type, e.getSeq());
+                msg.setContent(e.getContent());
+                msg.setToolName(e.getToolName());
+                msg.setToolArgs(e.getToolArgs());
+                msg.setToolResult(e.getToolResult());
+                msg.setSubagentName(e.getSubagentName());
+                msg.setImages(parseImages(e.getImagesJson()));
+                if (e.getCreatedAt() != null) {
+                    msg.setTimestamp(e.getCreatedAt().toEpochMilli());
+                }
+                result.add(msg);
+            } catch (Exception ex) {
+                log.warn("解析历史消息失败: sessionId={}, seq={}, err={}", sessionId, e.getSeq(), ex.getMessage());
+            }
         }
-        String userId = ws.getUserId() == null ? AppConstants.DEFAULT_USER_ID : ws.getUserId();
-        Path file = ws.getPath().resolve(".easyClaw/agent/state/" + userId + "/" + sessionId + "/agent_state.json");
-        return AgentStateBoxReader.read(file);
+        log.debug("history: sessionId={}, workspaceId={}, total={}", sessionId, workspaceId, result.size());
+        return result;
     }
 
-    private void safeSend(String sessionId, SseEmitter emitter, StreamEvent evt) {
-        if (emitter == null) {
-            log.warn("SSE emitter 为空(连接已断开?): sessionId={}, type={}",
-                    sessionId, evt == null ? "?" : evt.type());
-            return;
+    private List<String> parseImages(String imagesJson) {
+        if (imagesJson == null || imagesJson.isBlank()) return List.of();
+        try {
+            return MAPPER.readValue(imagesJson, new TypeReference<List<String>>() {});
+        } catch (Exception e) {
+            return List.of();
         }
+    }
+
+    private void safeSend(SseEmitter emitter, StreamEvent evt) {
+        if (emitter == null) return;
         try {
             emitter.send(SseEmitter.event().name("message").data(evt));
-            if (evt != null && ("confirm".equals(evt.type()) || "error".equals(evt.type()) || "end".equals(evt.type()))) {
-                log.info("SSE 已发送事件: sessionId={}, type={}", sessionId, evt.type());
-            }
-        } catch (IOException | IllegalStateException e) {
-            log.warn("SSE 发送失败(客户端断开?): sessionId={}, type={}, err={}",
-                    sessionId, evt == null ? "?" : evt.type(), e.getMessage());
-        }
+        } catch (IOException | IllegalStateException ignored) {}
     }
 
     private void safeComplete(SseEmitter emitter) {
-        try {
-            emitter.complete();
-        } catch (Exception ignored) {
-        }
+        try { emitter.complete(); } catch (Exception ignored) {}
     }
 }

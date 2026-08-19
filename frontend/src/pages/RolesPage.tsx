@@ -5,6 +5,8 @@ import Modal from '../components/Modal';
 interface Role {
   id: number; name: string; displayName: string; role: string;
   goal: string; backstory: string; model: string; temperature: number; active: boolean;
+  defaultSkills?: string; allowedAgents?: string; allowedMcp?: string;
+  roleType?: string; agentClassName?: string;
 }
 
 export default function RolesPage() {
@@ -52,7 +54,7 @@ export default function RolesPage() {
     <div className="page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 className="page-title">🎭 角色管理</h1>
-        <button className="btn primary" onClick={() => setEditing({ id: 0, name: '', displayName: '', role: '', goal: '', backstory: '', model: '', temperature: 0.4, active: true })}>＋ 新建角色</button>
+        <button className="btn primary" onClick={() => setEditing({ id: 0, name: '', displayName: '', role: '', goal: '', backstory: '', model: '', temperature: 0.4, active: true, defaultSkills: '', allowedAgents: '', allowedMcp: '', roleType: 'MARKDOWN', agentClassName: '' })}>＋ 新建角色</button>
       </div>
       {error && <div className="error-box">{error}</div>}
 
@@ -90,6 +92,50 @@ export default function RolesPage() {
               <input type="number" step="0.1" min="0" max="2" value={editing.temperature} onChange={(e) => setEditing({ ...editing, temperature: Number(e.target.value) })} />
             </div>
           </div>
+            <div className="field">
+              <label>角色类型</label>
+              <select
+                value={editing.roleType || 'MARKDOWN'}
+                onChange={(e) => setEditing({ ...editing, roleType: e.target.value })}
+              >
+                <option value="MARKDOWN">自定义 Markdown 角色</option>
+                <option value="BUILTIN">关联内置 Agent</option>
+              </select>
+            </div>
+            {editing.roleType === 'BUILTIN' && (
+              <div className="field">
+                <label>内置 Agent 类名</label>
+                <input
+                  value={editing.agentClassName || ''}
+                  onChange={(e) => setEditing({ ...editing, agentClassName: e.target.value })}
+                  placeholder="com.xinl.easyclaw.agent.embabel.subagent.CodeAgent"
+                />
+              </div>
+            )}
+            <div className="field">
+              <label>默认 Skills（JSON 数组）</label>
+              <input
+                value={editing.defaultSkills || ''}
+                onChange={(e) => setEditing({ ...editing, defaultSkills: e.target.value })}
+                placeholder='["code-refactor","backend-architecture"]'
+              />
+            </div>
+            <div className="field">
+              <label>允许的子 Agent（JSON 数组，留空 = 不限制）</label>
+              <input
+                value={editing.allowedAgents || ''}
+                onChange={(e) => setEditing({ ...editing, allowedAgents: e.target.value })}
+                placeholder='["coding","file","research"]'
+              />
+            </div>
+            <div className="field">
+              <label>允许的 MCP 工具（JSON 数组，留空 = 不限制）</label>
+              <input
+                value={editing.allowedMcp || ''}
+                onChange={(e) => setEditing({ ...editing, allowedMcp: e.target.value })}
+                placeholder='["github.list_issues","github.create_issue"]'
+              />
+            </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button className="btn" onClick={() => setEditing(null)}>取消</button>
             <button className="btn primary" onClick={save}>保存</button>

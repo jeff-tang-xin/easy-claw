@@ -2,10 +2,12 @@ package com.xinl.easyclaw.config;
 
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.boot.web.context.WebServerInitializedEvent;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.ApplicationListener;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.env.Environment;
 
 import java.awt.*;
 import java.net.URI;
@@ -21,7 +23,7 @@ import java.net.URI;
  */
 @Slf4j
 @Configuration
-public class BrowserLauncher implements ApplicationListener<WebServerInitializedEvent> {
+public class BrowserLauncher implements ApplicationListener<ApplicationReadyEvent> {
 
     @Value("${easyclaw.open-browser:true}")
     private boolean openBrowser;
@@ -34,6 +36,9 @@ public class BrowserLauncher implements ApplicationListener<WebServerInitialized
 
     private boolean fired = false;
 
+    @Autowired
+    private Environment environment;
+
     @PostConstruct
     void init() {
         log.info("[Browser] 配置: openBrowser={}, host={}", openBrowser, host);
@@ -43,11 +48,18 @@ public class BrowserLauncher implements ApplicationListener<WebServerInitialized
     }
 
     @Override
-    public void onApplicationEvent(WebServerInitializedEvent event) {
+    public void onApplicationEvent(ApplicationReadyEvent event) {
         if (fired) return;
         fired = true;
 
-        int port = event.getWebServer().getPort();
+        String portStr = environment.getProperty("local.server.port",
+                environment.getProperty("server.port", "18080"));
+        int port;
+        try {
+            port = Integer.parseInt(portStr);
+        } catch (NumberFormatException e) {
+            port = 18080;
+        }
         String url = "http://" + host + ":" + port + "/";
         log.info("=============================================");
         log.info("  Easy Claw 启动就绪!");

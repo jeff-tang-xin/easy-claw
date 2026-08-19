@@ -48,6 +48,11 @@ public class RoleManagementServiceImpl implements RoleManagementService {
                     existing.setBackstory(role.getBackstory());
                     existing.setTemperature(role.getTemperature());
                     existing.setModel(role.getModel());
+                      existing.setRoleType(role.getRoleType());
+                      existing.setAgentClassName(role.getAgentClassName());
+                      existing.setDefaultSkills(role.getDefaultSkills());
+                      existing.setAllowedAgents(role.getAllowedAgents());
+                      existing.setAllowedMcp(role.getAllowedMcp());
                     if (role.getActive() != null) {
                         existing.setActive(role.getActive());
                     }

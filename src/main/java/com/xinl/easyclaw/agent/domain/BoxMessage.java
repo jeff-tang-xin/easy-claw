@@ -27,7 +27,15 @@ public class BoxMessage {
         /** 权限确认请求 */
         CONFIRM,
         /** 系统提示（错误/上下文压缩等） */
-        SYSTEM
+        SYSTEM,
+        /** GOAP 计划（完整 JSON） */
+        PLAN,
+        /** GOAP 单步事件（start/end/update） */
+        STEP,
+        /** LLM 调用（start/end 合并 JSON） */
+        LLM_CALL,
+        /** 子智能体生命周期（start/end/failed） */
+        SUBAGENT_LIFECYCLE
     }
 
     private String id;
