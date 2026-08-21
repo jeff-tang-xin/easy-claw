@@ -398,6 +398,56 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
 .session-item:hover .session-del { opacity: 1; }
 .session-del:hover { color: #dc2626; background: rgba(220, 38, 38, 0.08); }
 
+/* ============ 工具目录 ============ */
+.tools-panel { font-size: 13px; }
+.tools-group { margin-bottom: 10px; }
+.tools-group-head {
+  padding: 4px 6px; font-size: 11px; font-weight: 700;
+  color: var(--text-tertiary); letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.tools-item {
+  border-radius: 8px; border: 1px solid var(--border);
+  margin-bottom: 4px; background: var(--panel);
+  overflow: hidden;
+}
+.tools-item-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 10px; cursor: pointer; user-select: none;
+  font-size: 12.5px;
+}
+.tools-item-head::-webkit-details-marker { display: none; }
+.tools-item-head::before {
+  content: '▶'; font-size: 9px; color: var(--text-tertiary);
+  transition: transform 0.15s ease;
+}
+.tools-item[open] > .tools-item-head::before { transform: rotate(90deg); }
+.tools-item-head:hover { background: var(--panel-hover); }
+.tools-item-name {
+  font-weight: 600; font-family: 'JetBrains Mono', Consolas, monospace;
+  color: var(--accent-dark);
+}
+.tools-item-display {
+  color: var(--text-secondary); font-size: 11.5px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tools-item-body { padding: 4px 10px 10px 22px; border-top: 1px dashed var(--border); }
+.tools-item-desc {
+  margin: 6px 0; color: var(--text-secondary);
+  font-size: 12px; line-height: 1.55; white-space: pre-line;
+}
+.tools-item-params { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.tools-item-param {
+  display: flex; align-items: baseline; gap: 6px;
+  font-size: 11.5px; color: var(--text-secondary);
+}
+.tools-item-param code {
+  font-family: 'JetBrains Mono', Consolas, monospace;
+  font-size: 11px; color: var(--text); background: var(--panel-hover);
+  padding: 1px 5px; border-radius: 4px;
+}
+.tools-item-param .req { color: #dc2626; font-size: 10px; font-style: normal; flex-shrink: 0; }
+
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .chat-topbar {
   padding: 10px var(--chat-pad-x);
@@ -593,6 +643,105 @@ details.fold .fold-body {
 }
 details.fold.reasoning .fold-body { max-height: 340px; color: var(--text-secondary); font-family: inherit; font-size: 13px; white-space: pre-wrap; }
 details.fold.subagent .fold-body { max-height: 340px; color: var(--text-secondary); font-family: inherit; font-size: 13px; white-space: pre-wrap; }
+
+/* 结构化工具调用卡片 */
+.tool-call {
+  width: 100%;
+  margin: 6px 0;
+  border-radius: 10px;
+  border: 1px solid rgba(100,116,139,0.16);
+  background: rgba(100,116,139,0.04);
+  overflow: hidden;
+}
+.tool-call.is-running { border-color: rgba(59,130,246,0.35); background: rgba(59,130,246,0.05); }
+
+/* 系统提示（工具失败护栏/循环警告等） */
+.system-note {
+  margin: 6px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px dashed rgba(245,158,11,0.4);
+  background: rgba(245,158,11,0.06);
+  color: #b45309;
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.tool-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; cursor: pointer; user-select: none;
+  font-size: 13px; line-height: 1.2;
+}
+.tool-head:hover { background: rgba(100,116,139,0.06); }
+.tool-head::-webkit-details-marker { display: none; }
+.tool-head::before {
+  content: '▶'; font-size: 9px; color: var(--text-tertiary);
+  transition: transform 0.18s ease; transform: rotate(0deg);
+}
+.tool-call[open] > .tool-head::before { transform: rotate(90deg); }
+.tool-name { font-weight: 600; font-family: 'JetBrains Mono', Consolas, monospace; color: var(--text); }
+.tool-desc {
+  flex: 1; min-width: 0; font-size: 12px; font-weight: 400;
+  color: var(--text-tertiary);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.tool-badge {
+  margin-left: auto; font-size: 11px; font-weight: 600;
+  padding: 2px 9px; border-radius: 999px; white-space: nowrap;
+}
+.tool-badge.done { color: var(--text-secondary); background: rgba(100,116,139,0.12); }
+.tool-badge.success { color: #16a34a; background: rgba(22,163,74,0.12); }
+.tool-badge.error { color: #dc2626; background: rgba(220,38,38,0.12); }
+.tool-badge.empty { color: #b45309; background: rgba(245,158,11,0.12); }
+.tool-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--text-tertiary); }
+.tool-dot.done { background: #16a34a; }
+.tool-dot.success { background: #16a34a; }
+.tool-dot.error { background: #dc2626; }
+.tool-dot.empty { background: #b45309; }
+.tool-section { border-top: 1px solid rgba(100,116,139,0.14); }
+.tool-section-head {
+  padding: 4px 12px; font-size: 11px; font-weight: 600;
+  color: var(--text-tertiary); letter-spacing: 0.02em;
+}
+.tool-pre {
+  margin: 0; padding: 8px 12px 10px;
+  font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+  font-size: 12px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 280px; overflow: auto;
+  color: var(--text-secondary);
+}
+.tool-result-error { color: #fca5a5; }
+
+/* 折叠块内渲染 Markdown（覆盖原本的等宽 pre-wrap） */
+details.fold .fold-body.md-content {
+  font-family: inherit;
+  font-size: 13px;
+  white-space: normal;
+  word-break: normal;
+  color: var(--text-secondary);
+}
+details.fold .fold-body.md-content pre {
+  background: #0f172a; color: #e2e8f0;
+  border-radius: 8px; padding: 10px 12px;
+  overflow-x: auto; margin: 8px 0; font-size: 12px; line-height: 1.55;
+}
+
+/* 空状态建议 */
+.suggest-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
+  margin-top: 14px; max-width: 560px;
+}
+.suggest-chip {
+  text-align: left; cursor: pointer;
+  padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--panel);
+  color: var(--text-secondary); font-size: 13px; line-height: 1.4;
+  transition: all 0.15s ease;
+}
+.suggest-chip:hover { border-color: var(--accent); color: var(--accent-dark); box-shadow: var(--shadow-sm); }
+
+/* 输入行内联 Skill 选择 */
+.input-row .skill-select { align-self: flex-end; height: 40px; flex-shrink: 0; max-width: 220px; }
 
 /* 输入区 */
 .chat-input-dock {
@@ -1101,4 +1250,95 @@ details.fold.loading summary::before {
 }
 .yaml-editor::selection {
   background: rgba(59, 130, 246, 0.4);
+}
+
+/* ===== MCP 卡片式 UI ===== */
+.mcp-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+  gap: 12px;
+}
+.mcp-card {
+  border: 1px solid var(--border, #ddd);
+  border-radius: 10px;
+  padding: 14px 16px;
+  background: var(--bg-card, #fff);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.mcp-card.connected {
+  border-color: #4caf50;
+  box-shadow: 0 0 0 1px rgba(76, 175, 80, 0.2);
+}
+.mcp-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.mcp-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mcp-status-dot.on {
+  background: #4caf50;
+  box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+}
+.mcp-status-dot.off {
+  background: #bbb;
+}
+.mcp-card-name {
+  font-weight: 700;
+  font-size: 15px;
+}
+.mcp-card-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+.mcp-tools-section {
+  border-top: 1px solid var(--border, #eee);
+  padding-top: 8px;
+}
+.mcp-tools-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #666);
+  margin-bottom: 4px;
+}
+.mcp-tools-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+.mcp-tool-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.mcp-tool-item:hover {
+  background: var(--bg-hover, #f5f5f5);
+}
+.mcp-tool-item input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+.mcp-card-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: auto;
 }

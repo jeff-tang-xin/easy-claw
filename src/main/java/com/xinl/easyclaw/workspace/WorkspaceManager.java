@@ -45,6 +45,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
@@ -71,6 +72,8 @@ public class WorkspaceManager {
     private final PermissionRuleService permissionRuleService;
     private final RoleManagementService roleService;
     private final com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties;
+    private final com.xinl.easyclaw.scenario.repository.ScenarioRepository scenarioRepository;
+    private final com.xinl.easyclaw.workspace.repository.WorkspaceScenarioRepository workspaceScenarioRepository;
 
     private final Map<String, WorkspaceContext> workspaceCache = new ConcurrentHashMap<>();
     private final Map<String, SessionContext> sessionCache = new ConcurrentHashMap<>();
@@ -94,7 +97,9 @@ public class WorkspaceManager {
                             SubagentLoader subagentLoader,
                             PermissionRuleService permissionRuleService,
                             RoleManagementService roleService,
-                            com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties) {
+                            com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
+                            com.xinl.easyclaw.scenario.repository.ScenarioRepository scenarioRepository,
+                            com.xinl.easyclaw.workspace.repository.WorkspaceScenarioRepository workspaceScenarioRepository) {
         this.workspaceRepository = workspaceRepository;
         this.sessionRepository = sessionRepository;
         this.agentFactory = agentFactory;
@@ -102,6 +107,8 @@ public class WorkspaceManager {
         this.permissionRuleService = permissionRuleService;
         this.roleService = roleService;
         this.agentScopeProperties = agentScopeProperties;
+        this.scenarioRepository = scenarioRepository;
+        this.workspaceScenarioRepository = workspaceScenarioRepository;
     }
 
     /**
@@ -313,6 +320,16 @@ public class WorkspaceManager {
                             : sysPromptAugment);
         }
 
+        // 场景（Scenario）：工作区激活的场景提示词 / 多智能体编排工作流注入 system prompt。
+        // 激活关系持久化在 workspace_scenarios 表，重启后端后恢复工作区时依然生效
+        String scenarioAugment = com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder
+                .build(activeScenario(workspaceId), subagents);
+        if (scenarioAugment != null) {
+            sysPrompt = sysPrompt + "\n\n" + scenarioAugment;
+            log.info("场景已注入 system prompt: workspace={}, augment={} chars",
+                    workspaceId, scenarioAugment.length());
+        }
+
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(workspaceId)
                 .description(name)
@@ -334,21 +351,21 @@ public class WorkspaceManager {
                 // 污染上下文导致 OpenAI-compatible API 报 tool_call_id is not found。
                 // 我们改用 clearStaleConfirmation + cleanupPollutedContext 组合来清理残留。
                 .enablePendingToolRecovery(false)
-                // ── 上下文自动压缩（平衡保守策略）──
+                // ── 上下文自动压缩（参数可在 application.yml 的 agentscope.agent.* 调整）──
                 // 触发条件（OR 关系，任一满足即压缩）：
-                //   - 消息数 ≥ 80 条（Harness 默认 50，放宽避免长对话频繁压缩）
-                //   - token 数 ≥ 80K（Harness 默认 0=禁用，加上防长工具结果撑爆窗口）
-                // 压缩后保留：最近 20 条消息 / 16K tokens
-                //   - keepTokens 不设太大，兼容 8K~128K 各类模型窗口
-                //   - reserved 20K 预留给模型输出
+                //   - 消息数 ≥ triggerMessages（默认 120；工具调用一轮至少占 2 条消息，
+                //     阈值太低/保留太少会让 Agent 忘记任务目标，出现"不知道自己在做什么"）
+                //   - token 数 ≥ triggerTokens（默认 100K，防长工具结果撑爆窗口）
+                // 压缩后保留：最近 keepMessages 条消息（默认 40）/ keepTokens（默认 24K）
+                //   - reserved（默认 20K）预留给模型输出
                 // 另外：PruneConfig 默认 protectTokens=40K / minimumTokens=20K，
                 // 会在压缩前先把老工具结果输出裁剪到 2K 字符，避免大工具结果撑满上下文。
                 .compaction(CompactionConfig.builder()
-                        .triggerMessages(80)
-                        .triggerTokens(80_000)
-                        .keepMessages(20)
-                        .keepTokens(16_000)
-                        .reserved(20_000)
+                        .triggerMessages(agentCfg.getCompactionTriggerMessages())
+                        .triggerTokens((int) agentCfg.getCompactionTriggerTokens())
+                        .keepMessages(agentCfg.getCompactionKeepMessages())
+                        .keepTokens((int) agentCfg.getCompactionKeepTokens())
+                        .reserved((int) agentCfg.getCompactionReservedTokens())
                         .flushBeforeCompact(true)
                         .offloadBeforeCompact(true)
                         .build())
@@ -379,6 +396,21 @@ public class WorkspaceManager {
         }
 
         return builder.build();
+    }
+
+    /**
+     * 查询工作区当前激活的场景（未激活/已停用/已删除时返回 null）
+     */
+    private com.xinl.easyclaw.scenario.entity.ScenarioEntity activeScenario(String workspaceId) {
+        try {
+            return workspaceScenarioRepository.findByWorkspaceId(workspaceId)
+                    .flatMap(act -> scenarioRepository.findById(act.getScenarioId()))
+                    .filter(s -> Boolean.TRUE.equals(s.getActive()))
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("查询激活场景失败（忽略，按无场景构建）: workspace={}, {}", workspaceId, e.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -431,12 +463,18 @@ public class WorkspaceManager {
         for (String tool : READ_TOOLS) {
             pb.addAllowRule(tool, new PermissionRule(tool, null, PermissionBehavior.ALLOW, "system"));
         }
-        // 写入 / 编辑 / 执行类工具：每次调用前需用户确认
+        // 用户"永久允许"的工具：直接放行（按 workspace 隔离的持久化规则）
+        Set<String> alwaysAllowed = permissionRuleService.alwaysAllowedTools(workspaceId);
+        // 注意：PermissionEngine.checkPermission 的判定顺序是 deny → ask → allow，
+        // ASK 规则优先于 ALLOW 命中 —— 已授权工具必须【不加】system ASK 规则，
+        // 否则 ALLOW 永远轮不到判断，出现"已授权仍反复弹窗"
         for (String tool : WRITE_TOOLS) {
+            if (alwaysAllowed.contains(tool)) {
+                continue;
+            }
             pb.addAskRule(tool, new PermissionRule(tool, null, PermissionBehavior.ASK, "system"));
         }
-        // 用户"永久允许"的工具：直接放行（按 workspace 隔离的持久化规则）
-        for (String tool : permissionRuleService.alwaysAllowedTools(workspaceId)) {
+        for (String tool : alwaysAllowed) {
             pb.addAllowRule(tool, new PermissionRule(tool, null, PermissionBehavior.ALLOW, "user"));
         }
         return pb.build();
@@ -454,7 +492,16 @@ public class WorkspaceManager {
      * （用于每轮对话注入模式/Skill，避免污染用户消息）。
      */
     public void rebuildAgent(String workspaceId, String sysPromptAugment) {
-        workspaceCache.remove(workspaceId);
+        WorkspaceContext old = workspaceCache.remove(workspaceId);
+        if (old != null) {
+            // 关闭旧 Agent：触发状态落盘 + 释放资源（消息总线监听等），
+            // 避免 rebuild 后旧实例泄漏、或未落盘的会话状态丢失
+            try {
+                old.getAgent().close();
+            } catch (Exception e) {
+                log.warn("重建前关闭旧 Agent 失败（忽略）: {}", e.getMessage());
+            }
+        }
         WorkspaceContext rebuilt = restoreWorkspace(workspaceId, sysPromptAugment);
         if (rebuilt != null) {
             workspaceCache.put(workspaceId, rebuilt);
@@ -482,6 +529,12 @@ public class WorkspaceManager {
                 log.warn("关闭 Agent 时出现异常: {}", e.getMessage());
             }
             workspaceRepository.deleteById(workspaceId);
+            // 联动清理场景激活关系，避免悬挂记录
+            try {
+                workspaceScenarioRepository.deleteByWorkspaceId(workspaceId);
+            } catch (Exception e) {
+                log.warn("清理场景激活关系失败（忽略）: {}", e.getMessage());
+            }
             log.info("Workspace 已删除: {}", workspaceId);
         }
     }

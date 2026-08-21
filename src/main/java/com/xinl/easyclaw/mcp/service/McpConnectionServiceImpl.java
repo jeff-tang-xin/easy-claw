@@ -145,8 +145,8 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     }
 
     @Override
-    public List<McpClientWrapper> getConnectedWrappers() {
-        return new ArrayList<>(clientCache.values());
+    public Map<Long, McpClientWrapper> getConnectedWrappers() {
+        return new LinkedHashMap<>(clientCache);
     }
 
     @Override
@@ -235,6 +235,27 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     @Override
     public List<AgentTool> getHttpTools() {
         return new ArrayList<>(httpToolCache.values());
+    }
+
+    @Override
+    public List<String> getEnabledTools(Long serviceId) {
+        McpServiceEntity entity = repository.findById(serviceId)
+                .orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: " + serviceId));
+        return parseStringList(entity.getEnabledTools());
+    }
+
+    @Override
+    @Transactional
+    public McpServiceEntity updateEnabledTools(Long serviceId, List<String> enabledTools) {
+        McpServiceEntity entity = repository.findById(serviceId)
+                .orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: " + serviceId));
+        entity.setEnabledTools(enabledTools == null || enabledTools.isEmpty()
+                ? null : writeJsonArray(enabledTools));
+        McpServiceEntity saved = repository.save(entity);
+        if (saved.getIsConnected()) {
+            log.info("[MCP] enabledTools 更新后需重新连接服务 #{} 才能生效", serviceId);
+        }
+        return saved;
     }
 
     // ==================== 构建客户端 ====================
@@ -382,6 +403,15 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         } catch (Exception e) {
             log.warn("解析 JSON 配置失败: {}", e.getMessage());
             return new LinkedHashMap<>();
+        }
+    }
+
+    private String writeJsonArray(List<String> list) {
+        try {
+            return mapper.writeValueAsString(list);
+        } catch (Exception e) {
+            log.warn("序列化 JSON 工具列表失败: {}", e.getMessage());
+            return null;
         }
     }
 

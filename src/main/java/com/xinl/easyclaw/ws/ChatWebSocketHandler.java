@@ -180,11 +180,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         JsonNode arr = root.path("attachments");
         if (arr.isArray()) {
             for (JsonNode a : arr) {
-                atts.add(new UserAttachment(
+                UserAttachment att = new UserAttachment(
                         a.path("name").asText("file"),
                         a.path("mimeType").asText("application/octet-stream"),
-                        a.path("base64Data").asText("")));
+                        a.path("base64Data").asText(""));
+                // 过滤空附件（前端异常/图片上传失败会产生 base64Data 为空的条目）
+                if (att.base64Data() != null && !att.base64Data().isBlank()) {
+                    atts.add(att);
+                }
             }
+        }
+        // 空消息防护：文本为空且无有效附件时，不把空消息送给模型
+        // （否则模型会收到空 user 消息，回复"你发了一条空消息"之类，污染对话体验）
+        if (msg.isBlank() && atts.isEmpty()) {
+            log.warn("WS chat 拒绝空消息: workspaceId={}, sessionId={}", workspaceId, sessionId);
+            sendJson(sessionId, StreamEvent.error("消息内容为空：请输入文字或添加附件后再发送。"));
+            sendJson(sessionId, StreamEvent.end());
+            return;
         }
         log.info("WS chat 收到: workspaceId={}, sessionId={}, skill={}, msgLen={}, atts={}",
                 workspaceId, sessionId, skillName, msg.length(), atts.size());

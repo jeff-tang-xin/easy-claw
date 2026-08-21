@@ -3,6 +3,7 @@ import WorkspacesPage from './pages/WorkspacesPage';
 import ChatPage from './pages/ChatPage';
 import SkillsPage from './pages/SkillsPage';
 import RolesPage from './pages/RolesPage';
+import ScenariosPage from './pages/ScenariosPage';
 import ToolsPage from './pages/ToolsPage';
 import McpPage from './pages/McpPage';
 import SettingsPage from './pages/SettingsPage';
@@ -10,6 +11,7 @@ import './chatSocket';
 
 const menu = [
   { to: '/workspaces', icon: '📁', label: '工作区' },
+  { to: '/scenarios', icon: '🎬', label: '场景' },
   { to: '/skills', icon: '📚', label: 'Skills' },
   { to: '/roles', icon: '🎭', label: '角色' },
   { to: '/tools', icon: '🔧', label: '工具' },
@@ -49,6 +51,7 @@ export default function App() {
           <Route path="/workspaces" element={<WorkspacesPage />} />
           <Route path="/chat/:workspaceId" element={<ChatPage />} />
           <Route path="/skills" element={<SkillsPage />} />
+          <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/roles" element={<RolesPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/mcp" element={<McpPage />} />

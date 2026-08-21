@@ -44,6 +44,28 @@ public class ToolRegistryService {
                           String group, List<ToolParamDef> params) {
     }
 
+    /** 框架工具可读描述（供前端工具目录展示） */
+    private static final Map<String, String> FRAMEWORK_DESC = Map.ofEntries(
+            Map.entry("read_file", "读取工作区内文件内容，支持 offset/limit 分页。用于查看源码、配置、文档等。"),
+            Map.entry("write_file", "创建或覆盖写入文件。用于生成代码、配置、文档等。"),
+            Map.entry("edit_file", "局部编辑文件（按旧文本→新文本替换）。用于精确修改而非整文件重写。"),
+            Map.entry("grep_files", "按正则/关键词搜索文件内容，返回匹配行与行号。用于定位代码、查找引用。"),
+            Map.entry("glob_files", "按文件名通配符匹配文件路径。用于按扩展名或命名模式批量查找。"),
+            Map.entry("list_files", "列出目录下的文件和子目录。用于快速了解目录结构。"),
+            Map.entry("memory_search", "搜索 Agent 长期记忆库。用于回忆过往交互或用户偏好。"),
+            Map.entry("memory_get", "按 ID 获取单条记忆。用于精确读取特定记忆条目。"),
+            Map.entry("session_search", "搜索历史会话记录。用于查找过去某次对话。"),
+            Map.entry("session_list", "列出历史会话列表。用于查看有哪些会话。"),
+            Map.entry("session_history", "获取指定会话的完整消息历史。用于回顾某次对话的全部内容。"),
+            Map.entry("agent_spawn", "创建子 Agent 并派发任务。用于多 Agent 协作场景。"),
+            Map.entry("agent_send", "向运行中的子 Agent 发送消息。用于主从 Agent 间通信。"),
+            Map.entry("agent_list", "列出当前活跃的子 Agent。用于查看已创建的子 Agent。"),
+            Map.entry("task_output", "获取异步任务输出。用于读取子 Agent 的执行结果。"),
+            Map.entry("task_cancel", "取消正在运行的异步任务。用于中止子 Agent 执行。"),
+            Map.entry("task_list", "列出所有异步任务。用于查看任务执行状态。"),
+            Map.entry("execute", "在沙箱内执行 Shell 命令。用于运行构建、测试、git 等命令行操作。")
+    );
+
     /** 框架 FilesystemTool 内置工具名（HarnessAgent 自动注册，不可禁用） */
     static final Set<String> FRAMEWORK_FILESYSTEM_TOOLS = Set.of(
             "read_file", "write_file", "edit_file", "grep_files", "glob_files", "list_files"
@@ -189,7 +211,7 @@ public class ToolRegistryService {
         for (String name : ALL_FRAMEWORK_TOOLS) {
             defs.add(new ToolDef(name,
                     DISPLAY.getOrDefault(name, name),
-                    "框架内置工具",
+                    FRAMEWORK_DESC.getOrDefault(name, "框架内置工具"),
                     GROUPS.getOrDefault(name, "FRAMEWORK"),
                     List.of()));
         }

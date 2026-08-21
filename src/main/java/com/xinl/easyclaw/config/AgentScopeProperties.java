@@ -185,6 +185,21 @@ public class AgentScopeProperties {
         /** shell 输出截断上限（字节）。防止工具结果撑爆上下文 */
         private int maxShellOutputBytes = 200_000;
 
+        /** 上下文压缩触发：消息数阈值（压缩过狠会让 Agent 忘记任务目标，默认放宽到 120） */
+        private int compactionTriggerMessages = 120;
+
+        /** 上下文压缩触发：token 数阈值 */
+        private long compactionTriggerTokens = 100_000;
+
+        /** 压缩后保留的最近消息数（工具调用一轮至少占 2 条，20 条太少会丢任务上下文） */
+        private int compactionKeepMessages = 40;
+
+        /** 压缩后保留的 token 数 */
+        private long compactionKeepTokens = 24_000;
+
+        /** 压缩时预留给模型输出的 token 数 */
+        private long compactionReservedTokens = 20_000;
+
         public int getMaxIters() {
             return maxIters;
         }
@@ -223,6 +238,46 @@ public class AgentScopeProperties {
 
         public void setMaxShellOutputBytes(int maxShellOutputBytes) {
             this.maxShellOutputBytes = maxShellOutputBytes;
+        }
+
+        public int getCompactionTriggerMessages() {
+            return compactionTriggerMessages;
+        }
+
+        public void setCompactionTriggerMessages(int compactionTriggerMessages) {
+            this.compactionTriggerMessages = compactionTriggerMessages;
+        }
+
+        public long getCompactionTriggerTokens() {
+            return compactionTriggerTokens;
+        }
+
+        public void setCompactionTriggerTokens(long compactionTriggerTokens) {
+            this.compactionTriggerTokens = compactionTriggerTokens;
+        }
+
+        public int getCompactionKeepMessages() {
+            return compactionKeepMessages;
+        }
+
+        public void setCompactionKeepMessages(int compactionKeepMessages) {
+            this.compactionKeepMessages = compactionKeepMessages;
+        }
+
+        public long getCompactionKeepTokens() {
+            return compactionKeepTokens;
+        }
+
+        public void setCompactionKeepTokens(long compactionKeepTokens) {
+            this.compactionKeepTokens = compactionKeepTokens;
+        }
+
+        public long getCompactionReservedTokens() {
+            return compactionReservedTokens;
+        }
+
+        public void setCompactionReservedTokens(long compactionReservedTokens) {
+            this.compactionReservedTokens = compactionReservedTokens;
         }
     }
 }

@@ -26,7 +26,7 @@ public class SchemaMigration {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaMigration.class);
 
-    private static final int CURRENT_VERSION = 1;
+    private static final int CURRENT_VERSION = 2;
 
     public SchemaMigration(DataSource dataSource) {
         try (Connection conn = dataSource.getConnection()) {
@@ -41,9 +41,11 @@ public class SchemaMigration {
                 setVersion(conn, 1);
             }
 
-            // 未来版本在这里追加：
-            // if (applied < 2) { migrateV2(conn); setVersion(conn, 2); }
-            // if (applied < 3) { migrateV3(conn); setVersion(conn, 3); }
+            // v2: scenarios 表补 mode 列（SQLite ddl-auto=update 不会自动加列）
+            if (applied < 2) {
+                migrateV2(conn);
+                setVersion(conn, 2);
+            }
 
         } catch (Exception e) {
             log.warn("[SchemaMigration] 迁移失败（不阻塞启动，但 schema 可能不一致）: {}", e.getMessage());
@@ -69,6 +71,25 @@ public class SchemaMigration {
             log.info("[SchemaMigration.v1] 已删除旧版 mcp_services（含 NOT NULL sse_url），Hibernate 将重建。");
         } else {
             log.info("[SchemaMigration.v1] mcp_services 已是新版结构，跳过。");
+        }
+    }
+
+    /**
+     * v2: scenarios 表补 mode 列 + mcp_services 补 enabled_tools 列。
+     * SQLite 的 Hibernate ddl-auto=update 不会自动加列。
+     */
+    private void migrateV2(Connection conn) throws Exception {
+        if (tableExists(conn, "scenarios") && !columnExists(conn, "scenarios", "mode")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("ALTER TABLE scenarios ADD COLUMN mode TEXT NOT NULL DEFAULT 'single'");
+            }
+            log.info("[SchemaMigration.v2] 已添加 scenarios.mode 列。");
+        }
+        if (tableExists(conn, "mcp_services") && !columnExists(conn, "mcp_services", "enabled_tools")) {
+            try (Statement stmt = conn.createStatement()) {
+                stmt.executeUpdate("ALTER TABLE mcp_services ADD COLUMN enabled_tools TEXT");
+            }
+            log.info("[SchemaMigration.v2] 已添加 mcp_services.enabled_tools 列。");
         }
     }
 
@@ -100,6 +121,13 @@ public class SchemaMigration {
     private boolean tableExists(Connection conn, String table) throws Exception {
         DatabaseMetaData meta = conn.getMetaData();
         try (ResultSet rs = meta.getTables(null, null, table, new String[]{"TABLE"})) {
+            return rs.next();
+        }
+    }
+
+    private boolean columnExists(Connection conn, String table, String column) throws Exception {
+        DatabaseMetaData meta = conn.getMetaData();
+        try (ResultSet rs = meta.getColumns(null, null, table, column)) {
             return rs.next();
         }
     }

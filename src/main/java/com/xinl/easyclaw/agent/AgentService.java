@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.agent;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
@@ -11,9 +12,13 @@ import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
+import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.*;
 import io.agentscope.core.message.*;
+import io.agentscope.core.permission.PermissionBehavior;
+import io.agentscope.core.permission.PermissionContextState;
+import io.agentscope.core.permission.PermissionRule;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.PlanModeContextState;
 import io.agentscope.harness.agent.HarnessAgent;
@@ -28,6 +33,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 
 /**
@@ -58,6 +64,10 @@ public class AgentService {
     private final Map<String, StringBuilder> subagentResultBuffers = new ConcurrentHashMap<>();
     /** 每个会话正在运行的流订阅（用于 stopChat 时 dispose 取消） */
     private final Map<String, Disposable> sessionDisposables = new ConcurrentHashMap<>();
+    /** 是否处于「确认后恢复」阶段：原暂停流结束时抑制其 end，由恢复流统一发送，避免重复/提前结束 UI */
+    private final Map<String, AtomicBoolean> resuming = new ConcurrentHashMap<>();
+    /** 工具连续失败计数（sessionId → toolName → 次数），用于护栏 */
+    private final Map<String, Map<String, Integer>> toolFailCounts = new ConcurrentHashMap<>();
 
     public AgentService(WorkspaceManager workspaceManager,
                         AgentFactory agentFactory,
@@ -81,6 +91,10 @@ public class AgentService {
 
     /**
      * 永久允许指定工具（持久化到 DB，绑定 Workspace + 立即生效）
+     * <p>
+     * 注意：这里不能 rebuildAgent —— 会 close 掉可能正暂停等待确认（ASKING）的 Agent，
+     * 丢失内存中的挂起确认状态，导致恢复消息走普通路径写入模型上下文，进而引发确认循环。
+     * 新会话由构建时的 buildPermissionContext 从 DB 注入规则，存量会话靠这里同步。
      */
     public void allowPermanently(String workspaceId, Collection<String> toolNames) {
         if (toolNames == null || toolNames.isEmpty()) {
@@ -94,7 +108,7 @@ public class AgentService {
             }
         }
         log.info("永久允许工具: workspaceId={}, tools={}", workspaceId, toolNames);
-        try { workspaceManager.rebuildAgent(workspaceId); } catch (Exception e) { log.warn("重建 Agent 失败: {}", e.getMessage()); }
+        syncRulesToLiveSessions(workspaceId);
     }
 
     /**
@@ -103,7 +117,100 @@ public class AgentService {
     public void revokePermanently(String workspaceId, String toolName) {
         permissionRuleService.remove(workspaceId, toolName);
         log.info("已撤销永久授权: workspaceId={}, tool={}", workspaceId, toolName);
-        try { workspaceManager.rebuildAgent(workspaceId); } catch (Exception e) { log.warn("重建 Agent 失败: {}", e.getMessage()); }
+        syncRulesToLiveSessions(workspaceId);
+    }
+
+    /**
+     * 把权限规则同步到该 Workspace 当前存活 Agent 的所有活跃会话
+     */
+    private void syncRulesToLiveSessions(String workspaceId) {
+        WorkspaceContext workspace = workspaceManager.getWorkspace(workspaceId);
+        if (workspace == null || workspace.getAgent() == null) {
+            return;
+        }
+        for (Map.Entry<String, String> e : sessionWorkspaces.entrySet()) {
+            if (workspaceId.equals(e.getValue())) {
+                syncPermissionRules(workspace.getAgent(), workspace, e.getKey(), workspaceId);
+            }
+        }
+    }
+
+    /**
+     * 把权限规则同步进指定会话的 PermissionContextState（立即生效 + 随 AgentState 持久化）。
+     * <p>
+     * AgentScope 2.0.2 权限语义（ReActAgent$CallExecution 实测）：
+     * <ul>
+     *   <li>ALLOW 规则：工具静默执行 —— 不发 REQUIRE_USER_CONFIRM，不注入任何消息，LLM 完全无感</li>
+     *   <li>DENY 规则 / ConfirmResult(false)：框架回 ToolResultBlock("Permission denied by user") 给 LLM</li>
+     *   <li>无规则匹配：ASK —— 发 RequireUserConfirmEvent 暂停等待用户确认</li>
+     * </ul>
+     * 用户来源（source="user"）的 ALLOW 规则以 DB 永久规则 + 回合授权为准（支持撤销），
+     * system 来源的规则（只读放行/写类 ASK）原样保留。
+     */
+    private void syncPermissionRules(HarnessAgent agent, WorkspaceContext workspace,
+                                     String sessionId, String workspaceId) {
+        try {
+            String userId = workspace.getUserId() == null
+                    ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
+            ReActAgent core = agent.getDelegate();
+            AgentState state = core.getAgentState(userId, sessionId);
+            PermissionContextState existing = state.getPermissionContext();
+
+            // 目标用户级 ALLOW 集合：DB 永久规则 ∪ 本回合授权
+            Set<String> allowed = new HashSet<>(permissionRuleService.alwaysAllowedTools(workspaceId));
+            Set<String> turn = turnAllowed.get(sessionId);
+            if (turn != null) {
+                allowed.addAll(turn);
+            }
+
+            // 无变化则跳过（replacePermissionContext 会触发状态落盘）
+            Set<String> existingUserTools = new HashSet<>();
+            if (existing != null) {
+                existing.getAllowRules().values().forEach(list -> list.stream()
+                        .filter(r -> "user".equals(r.source()))
+                        .map(PermissionRule::toolName)
+                        .forEach(existingUserTools::add));
+            }
+            // 判定顺序 deny → ask → allow：ASK 规则优先于 ALLOW 命中。
+            // 已授权工具若仍挂着 ASK 规则（旧状态的坏组合），ALLOW 永远不生效 —— 必须重建
+            boolean askClean = existing == null || existing.getAskRules().values().stream()
+                    .flatMap(List::stream)
+                    .map(PermissionRule::toolName)
+                    .noneMatch(allowed::contains);
+            if (existingUserTools.equals(allowed) && askClean) {
+                return;
+            }
+
+            PermissionContextState.Builder b = PermissionContextState.builder();
+            if (existing != null) {
+                if (existing.getMode() != null) {
+                    b.mode(existing.getMode());
+                }
+                copySystemRules(existing.getAllowRules(), b::addAllowRule, Set.of());
+                copySystemRules(existing.getDenyRules(), b::addDenyRule, Set.of());
+                // 关键：已授权工具的 system ASK 规则【不复制】——
+                // ASK 优先于 ALLOW，留着它用户授权就永远不生效（反复弹窗的根因）
+                copySystemRules(existing.getAskRules(), b::addAskRule, allowed);
+            }
+            for (String tool : allowed) {
+                b.addAllowRule(tool, new PermissionRule(tool, null, PermissionBehavior.ALLOW, "user"));
+            }
+            core.replacePermissionContext(userId, sessionId, b.build());
+            log.debug("已同步工具权限规则: session={}, userAllowed={}", sessionId, allowed);
+        } catch (Exception e) {
+            log.warn("同步权限规则失败（回退确认弹窗模式）: session={}, err={}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 复制非用户来源的规则（system 只读放行 / 写类 ASK 等），用户来源规则以最新授权为准；
+     *  exclude 中的工具不复制（用于摘掉已授权工具的 system ASK 规则） */
+    private void copySystemRules(Map<String, List<PermissionRule>> rules,
+                                 java.util.function.BiConsumer<String, PermissionRule> adder,
+                                 Set<String> exclude) {
+        rules.forEach((name, list) -> list.stream()
+                .filter(r -> !"user".equals(r.source()))
+                .filter(r -> !exclude.contains(r.toolName()))
+                .forEach(r -> adder.accept(name, r)));
     }
 
     /**
@@ -168,6 +275,8 @@ public class AgentService {
 
         pendingConfirms.remove(sessionId);
         turnAllowed.remove(sessionId);
+        resuming.remove(sessionId);
+        toolFailCounts.remove(sessionId);
     }
 
     /**
@@ -236,6 +345,18 @@ public class AgentService {
                            Consumer<StreamEvent> onEvent,
                            Consumer<Throwable> onError,
                            Runnable onFinish) {
+        // 空消息防护（兜底，WS 入口已拦截）：文本为空且无有效附件时直接拒绝，
+        // 避免空 user 消息进入模型上下文，引发"你发了一条空消息"式回复与上下文污染
+        boolean hasText = message != null && !message.isBlank();
+        boolean hasAttachment = attachments != null && attachments.stream()
+                .anyMatch(a -> a != null && a.base64Data() != null && !a.base64Data().isBlank());
+        if (!hasText && !hasAttachment) {
+            log.warn("拒绝空消息: workspaceId={}, sessionId={}", workspaceId, sessionId);
+            onError.accept(new RuntimeException("消息内容为空：请输入文字或添加附件后再发送。"));
+            onFinish.run();
+            return;
+        }
+
         // 重置上次 stopChat 设置的 abort 标志（允许新请求重试）
         RetryableHttpTransport.resetAll();
 
@@ -250,6 +371,10 @@ public class AgentService {
 
         // 每轮对话重置子 Agent 调度计数（循环防护基准）
         subagentCallCounts.remove(sessionId);
+        // 新一轮用户消息：清除「确认恢复」标记，恢复常规 end 逻辑
+        resuming.remove(sessionId);
+        // 每轮重置工具连续失败计数
+        toolFailCounts.remove(sessionId);
 
         // 清理上一轮遗留的挂起确认（刷新/离开页面导致的 ASKING 状态），
         // 避免新消息直接抛 "Agent is paused for human-in-the-loop confirmation"
@@ -277,7 +402,74 @@ public class AgentService {
         Msg userMsg = buildUserMessage(workspace, sessionId,
                 skillHint + (message == null ? "" : message),
                 attachments);
-        startStream(agent, context, userMsg, sessionId, true, onEvent, onError, onFinish);
+
+        // 会话转录：旧会话首次落盘时把 agent_state.json 已有历史种子化（快照），
+        // 再追加本轮用户消息 —— 赶在未来的上下文压缩之前把历史固化
+        recordUserTurn(workspace, sessionId, message, attachments);
+
+        // 工具权限预授权：把 DB 永久规则 + 回合授权同步进本会话的 PermissionContextState，
+        // 已授权工具在框架层直接静默执行（不发 REQUIRE_USER_CONFIRM、不注入任何恢复消息）
+        syncPermissionRules(agent, workspace, sessionId, workspaceId);
+
+        startStream(agent, context, userMsg, sessionId, true, false, onEvent, onError, onFinish);
+    }
+
+    /**
+     * 会话状态目录：.easyClaw/agent/state/{userId}/{sessionId}
+     */
+    private Path sessionStateDir(WorkspaceContext workspace, String sessionId) {
+        String userId = workspace.getUserId() == null
+                ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
+        return workspace.getPath().resolve(".easyClaw/agent/state")
+                .resolve(userId).resolve(sessionId);
+    }
+
+    /**
+     * 把本轮用户消息（含图片附件）追加进会话转录；转录不存在时先种子化已有历史。
+     */
+    private void recordUserTurn(WorkspaceContext workspace, String sessionId,
+                                String message, List<UserAttachment> attachments) {
+        try {
+            Path dir = sessionStateDir(workspace, sessionId);
+            SessionTranscriptStore.seedIfAbsent(dir, dir.resolve("agent_state.json"));
+            BoxMessage bm = new BoxMessage(BoxMessage.Type.USER,
+                    SessionTranscriptStore.countEntries(dir) + 1);
+            bm.setContent(message == null ? "" : message);
+            if (attachments != null) {
+                List<String> images = new ArrayList<>();
+                for (UserAttachment att : attachments) {
+                    if (att != null && att.base64Data() != null && !att.base64Data().isBlank()
+                            && att.mimeType() != null && att.mimeType().startsWith("image/")) {
+                        images.add("data:" + att.mimeType() + ";base64," + att.base64Data());
+                    }
+                }
+                if (!images.isEmpty()) {
+                    bm.setImages(images);
+                }
+            }
+            SessionTranscriptStore.append(dir, bm);
+        } catch (Exception e) {
+            log.warn("写入会话转录失败（忽略）: session={}, {}", sessionId, e.getMessage());
+        }
+    }
+
+    /**
+     * 为当前会话创建转录记录器（包装事件消费者）；会话未映射到工作区时返回 null（不记录）。
+     */
+    private TranscriptRecorder newTranscriptRecorder(String sessionId, Consumer<StreamEvent> onEvent) {
+        try {
+            String wid = sessionWorkspaces.get(sessionId);
+            if (wid == null) {
+                return null;
+            }
+            WorkspaceContext ws = workspaceManager.getWorkspace(wid);
+            if (ws == null) {
+                return null;
+            }
+            return new TranscriptRecorder(sessionStateDir(ws, sessionId), onEvent);
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /**
@@ -516,8 +708,16 @@ public class AgentService {
 
         // 会话 → Workspace 映射（权限按 workspace 隔离）
         sessionWorkspaces.put(sessionId, workspaceId);
+        // 标记进入「确认恢复」阶段：恢复流统一负责发送 end，原暂停流不再发送
+        resuming.put(sessionId, new AtomicBoolean(true));
 
         List<ToolUseBlock> tools = pendingConfirms.remove(sessionId);
+        // 无待确认工具（可能已自动放行、或确认请求已过期/重复）：直接结束，避免起一个幽灵空轮
+        if (tools == null || tools.isEmpty()) {
+            log.warn("resumeChat 无待确认工具（可能已自动放行或过期），直接结束: sessionId={}", sessionId);
+            onFinish.run();
+            return;
+        }
         List<ConfirmResult> results = new ArrayList<>();
         if (tools != null) {
             for (ToolUseBlock t : tools) {
@@ -528,17 +728,23 @@ public class AgentService {
         }
         Map<String, Object> meta = new HashMap<>();
         meta.put(Msg.METADATA_CONFIRM_RESULTS, results);
+        // 恢复消息带明确语义文本（不能是空串）：空 user 消息会留在模型上下文里，
+        // 多次工具确认后模型会看到连续多条"空消息"，误判为网络问题/误触并输出困惑回复
         Msg resume = Msg.builder()
                 .name("user")
                 .role(MsgRole.USER)
-                .textContent("")
+                .textContent(approved ? "（已确认：允许执行上述工具）" : "（已确认：拒绝执行上述工具）")
                 .metadata(meta)
                 .build();
 
         log.info("用户{}了工具执行: workspaceId={}, sessionId={}, tools={}",
                 approved ? "允许" : "拒绝", workspaceId, sessionId, tools == null ? 0 : tools.size());
 
-        startStream(agent, context, resume, sessionId, false, onEvent, onError, onFinish);
+        // 先把回合/永久授权同步为 ALLOW 规则：恢复流里模型若再次调用同类工具，
+        // 框架直接静默执行（不再弹窗、不注入消息）——避免"确认→恢复→再确认"循环
+        syncPermissionRules(agent, workspace, sessionId, workspaceId);
+
+        startStream(agent, context, resume, sessionId, false, true, onEvent, onError, onFinish);
     }
 
     // ==================== 流式处理 ====================
@@ -636,7 +842,7 @@ public class AgentService {
     }
 
     private void startStream(HarnessAgent agent, RuntimeContext context, Msg msg, String sessionId,
-                             boolean mainTurn,
+                             boolean mainTurn, boolean isResumeStream,
                              Consumer<StreamEvent> onEvent,
                              Consumer<Throwable> onError,
                              Runnable onFinish) {
@@ -644,18 +850,41 @@ public class AgentService {
         final boolean[] ended = {false};
         final boolean[] retried = {false};
         final ToolTrace trace = new ToolTrace();
-        final DeltaBatcher batcher = new DeltaBatcher(onEvent);
+        // 会话转录：把推送给 UI 的完整事件流聚合落盘（append-only），与模型上下文压缩解耦，
+        // 保证历史消息不因 compaction / agent 重建而丢失。落盘失败不影响主流程。
+        final TranscriptRecorder recorder = newTranscriptRecorder(sessionId, onEvent);
+        final Consumer<StreamEvent> eventSink = recorder != null ? recorder : onEvent;
+        final DeltaBatcher batcher = new DeltaBatcher(eventSink);
+
+        // 确保同一会话只有一个活跃订阅：发起新流前先释放上一轮（暂停中等候确认）的订阅，
+        // 避免原暂停流与「确认恢复流」重复推送事件 / 重复发送 end。
+        // 注：AgentScope 的暂停状态已持久化到 state 文件，释放原事件流不会丢失待确认上下文，
+        // 新流（resumeChat / autoConfirmResume）凭确认结果从同一状态恢复执行。
+        Disposable prev = sessionDisposables.remove(sessionId);
+        if (prev != null && !prev.isDisposed()) {
+            try {
+                prev.dispose();
+                log.debug("已释放上轮订阅（避免重复事件）: sessionId={}", sessionId);
+            } catch (Exception ignored) {
+                // 释放失败不影响新流
+            }
+        }
 
         Disposable disp = agent.streamEvents(msg, context)
                 // 不设硬超时：LLM 思考/模型响应可能很久，事件流由 AgentScope 生命周期
                 // （AGENT_END / 错误 / 用户中断）控制结束，避免长思考被误杀
                 .doOnNext(event -> {
-                    handleEvent(event, onEvent, onError, onFinish, trace, sessionId, agent, batcher);
+                    handleEvent(event, eventSink, onError, onFinish, trace, sessionId, agent, batcher);
                     // 收到 AGENT_END 即认为回复完成，立即复位 UI（不依赖 Flux complete）
                     if (event.getType() == AgentEventType.AGENT_END) {
+                        // 回合结束但仍有在途工具（TOOL_RESULT_END 丢失的异常路径）：补发收尾，避免 UI 卡"执行中"
+                        closeInFlightTool(trace, eventSink, "已结束");
                         ended[0] = true;
                         batcher.flush();
-                        emitContextStatus(agent, onEvent);
+                        if (recorder != null) {
+                            recorder.flushAll();
+                        }
+                        emitContextStatus(agent, eventSink);
                         // NO_REPLY 兜底：主回合调用了工具但无任何文本输出（模型输出 NO_REPLY 被
                         // MemoryFlush 压缩询问吞掉等场景）→ 自动续问一次，强制给用户总结
                         if (mainTurn && trace.toolCalled && !trace.hasText && !retried[0]) {
@@ -667,16 +896,21 @@ public class AgentService {
                                     .textContent("（系统提示）请基于刚才的工具执行结果，直接给用户完整、清晰的中文总结回复。"
                                             + "不要输出 NO_REPLY，不要重复工具调用，直接总结。")
                                     .build();
-                            startStream(agent, context, followUp, sessionId, false,
+                            startStream(agent, context, followUp, sessionId, false, false,
                                     onEvent, onError, onFinish);
                             return;
                         }
-                        onFinish.run();
+                        finishTurn(sessionId, isResumeStream, onFinish);
                     }
                 })
                 .doOnError(err -> {
                     log.error("流式对话执行失败: {}", err.getMessage(), err);
+                    // 流错误时在途工具补发收尾，避免 UI 卡"执行中"
+                    closeInFlightTool(trace, eventSink, "已中断（流错误）");
                     batcher.flush();
+                    if (recorder != null) {
+                        recorder.flushAll();
+                    }
                     onError.accept(err);
                     // Agent 内部状态可能已损坏（模型 API 失败/流中断）：
                     // 重建 Agent，避免后续消息"无响应"（新消息从 state 文件干净加载）
@@ -692,6 +926,10 @@ public class AgentService {
                 })
                 .doFinally(signal -> {
                     batcher.flush();
+                    // 转录兜底落盘：流被 dispose（确认暂停/停止）或异常终止时不丢已产出内容
+                    if (recorder != null) {
+                        recorder.flushAll();
+                    }
                     // 清理本会话的订阅引用（已结束/出错/被 dispose 都要清）
                     sessionDisposables.remove(sessionId);
                     // 流终止（complete/error/cancel）兜底：确保 UI 一定复位，状态最终落盘
@@ -706,17 +944,60 @@ public class AgentService {
                         log.info("Agent 暂停等待确认，保持 SSE 连接: sessionId={}", sessionId);
                         return;
                     }
+                    // 流终止兜底（被新消息顶替 dispose / 用户停止 / 异常取消）：
+                    // 在途工具补发收尾事件，避免 UI 工具卡片永久停留在"执行中"
+                    closeInFlightTool(trace, eventSink, "已中断");
+                    if (recorder != null) {
+                        recorder.flushAll();
+                    }
                     if (!ended[0]) {
                         try {
-                            emitContextStatus(agent, onEvent);
+                            emitContextStatus(agent, eventSink);
                         } catch (Exception ignored) {
                             // 状态读取失败不影响复位
                         }
-                        onFinish.run();
+                        finishTurn(sessionId, isResumeStream, onFinish);
                     }
                 })
                 .subscribe();
         sessionDisposables.put(sessionId, disp);
+    }
+
+    /**
+     * 流终止时为在途工具（TOOL_CALL_START 后未收到 TOOL_RESULT_END）补发收尾事件，
+     * 避免 UI 工具卡片永久停留在"执行中"。幂等：关闭后 toolInFlight 置 false，重复调用无副作用。
+     */
+    private void closeInFlightTool(ToolTrace trace, Consumer<StreamEvent> sink, String note) {
+        if (trace == null || !trace.toolInFlight || trace.toolName == null || trace.toolName.isEmpty()) {
+            return;
+        }
+        trace.toolInFlight = false;
+        try {
+            sink.accept(StreamEvent.toolResult("(" + note + ")"));
+            sink.accept(StreamEvent.toolEnd(trace.toolName));
+        } catch (Exception ignored) {
+            // 收尾失败不影响主流程
+        }
+    }
+
+    /**
+     * 统一发送本回合 end 事件，确保「确认恢复」阶段 end 只由恢复流发送一次：
+     * <ul>
+     *   <li>isResumeStream=false（用户消息 / 自动续问的原流）：若正处于确认恢复阶段（resuming=true），
+     *       说明该流已被恢复流取代，抑制其 end，避免 UI 提前复位、后续文本丢失；否则正常发送。</li>
+     *   <li>isResumeStream=true（确认恢复流）：正常发送 end，并清除 resuming 标记，后续回合恢复常规逻辑。</li>
+     * </ul>
+     */
+    private void finishTurn(String sessionId, boolean isResumeStream, Runnable onFinish) {
+        boolean isResuming = resuming.getOrDefault(sessionId, new AtomicBoolean(false)).get();
+        if (!isResumeStream && isResuming) {
+            log.debug("抑制旧流(end)：确认恢复流将统一发送, sessionId={}", sessionId);
+            return;
+        }
+        onFinish.run();
+        if (isResumeStream) {
+            resuming.remove(sessionId);
+        }
     }
 
     /** 工具调用追溯状态（名称 / 参数 / 结果，按会话隔离） */
@@ -724,6 +1005,8 @@ public class AgentService {
         String toolName = "";
         boolean toolCalled = false;
         boolean hasText = false;
+        /** 在途标记：TOOL_CALL_START 后、TOOL_RESULT_END 前为 true，用于流终止时补发收尾 */
+        boolean toolInFlight = false;
         final StringBuilder args = new StringBuilder();
         final StringBuilder result = new StringBuilder();
     }
@@ -872,6 +1155,7 @@ public class AgentService {
                     String name = e.getToolCallName();
                     trace.toolCalled = true;
                     trace.toolName = name;
+                    trace.toolInFlight = true;
                     trace.args.setLength(0);
                     if (name != null && name.toLowerCase().contains("subagent")) {
                         String subName = extractSubagentName(name);
@@ -916,6 +1200,7 @@ public class AgentService {
                 }
             }
             case TOOL_RESULT_END -> {
+                trace.toolInFlight = false;
                 String result = trace.result.toString().trim();
                 String state = event instanceof ToolResultEndEvent e
                         ? inferToolResultState(
@@ -924,29 +1209,41 @@ public class AgentService {
                         : inferToolResultState(null, result);
                 onEvent.accept(StreamEvent.toolResult("(" + state + ") "
                         + (result.isEmpty() ? "(空结果)" : result)));
+                // 工具连续失败护栏：同一工具连续失败 ≥2 次时注入停止提示
+                if ("ERROR".equalsIgnoreCase(state)) {
+                    int fails = toolFailCounts
+                            .computeIfAbsent(sessionId, k -> new HashMap<>())
+                            .merge(trace.toolName, 1, Integer::sum);
+                    if (fails >= 2) {
+                        log.warn("工具连续失败护栏触发: session={}, tool={}, fails={}",
+                                sessionId, trace.toolName, fails);
+                        onEvent.accept(StreamEvent.context(
+                                "{\"type\":\"tool_fail_guard\",\"tool\":\"" + trace.toolName
+                                + "\",\"fails\":" + fails
+                                + ",\"message\":\"工具[" + trace.toolName + "] 连续失败 " + fails
+                                + " 次，请停止重试，检查参数/路径/权限后向用户说明并询问。\"}"));
+                    }
+                } else {
+                    // 成功则重置该工具的失败计数
+                    toolFailCounts.computeIfPresent(sessionId, (k, m) -> {
+                        m.remove(trace.toolName);
+                        return m;
+                    });
+                }
                 onEvent.accept(StreamEvent.toolEnd(trace.toolName));
             }
             case REQUIRE_USER_CONFIRM -> {
-                // 工具执行前需用户确认：已授权（回合/永久）的自动放行，其余弹窗
+                // 工具执行前需用户确认：只有未被预授权规则覆盖的工具才会走到这里（弹窗）。
+                // 已授权（永久/回合）的工具在 streamChat 入口已同步为 ALLOW 规则，
+                // 框架直接静默执行，不触发本事件、也不注入任何恢复消息（LLM 无感）。
+                // 拒绝时由框架回 "Permission denied by user" 工具结果给 LLM（有感）。
                 if (event instanceof RequireUserConfirmEvent e) {
                     List<ToolUseBlock> tools = e.getToolCalls();
                     pendingConfirms.put(sessionId, tools);
-                    List<ToolUseBlock> needConfirm = tools.stream()
-                            .filter(t -> !isAllowed(sessionId, t.getName()))
-                            .toList();
-                    log.info("收到工具确认请求: session={}, tools={}, needConfirm={}",
+                    log.info("收到工具确认请求: session={}, tools={}",
                             sessionId,
-                            tools.stream().map(ToolUseBlock::getName).toList(),
-                            needConfirm.stream().map(ToolUseBlock::getName).toList());
-                    if (needConfirm.isEmpty()) {
-                        // 全部已授权（永久/回合）：仅发 autoConfirm 事件通知前端还不够——
-                        // AgentScope 仍在等确认结果，必须真正提交 ConfirmResult 恢复 Agent，
-                        // 否则会永远暂停（"保持 SSE 连接"但前端无提示）
-                        onEvent.accept(StreamEvent.autoConfirm());
-                        autoConfirmResume(sessionId, agent, tools, onEvent, onError, onFinish);
-                    } else {
-                        onEvent.accept(StreamEvent.confirm(buildConfirmJson(e.getReplyId(), needConfirm)));
-                    }
+                            tools.stream().map(ToolUseBlock::getName).toList());
+                    onEvent.accept(StreamEvent.confirm(buildConfirmJson(e.getReplyId(), tools)));
                 }
             }
             case SUBAGENT_EXPOSED -> {
@@ -955,70 +1252,6 @@ public class AgentService {
             default -> {
                 // 其他事件忽略
             }
-        }
-    }
-
-    /**
-     * 自动放行已授权工具：构造 ConfirmResult(true) 恢复消息并重新订阅 Agent 事件流，
-     * 使 Agent 真正继续执行（否则 AgentScope 会一直停留在 ASKING 暂停状态）。
-     * <p>关键点：先把 pendingConfirms 移除，避免新流的 doFinally 误判"暂停等待确认"而保持连接。</p>
-     */
-    private void autoConfirmResume(String sessionId, HarnessAgent agent, List<ToolUseBlock> tools,
-                                   Consumer<StreamEvent> onEvent,
-                                   Consumer<Throwable> onError,
-                                   Runnable onFinish) {
-        String workspaceId = sessionWorkspaces.get(sessionId);
-        WorkspaceContext workspace = workspaceManager.getWorkspace(workspaceId);
-        if (workspace == null) {
-            log.warn("自动放行失败：workspace 不存在, session={}", sessionId);
-            return;
-        }
-        pendingConfirms.remove(sessionId);
-        List<ConfirmResult> results = tools.stream().map(t -> new ConfirmResult(true, t)).toList();
-        Map<String, Object> meta = new HashMap<>();
-        meta.put(Msg.METADATA_CONFIRM_RESULTS, results);
-        Msg resume = Msg.builder()
-                .name("user")
-                .role(MsgRole.USER)
-                .textContent("")
-                .metadata(meta)
-                .build();
-        log.info("自动放行已授权工具: session={}, tools={}",
-                sessionId, tools.stream().map(ToolUseBlock::getName).toList());
-        final boolean[] ended = {false};
-        final ToolTrace t2 = new ToolTrace();
-        final DeltaBatcher batcher2 = new DeltaBatcher(onEvent);
-        try {
-            Disposable disp = agent.streamEvents(resume, buildContext(workspace, sessionId))
-                    .doOnNext(evt -> {
-                        handleEvent(evt, onEvent, onError, onFinish, t2, sessionId, agent, batcher2);
-                        if (evt.getType() == AgentEventType.AGENT_END) {
-                            ended[0] = true;
-                            batcher2.flush();
-                            onFinish.run();
-                        }
-                    })
-                    .doOnError(err -> {
-                        log.warn("自动放行恢复失败: session={}, err={}", sessionId, err.getMessage());
-                        batcher2.flush();
-                        onError.accept(err);
-                    })
-                    .doFinally(signal -> {
-                        batcher2.flush();
-                        sessionDisposables.remove(sessionId);
-                        // 若恢复后又暂停等确认（pendingConfirms 重新有值）：保持连接不 complete
-                        if (pendingConfirms.containsKey(sessionId)) {
-                            return;
-                        }
-                        if (!ended[0]) {
-                            onFinish.run();
-                        }
-                    })
-                    .subscribe();
-            sessionDisposables.put(sessionId, disp);
-        } catch (Exception e) {
-            log.warn("自动放行恢复异常: session={}, err={}", sessionId, e.getMessage());
-            onFinish.run();
         }
     }
 

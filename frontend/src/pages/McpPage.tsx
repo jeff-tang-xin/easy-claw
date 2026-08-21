@@ -23,6 +23,7 @@ interface McpService {
   serverInstructions?: string;
   capabilities?: string;
   availableTools?: string;
+  enabledTools?: string;
   isTemplate?: boolean;
   scope?: string;
   workspaceId?: string;
@@ -165,11 +166,22 @@ export default function McpPage() {
   const [jsonText, setJsonText] = useState('');
   const [httpForm, setHttpForm] = useState<HttpToolForm>({method: 'GET', url: '', bodyMode: 'json', params: []});
   const [copyTarget, setCopyTarget] = useState<{templateId: number; scope: string; workspaceId: string} | null>(null);
+  const [toolStates, setToolStates] = useState<Record<number, {available: string[]; enabled: string[]}>>({});
 
   const load = async () => {
     try {
       const all = await getJson<McpService[]>('/api/mcp');
-      setItems(all.filter(m => !m.isTemplate));
+      const services = all.filter(m => !m.isTemplate);
+      setItems(services);
+      const connected = services.filter(s => s.isConnected);
+      const states: Record<number, {available: string[]; enabled: string[]}> = {};
+      await Promise.all(connected.map(async s => {
+        try {
+          const r = await getJson<{available: string[]; enabled: string[]}>(`/api/mcp/${s.id}/tools`);
+          states[s.id] = r;
+        } catch { /* ignore */ }
+      }));
+      setToolStates(states);
     } catch (e) {
       setError(String(e));
     }
@@ -189,6 +201,31 @@ export default function McpPage() {
     }
   };
   useEffect(() => { load(); loadTemplates(); loadWorkspaces(); }, []);
+
+  const loadToolsForService = async (id: number) => {
+    try {
+      const r = await getJson<{available: string[]; enabled: string[]}>(`/api/mcp/${id}/tools`);
+      setToolStates(prev => ({...prev, [id]: r}));
+    } catch { /* ignore */ }
+  };
+
+  const toggleTool = async (serviceId: number, toolName: string, checked: boolean) => {
+    const state = toolStates[serviceId];
+    if (!state) return;
+    const newEnabled = checked
+      ? [...new Set([...state.enabled, toolName])]
+      : state.enabled.filter(t => t !== toolName);
+    setToolStates(prev => ({
+      ...prev,
+      [serviceId]: {...state, enabled: newEnabled},
+    }));
+    try {
+      await putJson(`/api/mcp/${serviceId}/tools`, {enabledTools: newEnabled});
+    } catch (e) {
+      setError(String(e));
+      setToolStates(prev => ({...prev, [serviceId]: state}));
+    }
+  };
 
   const save = async () => {
     if (!editing) return;
@@ -223,13 +260,19 @@ export default function McpPage() {
   };
 
   const connect = async (id: number) => {
-    try { await postJson(`/api/mcp/${id}/connect`, {}); await load(); }
-    catch (e) { setError(String(e)); }
+    try {
+      await postJson(`/api/mcp/${id}/connect`, {});
+      await load();
+      await loadToolsForService(id);
+    } catch (e) { setError(String(e)); }
   };
 
   const disconnect = async (id: number) => {
-    try { await postJson(`/api/mcp/${id}/disconnect`, {}); await load(); }
-    catch (e) { setError(String(e)); }
+    try {
+      await postJson(`/api/mcp/${id}/disconnect`, {});
+      setToolStates(prev => { const c = {...prev}; delete c[id]; return c; });
+      await load();
+    } catch (e) { setError(String(e)); }
   };
 
   const copyFromTemplate = (templateId: number) => {
@@ -354,78 +397,73 @@ export default function McpPage() {
       </div>
 
       {tab === 'services' && (
-        <div className="card">
-          <table>
-            <thead>
-              <tr><th>名称</th><th>传输</th><th>服务端描述</th><th>状态</th><th></th></tr>
-            </thead>
-            <tbody>
-              {items.map((m) => {
-                const transportLabel = m.transport?.toLowerCase()
-                  || (m.implementationConfig ? 'http_tool' : m.command ? 'stdio' : 'http');
-                const transportBadgeClass = transportLabel === 'stdio' ? 'blue'
-                  : transportLabel === 'http_tool' ? 'orange' : '';
-                const displayName = m.serverName && m.serverName !== m.name ? `${m.name} (${m.serverName})` : m.name;
-                const versionTag = m.serverVersion ? ` v${m.serverVersion}` : '';
-                return (
-                  <tr key={m.id}>
-                    <td style={{fontWeight: 600}}>
-                      {displayName}
-                      {versionTag && <span className="hint" style={{marginLeft: 4}}>{versionTag}</span>}
-                      {m.scope === 'SYSTEM' && <span className="badge" style={{marginLeft: 4, background: '#e3f2fd', color: '#1565c0'}}>内置</span>}
-                      {m.scope === 'WORKSPACE' && <span className="badge" style={{marginLeft: 4, background: '#f3e5f5', color: '#6a1b9a'}}>
-                        工作区
-                        {m.workspaceId && workspaces.find(w => w.workspaceId === m.workspaceId)?.name ? (
-                          <span style={{opacity: 0.8}}>: {workspaces.find(w => w.workspaceId === m.workspaceId)?.name}</span>
-                        ) : null}
-                      </span>}
-                      {m.scope === 'GLOBAL' && <span className="badge" style={{marginLeft: 4, background: '#e8f5e9', color: '#2e7d32'}}>全局</span>}
-                    </td>
-                    <td><span className={`badge ${transportBadgeClass}`}>{transportLabel}</span></td>
-                    <td style={{maxWidth: 360}}>
-                      <div
-                        className="hint"
-                        title={m.serverInstructions || m.description || ''}
-                        style={{
-                          fontSize: 12,
-                          overflow: 'hidden',
-                          textOverflow: 'ellipsis',
-                          whiteSpace: 'nowrap',
-                          maxWidth: 360,
-                        }}
-                      >
-                        {m.serverInstructions || m.description || '—'}
-                      </div>
-                    </td>
-                    <td>
+        <div className="mcp-card-grid">
+          {items.map((m) => {
+            const transportLabel = m.transport?.toLowerCase()
+              || (m.implementationConfig ? 'http_tool' : m.command ? 'stdio' : 'http');
+            const transportBadgeClass = transportLabel === 'stdio' ? 'blue'
+              : transportLabel === 'http_tool' ? 'orange' : '';
+            const displayName = m.serverName && m.serverName !== m.name ? `${m.name} (${m.serverName})` : m.name;
+            const versionTag = m.serverVersion ? ` v${m.serverVersion}` : '';
+            const ts = toolStates[m.id];
+            const tools = ts?.available || [];
+            const enabledSet = new Set(ts?.enabled || []);
+            return (
+              <div key={m.id} className={`mcp-card ${m.isConnected ? 'connected' : ''}`}>
+                <div className="mcp-card-header">
+                  <span className={`mcp-status-dot ${m.isConnected ? 'on' : 'off'}`} />
+                  <span className="mcp-card-name">{displayName}</span>
+                  {versionTag && <span className="hint">{versionTag}</span>}
+                  {m.scope === 'SYSTEM' && <span className="badge" style={{background: '#e3f2fd', color: '#1565c0'}}>内置</span>}
+                  {m.scope === 'GLOBAL' && <span className="badge" style={{background: '#e8f5e9', color: '#2e7d32'}}>全局</span>}
+                  {m.scope === 'WORKSPACE' && <span className="badge" style={{background: '#f3e5f5', color: '#6a1b9a'}}>
+                    工作区{m.workspaceId && workspaces.find(w => w.workspaceId === m.workspaceId)?.name ? `: ${workspaces.find(w => w.workspaceId === m.workspaceId)?.name}` : ''}
+                  </span>}
+                  <span className={`badge ${transportBadgeClass}`}>{transportLabel}</span>
+                </div>
+                <div className="mcp-card-desc hint" title={m.serverInstructions || m.description || ''}>
+                  {m.serverInstructions || m.description || '—'}
+                </div>
+                {m.isConnected && tools.length > 0 && (
+                  <div className="mcp-tools-section">
+                    <div className="mcp-tools-title">工具列表 ({tools.length})</div>
+                    <div className="mcp-tools-list">
+                      {tools.map(t => (
+                        <label key={t} className="mcp-tool-item">
+                          <input
+                            type="checkbox"
+                            checked={enabledSet.has(t)}
+                            onChange={e => toggleTool(m.id, t, e.target.checked)}
+                          />
+                          <span>{t}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {m.isConnected && tools.length === 0 && (
+                  <div className="hint" style={{fontSize: 12, padding: '4px 0'}}>无可用工具</div>
+                )}
+                <div className="mcp-card-actions">
+                  {m.scope !== 'SYSTEM' && (
+                    <>
                       {m.isConnected
-                        ? <span className="badge green">已连接</span>
-                        : <span className="badge gray">未连接</span>}
-                    </td>
-                    <td>
-                      {m.scope !== 'SYSTEM' && (
-                        <>
-                          {m.isConnected
-                            ? <button className="btn small" onClick={() => disconnect(m.id)}>断开</button>
-                            : <button className="btn small primary" onClick={() => connect(m.id)}>连接</button>}
-                          {' '}
-                          <button className="btn small" onClick={() => openEditForm(m)}>编辑</button>
-                          {' '}
-                          <button className="btn danger small" onClick={() => remove(m.id)}>删除</button>
-                        </>
-                      )}
-                      {m.scope === 'SYSTEM' && <span className="hint" style={{fontSize: 11}}>只读</span>}
-                    </td>
-                  </tr>
-                );
-              })}
-              {items.length === 0 && (
-                <tr><td colSpan={5} className="hint" style={{textAlign: 'center', padding: 24}}>
-                  暂无 MCP 服务。点击右上角添加，或切换到「模板库」从内置模板复制。
-                </td></tr>
-              )}
-            </tbody>
-          </table>
+                        ? <button className="btn small" onClick={() => disconnect(m.id)}>断开</button>
+                        : <button className="btn small primary" onClick={() => connect(m.id)}>连接</button>}
+                      <button className="btn small" onClick={() => openEditForm(m)}>编辑</button>
+                      <button className="btn danger small" onClick={() => remove(m.id)}>删除</button>
+                    </>
+                  )}
+                  {m.scope === 'SYSTEM' && <span className="hint" style={{fontSize: 11}}>只读</span>}
+                </div>
+              </div>
+            );
+          })}
+          {items.length === 0 && (
+            <div className="hint" style={{textAlign: 'center', padding: 24, gridColumn: '1 / -1'}}>
+              暂无 MCP 服务。点击右上角添加，或切换到「模板库」从内置模板复制。
+            </div>
+          )}
         </div>
       )}
 

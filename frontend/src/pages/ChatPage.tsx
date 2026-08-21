@@ -3,7 +3,7 @@ import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
-import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem} from '../chatStore';
+import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem, Segment} from '../chatStore';
 import {
     chatKey,
     getActiveSession,
@@ -22,6 +22,20 @@ interface BoxMessage {
   toolArgs?: string; toolResult?: string; subagentName?: string; images?: string[]; seq: number;
 }
 interface Attachment { name: string; mimeType: string; base64Data: string; }
+
+// 工具目录（/api/tools/builtin 返回的结构）
+interface ToolParamDef { name: string; required: boolean; description: string; }
+interface ToolDef { name: string; displayName: string; description: string; group: string; params: ToolParamDef[]; }
+
+/** 工具名称 → 可读描述（loadTools 时填充，ToolCallCard 自解释用） */
+const toolDescCache = new Map<string, string>();
+
+/** 截取工具描述的第一句作为卡片副标题 */
+function shortDesc(d: string): string {
+  if (!d) return '';
+  const m = d.match(/^[^。\n]*[。]?/);
+  return m && m[0] ? m[0] : d;
+}
 
 interface FileEntry { name: string; path: string; directory: boolean; size: number; modifiedAt: number; }
 
@@ -100,19 +114,52 @@ function md(raw: string): string {
   return html;
 }
 
+// 工具结果状态推断：从 "(SUCCESS) ..." / "(ERROR) ..." 前缀提取
+function toolStateOf(result?: string): 'success' | 'error' | 'empty' | '' {
+  if (!result) return '';
+  const m = result.match(/^\(([A-Z_]+)\)/);
+  if (!m) return '';
+  const s = m[1];
+  if (s === 'SUCCESS') return 'success';
+  if (s === 'ERROR' || s === 'FAIL' || s === 'FAILED') return 'error';
+  if (s === 'EMPTY' || s === 'EMPTY_RESULT') return 'empty';
+  return '';
+}
+
+// 工具参数格式化：能解析成 JSON 就美化，否则原样
+function prettyJson(s: string): string {
+  try {
+    return JSON.stringify(JSON.parse(s), null, 2);
+  } catch {
+    return s;
+  }
+}
+
 // 流式事件 → 消息列表（纯 reducer，可批量应用）
 // 注意：必须不可变更新（每次创建新消息对象），否则 React.memo 按引用比较会跳过重渲染
 function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
   const next = [...prev];
   const lastIdx = next.length - 1;
   const last = next[lastIdx];
+  // 取最后一条 tool 段（反向查找，匹配最新一次工具调用）
+  const patchLastTool = (fn: (s: Segment) => Segment) => {
+    if (!last || last.role !== 'ai') return;
+    const segs = [...last.segments];
+    for (let j = segs.length - 1; j >= 0; j--) {
+      if (segs[j].type === 'tool') {
+        segs[j] = fn(segs[j]);
+        break;
+      }
+    }
+    next[lastIdx] = { ...last, segments: segs };
+  };
   switch (evt.type) {
     case 'text': {
       if (last && last.role === 'ai') {
         const segs = [...last.segments];
         const li = segs.length - 1;
         if (li >= 0 && segs[li].type === 'text') {
-          segs[li] = { ...segs[li], content: segs[li].content + evt.content };
+          segs[li] = { ...segs[li], content: (segs[li].content || '') + evt.content };
         } else {
           segs.push({ type: 'text', content: evt.content });
         }
@@ -127,7 +174,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         const segs = [...last.segments];
         const li = segs.length - 1;
         if (li >= 0 && segs[li].type === 'reasoning') {
-          segs[li] = { ...segs[li], content: segs[li].content + evt.content };
+          segs[li] = { ...segs[li], content: (segs[li].content || '') + evt.content };
         } else {
           segs.push({ type: 'reasoning', content: evt.content });
         }
@@ -138,48 +185,66 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       break;
     }
     case 'tool': {
+      // 工具调用开始：新建一个结构化工具段
+      const seg: Segment = { type: 'tool', name: evt.content, args: '', result: '', running: true };
       if (last && last.role === 'ai') {
-        const segs = [...last.segments];
-        const li = segs.length - 1;
-        if (li >= 0 && segs[li].type === 'tool') {
-          segs[li] = { ...segs[li], content: segs[li].content + `\n\n── ${evt.content} ──` };
-        } else {
-          segs.push({ type: 'tool', content: `── ${evt.content} ──` });
-        }
-        next[lastIdx] = { ...last, segments: segs };
+        next[lastIdx] = { ...last, segments: [...last.segments, seg] };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'tool', content: `── ${evt.content} ──` }] });
+        next.push({ role: 'ai', segments: [seg] });
       }
       break;
     }
     case 'tool_args': {
-      if (last && last.role === 'ai') {
-        const segs = [...last.segments];
-        const li = segs.length - 1;
-        if (li >= 0 && segs[li].type === 'tool') {
-          segs[li] = { ...segs[li], content: segs[li].content + `\n参数: ${evt.content}` };
-          next[lastIdx] = { ...last, segments: segs };
-        }
-      }
+      patchLastTool((s) => ({ ...s, args: (s.args || '') + evt.content }));
       break;
     }
     case 'tool_result': {
+      patchLastTool((s) => ({ ...s, result: (s.result || '') + evt.content }));
+      break;
+    }
+    case 'tool_end': {
+      // 优先按工具名匹配仍在执行的那次调用（同名/多工具场景不能错关别的卡片），
+      // 找不到时兜底关最后一个 tool 段
       if (last && last.role === 'ai') {
         const segs = [...last.segments];
-        const li = segs.length - 1;
-        if (li >= 0 && segs[li].type === 'tool') {
-          segs[li] = { ...segs[li], content: segs[li].content + `\n📤 结果: ${evt.content}` };
+        const name = evt.content;
+        let idx = -1;
+        for (let j = segs.length - 1; j >= 0; j--) {
+          const s = segs[j];
+          if (s.type === 'tool' && s.running && (!name || s.name === name)) { idx = j; break; }
+        }
+        if (idx < 0) {
+          for (let j = segs.length - 1; j >= 0; j--) {
+            if (segs[j].type === 'tool') { idx = j; break; }
+          }
+        }
+        if (idx >= 0) {
+          segs[idx] = { ...segs[idx], running: false };
           next[lastIdx] = { ...last, segments: segs };
         }
       }
       break;
     }
     case 'subagent': {
+      const seg: Segment = { type: 'subagent', name: evt.content, content: '', running: true };
       if (last && last.role === 'ai') {
-        const segs = [...last.segments, { type: 'subagent', name: evt.content, content: '' }];
-        next[lastIdx] = { ...last, segments: segs };
+        next[lastIdx] = { ...last, segments: [...last.segments, seg] };
       } else {
-        next.push({ role: 'ai', segments: [{ type: 'subagent', name: evt.content, content: '' }] });
+        next.push({ role: 'ai', segments: [seg] });
+      }
+      break;
+    }
+    case 'subagent_end': {
+      if (last && last.role === 'ai') {
+        const segs = [...last.segments];
+        const name = evt.content;
+        for (let j = segs.length - 1; j >= 0; j--) {
+          if (segs[j].type === 'subagent' && segs[j].name === name && segs[j].running) {
+            segs[j] = { ...segs[j], running: false };
+            break;
+          }
+        }
+        next[lastIdx] = { ...last, segments: segs };
       }
       break;
     }
@@ -189,7 +254,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
         const segs = last.segments.map((sg) =>
-          sg.type === 'subagent' && sg.name === name ? { ...sg, content: sg.content + delta } : sg,
+          sg.type === 'subagent' && sg.name === name ? { ...sg, content: (sg.content || '') + delta } : sg,
         );
         if (!last.segments.some((sg) => sg.type === 'subagent' && sg.name === name)) {
           segs.push({ type: 'subagent', name, content: delta });
@@ -198,8 +263,35 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       }
       break;
     }
-    case 'context':
+    case 'context': {
+      // 系统提示类事件（工具失败护栏/子Agent循环警告等 JSON）→ 渲染为 note 段
+      try {
+        const parsed = JSON.parse(evt.content);
+        if (parsed && (parsed.type === 'loop_warning' || parsed.type === 'tool_fail_guard')) {
+          const seg: Segment = { type: 'note', content: parsed.message || evt.content };
+          if (last && last.role === 'ai') {
+            next[lastIdx] = { ...last, segments: [...last.segments, seg] };
+          } else {
+            next.push({ role: 'ai', segments: [seg] });
+          }
+        }
+      } catch {
+        // 非 JSON context 忽略
+      }
+      break;
+    }
     case 'auto_confirm':
+      break;
+    case 'note': {
+      // 直接到达的 note 段（预留）
+      const seg: Segment = { type: 'note', content: evt.content };
+      if (last && last.role === 'ai') {
+        next[lastIdx] = { ...last, segments: [...last.segments, seg] };
+      } else {
+        next.push({ role: 'ai', segments: [seg] });
+      }
+      break;
+    }
     default:
       break;
   }
@@ -207,35 +299,67 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
 }
 
 // ============ 消息渲染 ============
-function FoldBlock({ title, children, className, loading }: {
-  title: string; children: string; className?: string; loading?: boolean;
+function FoldBlock({ title, children, className, loading, defaultOpen }: {
+  title: string; children: string; className?: string; loading?: boolean; defaultOpen?: boolean;
 }) {
   return (
-    <details className={`fold ${className || ''} ${loading ? 'loading' : ''}`} open={loading}>
+    <details className={`fold ${className || ''} ${loading ? 'loading' : ''}`} open={loading || defaultOpen}>
       <summary>
         {loading && <span className="spinner-small" />}
         {title}
       </summary>
-      <div className="fold-body">{children}</div>
+      <div className="fold-body md-content" dangerouslySetInnerHTML={{ __html: md(children || '') }} />
     </details>
   );
 }
 
-const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, activeTools, activeSubagents }: {
+// 结构化工具调用卡片：名称 + 状态点 + 描述副标题 + 可折叠参数 / 输出
+function ToolCallCard({ seg }: { seg: Segment }) {
+  const st = toolStateOf(seg.result);
+  const open = !!seg.running || !seg.result;
+  const hasArgs = !!seg.args && seg.args !== '(无参数)';
+  const desc = shortDesc(toolDescCache.get(seg.name || '') || '');
+  const badge = seg.running
+    ? '执行中'
+    : st === 'error'
+      ? '失败'
+      : st === 'empty'
+        ? '空结果'
+        : '完成';
+  return (
+    <details className={`tool-call ${seg.running ? 'is-running' : ''}`} open={open}>
+      <summary className="tool-head">
+        {seg.running ? (
+          <span className="spinner-tiny" />
+        ) : (
+          <span className={`tool-dot ${st || 'done'}`} />
+        )}
+        <span className="tool-name">{seg.name}</span>
+        {desc && <span className="tool-desc">{desc}</span>}
+        <span className={`tool-badge ${st || 'done'}`}>{badge}</span>
+      </summary>
+      {hasArgs && (
+        <div className="tool-section">
+          <div className="tool-section-head">参数</div>
+          <pre className="tool-pre">{prettyJson(seg.args || '')}</pre>
+        </div>
+      )}
+      {seg.result && (
+        <div className="tool-section">
+          <div className="tool-section-head">输出</div>
+          <pre className={`tool-pre tool-result-${st || 'done'}`}>{seg.result}</pre>
+        </div>
+      )}
+    </details>
+  );
+}
+
+const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
   msg: ChatMessage; isStreaming?: boolean; agentLabel?: string;
-  activeTools: string[]; activeSubagents: string[];
 }) {
-  const toolIdxRef = useRef(0);
-  toolIdxRef.current = 0;
   const label = agentLabel || 'AI';
-  // 判断某个 tool segment 是否正在执行：检查 activeTools 中是否包含该工具名
-  const isToolActive = (segContent: string): boolean => {
-    for (const t of activeTools) {
-      if (segContent.includes(t)) return true;
-    }
-    return false;
-  };
-  const isSubagentActive = (name: string): boolean => activeSubagents.includes(name);
+  // 末段正文位置：仅此处显示打字光标
+  const lastTextIdx = msg.segments.reduce((acc, s, idx) => (s.type === 'text' ? idx : acc), -1);
   return (
     <div className="chat-block ai">
       <div className="chat-meta">🤖 {label}</div>
@@ -245,27 +369,24 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, active
           {msg.segments.map((seg, i) => {
             switch (seg.type) {
               case 'text':
-                return isStreaming ? (
+                return (
                   <div key={i} className="md-content-wrap">
-                    <div className="md-content" style={{ whiteSpace: 'pre-wrap' }}>{seg.content}</div>
-                    {i === msg.segments.length - 1 ? <span className="typing-cursor" /> : null}
-                  </div>
-                ) : (
-                  <div key={i} className="md-content-wrap">
-                    <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content) }} />
+                    <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content || '') }} />
+                    {isStreaming && i === lastTextIdx && <span className="typing-cursor" />}
                   </div>
                 );
               case 'reasoning':
-                return <FoldBlock key={i} title="🧠 思考过程" className="reasoning">{seg.content}</FoldBlock>;
-              case 'tool': {
-                toolIdxRef.current += 1;
-                const loading = isToolActive(seg.content);
-                return <FoldBlock key={i} title={`🔧 工具调用 #${toolIdxRef.current}`} loading={loading}>{seg.content}</FoldBlock>;
-              }
-              case 'subagent': {
-                const loading = isSubagentActive(seg.name || '');
-                return <FoldBlock key={i} title={`🤖 子 Agent [${seg.name}]`} className="subagent" loading={loading}>{seg.content}</FoldBlock>;
-              }
+                return <FoldBlock key={i} title="🧠 思考过程" className="reasoning">{seg.content || ''}</FoldBlock>;
+              case 'tool':
+                return <ToolCallCard key={i} seg={seg} />;
+              case 'subagent':
+                return (
+                  <FoldBlock key={i} title={`🤖 子 Agent · ${seg.name}`} className="subagent" loading={seg.running}>
+                    {seg.content || ''}
+                  </FoldBlock>
+                );
+              case 'note':
+                return <div key={i} className="system-note">⚠️ {seg.content}</div>;
               default:
                 return null;
             }
@@ -277,12 +398,11 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel, active
 }, (prev, next) => {
   if (prev.isStreaming !== next.isStreaming) return false;
   if (prev.agentLabel !== next.agentLabel) return false;
-  if (prev.activeTools.length !== next.activeTools.length) return false;
-  if (prev.activeSubagents.length !== next.activeSubagents.length) return false;
   if (prev.msg.segments.length !== next.msg.segments.length) return false;
   for (let i = 0; i < prev.msg.segments.length; i++) {
     const a = prev.msg.segments[i], b = next.msg.segments[i];
-    if (a.type !== b.type || a.content !== b.content || a.name !== b.name) return false;
+    if (a.type !== b.type || a.content !== b.content || a.name !== b.name
+        || a.args !== b.args || a.result !== b.result || a.running !== b.running) return false;
   }
   return true;
 });
@@ -365,10 +485,11 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [tab, setTab] = useState<'sessions' | 'auth' | 'files'>('sessions');
+  const [tab, setTab] = useState<'sessions' | 'auth' | 'files' | 'tools'>('sessions');
   const [statusHint, setStatusHint] = useState('');
   const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
   const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string }[]>([]);
+  const [toolCatalog, setToolCatalog] = useState<ToolDef[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState('');
   interface OpenFile { entry: FileEntry; kind: 'text' | 'image'; content?: string; error?: string; loading: boolean; }
@@ -378,6 +499,8 @@ export default function ChatPage() {
   const [resizing, setResizing] = useState(false);
   const [skillName, setSkillName] = useState<string>('');
   const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; scope: string }[]>([]);
+  // 当前工作区激活的场景（场景编排页激活后在此显示）
+  const [scenario, setScenario] = useState<{ icon: string; displayName: string; name: string; mode: string } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickRef = useRef(true);
@@ -455,6 +578,22 @@ export default function ChatPage() {
         patch({ running: true, error: '' });
       }
     }
+    // 回合终止兜底：正常路径靠 tool_end / subagent_end 复位；end/error 时强制把
+    // 所有仍标记 running 的工具/子 Agent 段置为完成，避免卡片永久卡"执行中"
+    const settleRunningSegments = () => {
+      updateChatSession(key, (c) => {
+        let changed = false;
+        const messages = c.messages.map((m: ChatMessage) => {
+          if (!m.segments.some((sg: Segment) => sg.running)) return m;
+          changed = true;
+          return {
+            ...m,
+            segments: m.segments.map((sg: Segment) => (sg.running ? { ...sg, running: false } : sg)),
+          };
+        });
+        return changed ? { ...c, messages } : c;
+      });
+    };
     if (evt.type === 'tool') {
       // 工具开始执行：加入活跃集合
       updateChatSession(key, (c) => ({
@@ -465,11 +604,14 @@ export default function ChatPage() {
       pendingEvtsRef.current.push(evt);
       scheduleFlush();
     } else if (evt.type === 'tool_end') {
-      // 工具执行结束：从活跃集合移除
+      // 工具执行结束：从活跃集合移除 + push 到渲染队列（reduceMessage 设置 running=false）
       updateChatSession(key, (c) => ({
         ...c,
         activeTools: c.activeTools.filter((t: string) => t !== evt.content),
       }));
+      flushNow();
+      pendingEvtsRef.current.push(evt);
+      scheduleFlush();
     } else if (evt.type === 'subagent') {
       // 子 Agent 开始：加入活跃集合
       updateChatSession(key, (c) => ({
@@ -480,11 +622,14 @@ export default function ChatPage() {
       pendingEvtsRef.current.push(evt);
       scheduleFlush();
     } else if (evt.type === 'subagent_end') {
-      // 子 Agent 结束：从活跃集合移除
+      // 子 Agent 结束：从活跃集合移除 + push 到渲染队列（reduceMessage 设置 running=false）
       updateChatSession(key, (c) => ({
         ...c,
         activeSubagents: c.activeSubagents.filter((s: string) => s !== evt.content),
       }));
+      flushNow();
+      pendingEvtsRef.current.push(evt);
+      scheduleFlush();
     } else if (evt.type === 'text') {
       // text 增量走统一批量渲染（32ms 节流，比打字机快且不丢帧）
       pendingEvtsRef.current.push(evt);
@@ -503,8 +648,9 @@ export default function ChatPage() {
       }
     } else if (evt.type === 'error') {
       flushNow();
-      // 只显示一次（error-box），不再追加到消息流避免重复
-      patch({ error: evt.content });
+      // 出错时复位 running，避免 UI 卡在"运行中"且无后续事件
+      patch({ error: evt.content, running: false });
+      settleRunningSegments();
     } else if (evt.type === 'pending_info') {
       // 轮询兜底：SSE/WS confirm 事件丢失时也能弹窗
       try {
@@ -569,6 +715,7 @@ export default function ChatPage() {
     } else if (evt.type === 'end') {
       flushNow();
       patch({ running: false, activeTools: [], activeSubagents: [] });
+      settleRunningSegments();
       if (hangTimerRef.current) {
         clearInterval(hangTimerRef.current);
         hangTimerRef.current = null;
@@ -654,8 +801,13 @@ export default function ChatPage() {
           setSessionId(created.id);
         }
         loadAuth(workspaceId);
+        loadTools();
         loadFiles(workspaceId, '');
         loadSkills(workspaceId);
+        // 激活场景徽标（未激活返回 null）
+        getJson<{ icon: string; displayName: string; name: string; mode: string } | null>(
+          `/api/scenarios/active/${workspaceId}`,
+        ).then(setScenario).catch(() => setScenario(null));
       } catch (e) {
         patch({ error: String(e) });
       }
@@ -671,7 +823,7 @@ export default function ChatPage() {
         if (b.type === 'USER') {
           cur = null;
           msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
-        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'SUBAGENT') {
+        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT') {
           if (!cur) {
             cur = { role: 'ai', segments: [] };
             msgs.push(cur);
@@ -679,11 +831,14 @@ export default function ChatPage() {
           if (b.type === 'AI_TEXT') cur.segments.push({ type: 'text', content: b.content });
           else if (b.type === 'THINKING') cur.segments.push({ type: 'reasoning', content: b.content });
           else if (b.type === 'TOOL_CALL') {
+            cur.segments.push({ type: 'tool', name: b.toolName, args: b.toolArgs || '', result: '', running: false });
+          } else if (b.type === 'TOOL_RESULT') {
+            // 配对到最近的 tool 段（历史里工具调用与结果分两条，原逻辑会丢弃结果）
             const lastTool = cur.segments[cur.segments.length - 1];
             if (lastTool && lastTool.type === 'tool') {
-              lastTool.content += `\n\n── ${b.toolName} ──\n参数: ${b.toolArgs}`;
+              lastTool.result = b.toolResult || '';
             } else {
-              cur.segments.push({ type: 'tool', content: `── ${b.toolName} ──\n参数: ${b.toolArgs}` });
+              cur.segments.push({ type: 'tool', name: b.toolName, args: '', result: b.toolResult || '', running: false });
             }
           } else {
             cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content });
@@ -727,6 +882,19 @@ export default function ChatPage() {
       ]);
       setAuthList(rules);
       setAuthOptions(tools);
+    } catch {
+      // 忽略
+    }
+  };
+
+  /** 加载工具目录：填充侧栏列表 + ToolCallCard 描述缓存 */
+  const loadTools = async () => {
+    try {
+      const all = await getJson<ToolDef[]>('/api/tools/builtin');
+      setToolCatalog(all);
+      for (const t of all) {
+        toolDescCache.set(t.name, t.description || t.displayName || '');
+      }
     } catch {
       // 忽略
     }
@@ -1036,6 +1204,63 @@ export default function ChatPage() {
     </div>
   );
 
+  // 工具目录分组显示名
+  const GROUP_LABEL: Record<string, string> = {
+    FILE: '📁 文件',
+    CODE: '🧑‍💻 代码',
+    WEB: '🌐 网络',
+    MEMORY: '🧠 记忆',
+    SESSION: '💬 会话',
+    AGENT: '🤖 多Agent',
+    SHELL: '💻 Shell',
+    FRAMEWORK: '⚙️ 框架',
+    GENERAL: '🔧 通用',
+  };
+
+  // 侧栏：工具目录（分组展示全量工具 + 描述，供用户了解能力）
+  const toolsPanel = (
+    <div className="session-list tools-panel" style={{ padding: '4px 8px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <h4 style={{ margin: '0 0 8px' }}>🧰 工具目录 <span className="hint" style={{ fontWeight: 400 }}>（{toolCatalog.length}）</span></h4>
+        <button className="btn small" onClick={loadTools}>刷新</button>
+      </div>
+      {toolCatalog.length === 0 ? (
+        <div className="hint">暂无工具数据，点击「刷新」加载</div>
+      ) : (
+        Array.from(new Set(toolCatalog.map((t) => t.group))).map((group) => (
+          <div key={group} className="tools-group">
+            <div className="tools-group-head">{GROUP_LABEL[group] || group}</div>
+            {toolCatalog.filter((t) => t.group === group).map((t) => (
+              <details key={t.name} className="tools-item">
+                <summary className="tools-item-head">
+                  <span className="tools-item-name">{t.name}</span>
+                  <span className="tools-item-display">{t.displayName}</span>
+                </summary>
+                <div className="tools-item-body">
+                  {t.description && <p className="tools-item-desc">{t.description}</p>}
+                  {t.params && t.params.length > 0 && (
+                    <div className="tools-item-params">
+                      {t.params.map((p) => (
+                        <div key={p.name} className="tools-item-param">
+                          <code>{p.name}</code>
+                          {p.required && <em className="req">必填</em>}
+                          <span>{p.description}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </details>
+            ))}
+          </div>
+        ))
+      )}
+      <div className="hint" style={{ marginTop: 8, fontSize: 11 }}>
+        💡 工具会在 AI 需要时自动调用；写/执行类操作会先征询你确认
+      </div>
+    </div>
+  );
+
   // 侧栏：文件面板
   const filePanel = (
     <div className="session-list file-panel" style={{ padding: '4px 8px' }}>
@@ -1096,11 +1321,34 @@ export default function ChatPage() {
     </div>
   );
 
+  // 空状态建议：点击直接填入输入框（用户可编辑后再发）
+  const SUGGESTIONS = [
+    '阅读当前工作区，总结项目结构',
+    '帮我写一个读取 CSV 并统计的小脚本',
+    '检查这个项目有没有明显的代码问题',
+    '把这个目录下的图片按月份归类',
+  ];
+  const useSuggestion = (t: string) => {
+    setInput(t);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  };
+
   const chatArea = (
     <div className="chat-main">
       <div className="chat-topbar">
         <span className="ws-name">💬 {workspace?.name}</span>
         {workspace?.agentName && <span className="agent-badge">🤖 {workspace.agentName}</span>}
+        {scenario && (
+          <span
+            className="agent-badge"
+            title={scenario.mode === 'team' ? '多智能体编排场景（在场景页管理）' : '单智能体场景（在场景页管理）'}
+            style={{cursor: 'pointer'}}
+            onClick={() => navigate('/scenarios')}
+          >
+            {scenario.icon || '🎬'} {scenario.displayName || scenario.name}
+            {scenario.mode === 'team' ? ' 🤝' : ''}
+          </span>
+        )}
         {running && (
           <span className="status-badge running">
             <span className="spinner-tiny" /> 主 Agent 运行中
@@ -1148,13 +1396,18 @@ export default function ChatPage() {
           {messages.length === 0 && !running && (
             <div className="empty">
               <h3>开始对话</h3>
-              <p className="hint">AI 只能在你指定的工作区目录内工作</p>
+              <p className="hint">AI 只能在你指定的工作区目录内工作。试试下面的提问：</p>
+              <div className="suggest-grid">
+                {SUGGESTIONS.map((s, i) => (
+                  <button key={i} className="suggest-chip" onClick={() => useSuggestion(s)}>{s}</button>
+                ))}
+              </div>
             </div>
           )}
           {messages.map((m, i) => (
             m.role === 'user'
               ? <UserMessage key={i} msg={m} />
-              : <AiMessage key={i} msg={m} isStreaming={running && i === messages.length - 1} agentLabel={workspace?.agentName || workspace?.name} activeTools={activeTools} activeSubagents={activeSubagents} />
+              : <AiMessage key={i} msg={m} isStreaming={running && i === messages.length - 1} agentLabel={workspace?.agentName || workspace?.name} />
           ))}
         </div>
       </div>
@@ -1206,27 +1459,22 @@ export default function ChatPage() {
             ))}
           </div>
         )}
-        <div className="chat-mode-bar">
-          {availableSkills.length > 0 && (
-            <>
-              <span className="hint" style={{ marginRight: 4 }}>Skill:</span>
-              <select
-                className="skill-select"
-                value={skillName}
-                onChange={(e) => setSkillName(e.target.value)}
-                title="加载 Skill 作为本轮对话的操作指南"
-              >
-                <option value="">— 不指定 —</option>
-                {availableSkills.map((s) => (
-                  <option key={s.scope + ':' + s.name} value={s.name}>
-                    {s.name}{s.description ? ` — ${s.description}` : ''}
-                  </option>
-                ))}
-              </select>
-            </>
-          )}
-        </div>
         <div className="input-row">
+          {availableSkills.length > 0 && (
+            <select
+              className="skill-select"
+              value={skillName}
+              onChange={(e) => setSkillName(e.target.value)}
+              title="加载 Skill 作为本轮对话的操作指南"
+            >
+              <option value="">— 不指定 —</option>
+              {availableSkills.map((s) => (
+                <option key={s.scope + ':' + s.name} value={s.name}>
+                  {s.name}{s.description ? ` — ${s.description}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
           <label className="btn small" style={{ alignSelf: 'flex-end', marginBottom: 6 }}>
             📎 附件
             <input type="file" multiple style={{ display: 'none' }} onChange={pickFiles} />
@@ -1375,6 +1623,8 @@ export default function ChatPage() {
         );
       case 'auth':
         return authPanel;
+      case 'tools':
+        return toolsPanel;
       case 'files':
         return filePanel;
     }
@@ -1389,6 +1639,7 @@ export default function ChatPage() {
       <div className="chat-side" style={{ width: panelWidth }}>
         <div className="side-tabs">
           <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
+          <button className={`btn small ${tab === 'tools' ? 'primary' : ''}`} onClick={() => { if (toolCatalog.length === 0) loadTools(); setTab('tools'); }}>🧰 工具</button>
           <button className={`btn small ${tab === 'auth' ? 'primary' : ''}`} onClick={() => setTab('auth')}>🔐 授权</button>
           <button className={`btn small ${tab === 'files' ? 'primary' : ''}`} onClick={() => setTab('files')}>📁 文件</button>
           {openFiles.length > 0 && (

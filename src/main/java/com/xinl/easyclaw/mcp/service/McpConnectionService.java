@@ -5,6 +5,7 @@ import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 /**
@@ -27,14 +28,24 @@ public interface McpConnectionService {
     List<McpServiceEntity> findConnectedServices();
 
     /**
-     * 返回所有已建立连接的 MCP 客户端（供 Agent Toolkit 注册）
+     * 返回所有已建立连接的 MCP 客户端（key = serviceId，供 Agent Toolkit 注册）
      */
-    List<McpClientWrapper> getConnectedWrappers();
+    Map<Long, McpClientWrapper> getConnectedWrappers();
 
     /**
      * 返回所有已激活的 HTTP_TOOL 桥接工具（供 Agent Toolkit 注册为 AgentTool）
      */
     List<AgentTool> getHttpTools();
+
+    /**
+     * 获取指定服务的启用工具列表（null/空 = 全部启用）
+     */
+    List<String> getEnabledTools(Long serviceId);
+
+    /**
+     * 更新指定服务的启用工具列表
+     */
+    McpServiceEntity updateEnabledTools(Long serviceId, List<String> enabledTools);
 
     McpServiceEntity connect(Long id);
 

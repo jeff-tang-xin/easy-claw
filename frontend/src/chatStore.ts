@@ -11,10 +11,20 @@
 //   · activeTools / pending 是瞬时 UI 状态，重连后清空
 import {useEffect, useReducer} from 'react';
 
+export type SegmentType = 'text' | 'reasoning' | 'tool' | 'subagent' | 'note';
+
 export interface Segment {
-  type: string;
-  content: string;
+  type: SegmentType;
+  /** 正文 / 思考 / 子 Agent 正文 */
+  content?: string;
+  /** 工具名 或 子 Agent 名 */
   name?: string;
+  /** 工具调用参数（JSON 字符串） */
+  args?: string;
+  /** 工具执行结果（含状态前缀，如 "(SUCCESS) ..."） */
+  result?: string;
+  /** 是否正在执行（用于渲染 spinner / 展开态） */
+  running?: boolean;
 }
 
 export interface ChatMessage {

@@ -170,6 +170,12 @@ public class McpServiceEntity {
     @Column(name = "available_tools", columnDefinition = "TEXT")
     private String availableTools;
 
+    /**
+     * 启用的工具名列表（JSON 数组）；null/空 = 全部启用
+     */
+    @Column(name = "enabled_tools", columnDefinition = "TEXT")
+    private String enabledTools;
+
     @Column(name = "created_at")
     private Instant createdAt;
 

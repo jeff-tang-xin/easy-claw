@@ -5,7 +5,7 @@
 **/static/
 acs-logs/
 **/node_modules/
-
+.workbuddy
 
 yarn.lock
 package-lock.json

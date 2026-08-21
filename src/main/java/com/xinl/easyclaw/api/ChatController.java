@@ -3,6 +3,7 @@ package com.xinl.easyclaw.api;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.agent.AgentStateBoxReader;
+import com.xinl.easyclaw.agent.SessionTranscriptStore;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
@@ -166,7 +167,8 @@ public class ChatController {
     }
 
     /**
-     * 会话历史：从 agent_state.json 解析时序消息
+     * 会话历史：优先读 append-only 转录（transcript.jsonl，不随上下文压缩丢失），
+     * 无转录的旧会话回退解析 agent_state.json（模型上下文，压缩后旧消息会被摘要替换）。
      */
     @GetMapping("/history")
     public List<BoxMessage> history(@RequestParam String workspaceId, @RequestParam String sessionId) {
@@ -175,8 +177,12 @@ public class ChatController {
             return List.of();
         }
         String userId = ws.getUserId() == null ? AppConstants.DEFAULT_USER_ID : ws.getUserId();
-        Path file = ws.getPath().resolve(".easyClaw/agent/state/" + userId + "/" + sessionId + "/agent_state.json");
-        return AgentStateBoxReader.read(file);
+        Path sessionDir = ws.getPath().resolve(".easyClaw/agent/state/" + userId + "/" + sessionId);
+        List<BoxMessage> fromTranscript = SessionTranscriptStore.read(sessionDir);
+        if (!fromTranscript.isEmpty()) {
+            return fromTranscript;
+        }
+        return AgentStateBoxReader.read(sessionDir.resolve("agent_state.json"));
     }
 
     private void safeSend(String sessionId, SseEmitter emitter, StreamEvent evt) {

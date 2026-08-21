@@ -16,7 +16,7 @@ spring:
 logging:
   level:
     root: INFO
-    io.agentscope: DEBUG
+    io.agentscope: INFO
     com.xinl.easyclaw: INFO
   charset:
     console: UTF-8

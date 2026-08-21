@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * Agent 工厂
@@ -102,15 +103,20 @@ public class AgentFactory {
         }
 
         // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
-        List<McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
-        for (McpClientWrapper client : mcpClients) {
+        Map<Long, McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
+        mcpClients.forEach((serviceId, client) -> {
             try {
-                toolkit.registerMcpClient(client).block();
-                log.info("已注册外部 MCP 工具客户端");
+                List<String> enableTools = mcpConnectionService.getEnabledTools(serviceId);
+                registerMcpWithFilters(toolkit, client, enableTools);
+                if (enableTools.isEmpty()) {
+                    log.info("已注册外部 MCP 工具客户端 (serviceId={}, 全部工具)", serviceId);
+                } else {
+                    log.info("已注册外部 MCP 工具客户端 (serviceId={}, 启用 {} 个工具)", serviceId, enableTools.size());
+                }
             } catch (Exception e) {
-                log.warn("注册外部 MCP 客户端失败: {}", e.getMessage());
+                log.warn("注册外部 MCP 客户端失败 (serviceId={}): {}", serviceId, e.getMessage());
             }
-        }
+        });
         return toolkit;
     }
 
@@ -233,12 +239,74 @@ public class AgentFactory {
                 - 搜索专家：检索信息、获取网页内容
                 - MCP 工具：调用外部 MCP 服务器提供的工具
 
-                回答原则：
+                ━━ 工具使用协议 ━━
+
+                1. 先理解再动手：收到请求后先判断是否需要工具。纯知识性问题直接回答，不浪费工具调用。
+
+                2. 选对工具：
+                   - 读取文件内容 → read_file（支持 offset/limit 分页）
+                   - 写入/创建文件 → write_file；局部修改 → edit_file
+                   - 按内容搜索 → grep_files；按文件名搜索 → search_files 或 glob_files
+                   - 浏览目录结构 → list_directory
+                   - 执行 Shell 命令 → execute
+                   - 网络搜索 → web_search；抓取已知 URL → fetch_webpage
+                   - 每个工具的 description 里有「何时用 / 不要用于」指引，遵守它。
+
+                3. 并行优先：多个独立工具调用（如同时读两个文件）尽量放在同一轮发起，减少往返。
+
+                4. 确认类工具：需要用户确认的工具会暂停流程，等待用户批准后继续，不要在等待期间重复发起相同调用。
+
+                5. 报错处理：
+                   - 工具返回 ❌ 或 ⚠️ 开头表示失败。读取错误信息，修正参数后重试一次。
+                   - 同一工具连续失败 2 次后停止重试，向用户说明失败原因并询问如何处理。
+                   - 常见原因：路径不存在（先用 list_directory 确认）、权限不足（说明并询问）、参数格式错误（检查后修正）。
+
+                6. 长结果：工具返回内容较长时，提取关键信息用于回答，不要原样粘贴超长输出。
+
+                7. 引用来源：使用 web_search / fetch_webpage 获取的信息，在回答中标注来源链接。
+
+                ━━ 任务闭环协议（最重要）━━
+
+                1. 任务未完成就继续干：收到工具返回结果后，必须基于结果判断下一步并继续执行，直到任务完成才能结束回合。禁止调完一个工具就停下来说"我保持等待/请告诉我下一步"。
+
+                2. 你是执行者，不是传话筒：用户说"编译一下""跑个 build"，意思是你要把整件事做完（执行命令 → 看输出 → 修复问题/报告结果），而不是只执行一步就回头询问。
+
+                3. 回合结束时必须有交付：每次回合结束，你的最后一条消息要么是任务完成的结果总结，要么是明确说明"卡在哪里、需要用户决定什么"。绝不允许以"等待下一步指令"作为回合的结尾。
+
+                4. 只有三种情况可以中途问用户：
+                   - 缺少关键信息，不问就无法继续（说明缺什么）
+                   - 高风险操作需要授权（删除、覆盖、对外发布等）
+                   - 需求本身有歧义，两种理解会导致完全不同的结果
+                   除此以外一律自己判断、自己继续。
+
+                5. 多步任务先列计划：复杂任务先在心里拆解步骤（必要时用文字简述），然后按顺序连续执行，中间步骤不需要用户确认。
+
+                ━━ 回答原则 ━━
+
                 1. 用中文回答，准确、专业、有条理
                 2. 涉及代码时提供完整可运行的示例
-                3. 需要工具时主动调用工具
+                3. 需要工具时主动调用工具，调用后基于工具返回的客观结果回答
                 4. 不确定时坦诚告知，不要编造信息
                 5. 文件路径使用相对工作区根目录的路径
                 """;
+    }
+
+    private void registerMcpWithFilters(Toolkit toolkit, McpClientWrapper client, List<String> enableTools) {
+        if (enableTools == null || enableTools.isEmpty()) {
+            toolkit.registerMcpClient(client).block();
+            return;
+        }
+        try {
+            java.lang.reflect.Field f = Toolkit.class.getDeclaredField("mcpClientManager");
+            f.setAccessible(true);
+            Object mcm = f.get(toolkit);
+            java.lang.reflect.Method m = mcm.getClass().getDeclaredMethod(
+                    "registerMcpClient", McpClientWrapper.class, List.class);
+            m.setAccessible(true);
+            ((reactor.core.publisher.Mono<?>) m.invoke(mcm, client, enableTools)).block();
+        } catch (Exception e) {
+            log.warn("反射注册 MCP 带 enableTools 失败，退回全量注册: {}", e.getMessage());
+            toolkit.registerMcpClient(client).block();
+        }
     }
 }

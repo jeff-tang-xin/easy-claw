@@ -31,9 +31,12 @@ public class WebSearchTools {
                 .build();
     }
 
-    @Tool(name = "web_search", description = "通过搜索引擎检索最新信息，返回相关摘要。"
-            + " 适用于需要实时数据（新闻、版本号、价格、API 文档等）的问题。")
-    public String webSearch(@ToolParam(name = "query", description = "搜索关键词") String query) {
+    @Tool(name = "web_search", description = "通过搜索引擎检索最新信息，返回前 5 条结果的摘要。\n"
+            + "【何时用】需要实时数据（新闻、版本号、价格、API 文档、最新规范等）或训练数据可能过时的问题。\n"
+            + "【不要用于】读取已知 URL 的页面内容（用 fetch_webpage）；代码搜索（用 grep_files）；本地文件查找（用 search_files）。\n"
+            + "【参数】query：搜索关键词，用自然语言或关键词短语，越具体命中越准。\n"
+            + "【注意】若返回未配置提示，说明环境变量缺失，应改用 fetch_webpage 或已有知识回答，不要重复调用。")
+    public String webSearch(@ToolParam(name = "query", description = "搜索关键词，例如 \"Spring Boot 3.4 新特性\" 或 \"deepseek-chat API pricing\"") String query) {
         log.info("网络搜索: {}", query);
         try {
             String apiKey = System.getenv().getOrDefault("GOOGLE_API_KEY", "").trim();

@@ -354,6 +354,43 @@ public class ManageController {
         return mcpService.copyFromTemplate(id, scope, workspaceId);
     }
 
+    @GetMapping("/mcp/{id}/tools")
+    public McpToolsResponse getMcpTools(@PathVariable Long id) {
+        McpServiceEntity entity = mcpService.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: " + id));
+        List<String> available = parseToolNames(entity.getAvailableTools());
+        List<String> enabled = mcpService.getEnabledTools(id);
+        return new McpToolsResponse(available, enabled);
+    }
+
+    @PutMapping("/mcp/{id}/tools")
+    public McpServiceEntity updateMcpTools(@PathVariable Long id, @RequestBody UpdateToolsRequest req) {
+        return mcpService.updateEnabledTools(id, req.enabledTools);
+    }
+
+    public record McpToolsResponse(List<String> available, List<String> enabled) {
+    }
+
+    public record UpdateToolsRequest(List<String> enabledTools) {
+    }
+
+    private List<String> parseToolNames(String availableToolsJson) {
+        if (availableToolsJson == null || availableToolsJson.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<Map<String, Object>> tools = new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(availableToolsJson, new com.fasterxml.jackson.core.type.TypeReference<>() {
+                    });
+            return tools.stream()
+                    .map(t -> (String) t.get("name"))
+                    .filter(java.util.Objects::nonNull)
+                    .toList();
+        } catch (Exception e) {
+            return List.of();
+        }
+    }
+
     // ================= 设置（YAML 原文编辑器） =================
 
     public record SettingsYamlResponse(String yaml, String settingsFile, String hotReloadNote) {
