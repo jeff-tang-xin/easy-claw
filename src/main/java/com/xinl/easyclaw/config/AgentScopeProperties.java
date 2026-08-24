@@ -173,6 +173,15 @@ public class AgentScopeProperties {
         /** ReAct 最大迭代次数（默认 50，15 太少会导致长任务中途被强制结束） */
         private int maxIters = 50;
 
+        /**
+         * 子 Agent 默认 ReAct 迭代次数（声明文件未写 steps 时生效）。
+         * <p>
+         * AgentScope 的 SubagentDeclaration.Builder 默认只有 10 步，子 Agent 一旦
+         * 涉及多次文件读取 + 分析就会耗尽迭代，框架抛出 ExceedMaxItersEvent 并
+         * 强行结束，表现为「子 Agent 回复被截断」。这里显式放宽到 30。
+         */
+        private int subagentSteps = 30;
+
         /** 单次模型调用超时（分钟）。复杂推理/长输出可能需要更久 */
         private int modelTimeoutMinutes = 10;
 
@@ -206,6 +215,14 @@ public class AgentScopeProperties {
 
         public void setMaxIters(int maxIters) {
             this.maxIters = maxIters;
+        }
+
+        public int getSubagentSteps() {
+            return subagentSteps;
+        }
+
+        public void setSubagentSteps(int subagentSteps) {
+            this.subagentSteps = subagentSteps;
         }
 
         public int getModelTimeoutMinutes() {

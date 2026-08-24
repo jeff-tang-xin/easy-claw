@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.agent;
 
+import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
@@ -32,9 +33,11 @@ public class SubagentLoader {
     private static final Logger log = LoggerFactory.getLogger(SubagentLoader.class);
 
     private final RoleManagementService roleService;
+    private final AgentScopeProperties properties;
 
-    public SubagentLoader(RoleManagementService roleService) {
+    public SubagentLoader(RoleManagementService roleService, AgentScopeProperties properties) {
         this.roleService = roleService;
+        this.properties = properties;
     }
 
     /**
@@ -98,7 +101,11 @@ public class SubagentLoader {
         String description = "";
         String model = null;
         String roleName = null;
-        int steps = 10;
+        // 未在 frontmatter 显式指定 steps 时用配置值（默认 30），而非框架的 10。
+        // 框架默认 10 步对「读若干文件 + 分析 + 汇总」这类任务明显不够，
+        // 耗尽后会触发 ExceedMaxItersEvent 强行结束 → 回复被截断。
+        int steps = properties.getAgent().getSubagentSteps();
+        boolean stepsExplicit = false;
         List<String> tools = null;
 
         String body = content;
@@ -126,6 +133,7 @@ public class SubagentLoader {
                         case "steps" -> {
                             try {
                                 steps = Integer.parseInt(value);
+                                stepsExplicit = true;
                             } catch (NumberFormatException ignored) {
                                 // 保留默认
                             }
@@ -153,6 +161,15 @@ public class SubagentLoader {
         String prompt = body.trim();
         if (prompt.isEmpty()) {
             prompt = "You are a helpful subagent named " + agentId + ".";
+        }
+
+        int configuredSteps = properties.getAgent().getSubagentSteps();
+        // 显式写了但明显偏低的老声明（内置的 10/12）同样会截断，统一抬到配置下限。
+        // 高于配置值的显式设置予以尊重（作者刻意放宽）。
+        if (stepsExplicit && steps < configuredSteps) {
+            log.info("子 Agent [{}] 声明 steps={} 低于配置下限 {}，已抬升（避免回复被截断）",
+                    agentId, steps, configuredSteps);
+            steps = configuredSteps;
         }
 
         SubagentDeclaration.Builder builder = SubagentDeclaration.builder()

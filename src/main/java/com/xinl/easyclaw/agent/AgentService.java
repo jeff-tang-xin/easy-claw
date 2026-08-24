@@ -241,7 +241,8 @@ public class AgentService {
      * 强制停止指定会话的流输出：
      * <ol>
      *   <li>dispose Flux 订阅（立即取消 HTTP 流接收，不再推事件）</li>
-     *   <li>调用 agent.interrupt()（AgentScope 内部设置中断标志，让 Agent 循环提前退出）</li>
+     *   <li>调用 agent.interrupt(userId, sessionId)（按会话槽精确设置中断标志，
+     *       让 Agent 循环提前退出并释放 AgentBase 的 callGates 串行化闸门）</li>
      *   <li>清理挂起确认（防止残留 ASKING 状态导致下轮对话异常）</li>
      * </ol>
      */
@@ -263,13 +264,30 @@ public class AgentService {
         }
 
         // 3. 中断 AgentScope 执行
+        //
+        // 【必须按 (userId, sessionId) 精确中断】
+        // AgentScope 的中断标志挂在「按 slotKey(userId, sessionId) 划分的 AgentState」上，
+        // 而 HarnessAgent.interrupt() / ReActAgent.interrupt() 无参版本等价于
+        // interrupt(null, defaultSessionId) —— 打到的是默认槽，命中不了本会话的槽，
+        // 于是 Agent 内部循环不会提前退出。
+        // 更致命的是 AgentBase 用 callGates(key=slotKey) 对同一会话的执行做串行化
+        // (serializeOnKey)，gate 只在上一次执行 doFinally 时释放；旧执行没被真正中断
+        // → gate 一直被占 → 下一条消息在 gate 上无声排队，表现为「后端卡住、不发任何事件」。
         WorkspaceContext ws = workspaceManager.getWorkspace(workspaceId);
         if (ws != null && ws.getAgent() != null) {
+            String userId = ws.getUserId() == null ? AppConstants.DEFAULT_USER_ID : ws.getUserId();
             try {
-                ws.getAgent().interrupt();
-                log.info("已调用 agent.interrupt(): workspaceId={}", workspaceId);
+                ws.getAgent().getDelegate().interrupt(userId, sessionId);
+                log.info("已调用 agent.interrupt(userId={}, sessionId={}): workspaceId={}",
+                        userId, sessionId, workspaceId);
             } catch (Exception e) {
-                log.warn("agent.interrupt() 异常: workspaceId={}, err={}", workspaceId, e.getMessage());
+                log.warn("agent.interrupt(userId, sessionId) 异常: workspaceId={}, err={}", workspaceId, e.getMessage());
+                // 兜底：退回无参版本，至少中断默认槽
+                try {
+                    ws.getAgent().interrupt();
+                } catch (Exception ignore) {
+                    log.warn("兜底 agent.interrupt() 也失败: {}", ignore.getMessage());
+                }
             }
         }
 
@@ -1023,6 +1041,17 @@ public class AgentService {
             batcher.onSubagentText(subName, e.getDelta());
         } else if (event instanceof ThinkingBlockDeltaEvent e) {
             batcher.onSubagentText(subName, "🧠 " + e.getDelta());
+        } else if (event.getType() == AgentEventType.EXCEED_MAX_ITERS) {
+            // 子 Agent 迭代耗尽：这是「子 Agent 回复被截断」最常见的原因。
+            // 声明文件的 steps（框架默认仅 10）用尽后框架强行结束，此前无任何提示。
+            batcher.flush();
+            int max = event instanceof ExceedMaxItersEvent e ? e.getMaxIters() : -1;
+            int cur = event instanceof ExceedMaxItersEvent e2 ? e2.getCurrentIter() : -1;
+            log.warn("子 Agent [{}] 达到迭代上限，回复被强制结束: currentIter={}, maxIters={}",
+                    subName, cur, max);
+            onEvent.accept(StreamEvent.subagentText(subName,
+                    "\n⚠️ 已达迭代上限（" + cur + "/" + max + " 步），子 Agent 回复被强制结束。"
+                            + "可在该子 Agent 声明的 frontmatter 里调高 steps。"));
         } else if (event.getType() == AgentEventType.AGENT_END) {
             // 子 Agent 结束：先 flush 剩余 delta，再发 subagent_end 标记
             batcher.flush();
@@ -1150,6 +1179,17 @@ public class AgentService {
                                      Consumer<Throwable> onError, Runnable onFinish,
                                      ToolTrace trace, String sessionId, HarnessAgent agent) {
         switch (event.getType()) {
+            case EXCEED_MAX_ITERS -> {
+                // 迭代耗尽：框架会直接结束本轮，之前是静默的 → 回复看起来「无故截断」。
+                // 这里显式告知用户，避免把框架限制误认为模型能力问题。
+                int max = event instanceof ExceedMaxItersEvent e ? e.getMaxIters() : -1;
+                int cur = event instanceof ExceedMaxItersEvent e2 ? e2.getCurrentIter() : -1;
+                log.warn("达到 ReAct 迭代上限，回复被强制结束: session={}, currentIter={}, maxIters={}",
+                        sessionId, cur, max);
+                onEvent.accept(StreamEvent.error(
+                        "⚠️ 已达到迭代上限（" + cur + "/" + max + " 步），回复被强制结束。"
+                                + "可在配置中调高 easyclaw.agentscope.agent.max-iters 后重试。"));
+            }
             case TOOL_CALL_START -> {
                 if (event instanceof ToolCallStartEvent e) {
                     String name = e.getToolCallName();
