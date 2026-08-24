@@ -546,6 +546,11 @@ export default function ChatPage() {
   }, [sessionId, workspaceId]);
   const lastEventAtRef = useRef(Date.now());
   const hangTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 用户点击「停止」的时刻。后端 interrupt 到 Agent 真正退出之间有延迟，
+  // 管道里的残留事件仍会到达；这段窗口内不允许数据事件把 running 复活，
+  // 否则前端刚复位又被打回 running（按钮在「停止/发送」间闪烁）。
+  const stoppedAtRef = useRef(0);
+  const STOP_GRACE_MS = 3000;
   const pendingEvtsRef = useRef<StreamEvent[]>([]);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -574,7 +579,9 @@ export default function ChatPage() {
     // 刷新/重连后 running=false，但后端 Agent 可能仍在运行 —— 收到数据事件即自动复位
     if (DATA_EVENT_TYPES.has(evt.type)) {
       const cur = getChatSession(key);
-      if (!cur.running) {
+      // 刚点过停止：忽略中断生效前管道里的残留事件，不把 running 复活
+      const justStopped = Date.now() - stoppedAtRef.current < STOP_GRACE_MS;
+      if (!cur.running && !justStopped) {
         patch({ running: true, error: '' });
       }
     }
@@ -682,7 +689,12 @@ export default function ChatPage() {
         const pendingTools = Array.isArray(json.pendingTools) ? json.pendingTools : [];
         const nextPending = !!json.pending && pendingTools.length > 0;
         const updates: Partial<typeof cur> = {};
-        if (cur.running !== nextRunning) updates.running = nextRunning;
+        // 刚点过停止：后端 sessionDisposables 的清理与 Agent 实际退出存在时间差，
+        // 此时回推的 running=true 是过期状态，不能覆盖本地已停止的结果
+        const justStopped = Date.now() - stoppedAtRef.current < STOP_GRACE_MS;
+        if (cur.running !== nextRunning && !(nextRunning && justStopped)) {
+          updates.running = nextRunning;
+        }
         if (nextPending) {
           updates.pending = {
             tools: pendingTools.map((t: any) => ({ name: t.name, input: t.input || '{}' })),
@@ -722,6 +734,18 @@ export default function ChatPage() {
       }
       // 队列自动发送（介入插队到队首的消息也会被 sendNextQueued 取到）
       setTimeout(() => sendNextQueued(), 0);
+    } else if (evt.type === 'stopped') {
+      // 用户主动停止的确认回执：只复位 UI，不 flush 队列（否则与「停止」语义相反）。
+      // 点击时前端已本地复位过一次，这里是后端确认 + 覆盖 WS 抖动丢事件的兜底。
+      flushNow();
+      stoppedAtRef.current = Date.now();
+      patch({ running: false, activeTools: [], activeSubagents: [] });
+      settleRunningSegments();
+      if (hangTimerRef.current) {
+        clearInterval(hangTimerRef.current);
+        hangTimerRef.current = null;
+      }
+      console.log('[ws] stopped 已确认，队列保留不自动发送');
     } else {
       // reasoning/tool_args/tool_result/subagent_text 等：统一批量渲染
       pendingEvtsRef.current.push(evt);
@@ -1505,7 +1529,34 @@ export default function ChatPage() {
               style={{ alignSelf: 'flex-end', marginBottom: 6 }}
               onClick={() => {
                 getChatSocket().send({ type: 'stop', workspaceId, sessionId });
-                console.log('[ws-send] stop');
+                // 记录停止时刻：用于门禁中断生效前管道里的残留事件 / 过期 status 回推
+                stoppedAtRef.current = Date.now();
+                // 本地立即复位，不依赖后端回推 end：
+                // 后端 stopChat 会 dispose Flux，之后不再推任何事件；若那条补发的 end
+                // 丢失（WS 抖动 / sid 不匹配），前端会永久卡 running=true，
+                // 此时 submit() 走「入队」分支 → 消息只进 messageQueue 不发送，
+                // 而队列又只在收到 end 时才 flush → 死锁（表现为「发了没反应」）。
+                updateChatSession(key, (c) => ({
+                  ...c,
+                  running: false,
+                  activeTools: [],
+                  activeSubagents: [],
+                  messages: c.messages.map((m: ChatMessage) => (
+                    m.segments.some((sg: Segment) => sg.running)
+                      ? { ...m, segments: m.segments.map((sg: Segment) => (sg.running ? { ...sg, running: false } : sg)) }
+                      : m
+                  )),
+                }));
+                if (hangTimerRef.current) {
+                  clearInterval(hangTimerRef.current);
+                  hangTimerRef.current = null;
+                }
+                // 队列策略：保留待发消息但「不」自动发送。
+                // 停止是用户的明确中止意图，若此处 flush 队列，会立刻拉起新一轮回复，
+                // 与「停止」语义相反。队列在 UI 上仍可见，由用户手动点发送或删除。
+                const qLen = getChatSession(key).messageQueue.length;
+                setStatusHint(qLen > 0 ? `已停止（${qLen} 条待发已保留，可手动发送）` : '已停止');
+                console.log('[ws-send] stop（前端已本地复位 running）, 保留队列 qLen=', qLen);
               }}
               title="停止当前回复"
             >⏹ 停止</button>

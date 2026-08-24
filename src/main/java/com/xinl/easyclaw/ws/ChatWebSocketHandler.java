@@ -281,8 +281,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             sessionWorkspaceIds.put(sessionId, workspaceId);
         }
         agentService.stopChat(workspaceId, sessionId);
-        // 主动推 end 事件让前端立即复位（dispose 后 Flux 不再推，不能等它自己发）
-        sendJson(sessionId, StreamEvent.end());
+        // 主动推 stopped 事件让前端立即复位（dispose 后 Flux 不再推，不能等它自己发）。
+        // 用 stopped 而非 end：end 会触发前端 messageQueue 自动发送下一条，与「停止」语义相反。
+        sendJson(sessionId, StreamEvent.stopped());
         log.info("WS stop 完成: workspaceId={}, sessionId={}", workspaceId, sessionId);
     }
 

@@ -11,6 +11,7 @@ package com.xinl.easyclaw.agent.domain;
  *   <li>subagent - 子 Agent 开始工作（content 为子 Agent 名称）</li>
  *   <li>context - 上下文状态（content 为 JSON：消息数/token/是否已压缩）</li>
  *   <li>end - 回复完成</li>
+ *   <li>stopped - 用户主动停止（区别于 end：不触发前端队列自动发送）</li>
  *   <li>error - 执行出错（content 为错误信息）</li>
  * </ul>
  */
@@ -81,6 +82,17 @@ public record StreamEvent(
 
     public static StreamEvent end() {
         return new StreamEvent("end", "");
+    }
+
+    /**
+     * 用户主动停止导致的回合终止。
+     * <p>
+     * 与 {@link #end()} 区分：end 表示回合自然完成，前端会据此自动发送 messageQueue 里的
+     * 下一条消息；而「停止」是明确的中止意图，若复用 end 会立刻拉起新一轮回复，与语义相反。
+     * 前端收到 stopped 只复位 UI 状态，不触发队列 flush。
+     */
+    public static StreamEvent stopped() {
+        return new StreamEvent("stopped", "");
     }
 
     public static StreamEvent error(String message) {
