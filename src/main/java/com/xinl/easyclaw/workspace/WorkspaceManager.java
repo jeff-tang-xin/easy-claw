@@ -35,6 +35,7 @@ import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -520,23 +521,64 @@ public class WorkspaceManager {
         log.info("已重建 {} 个 Workspace 的 Agent", workspaceCache.size());
     }
 
+    /**
+     * 删除工作区，并联动清理会话记录、场景激活关系、工具白名单。
+     * <p>
+     * 注意：方法整体在事务内，各步骤不再 try/catch 吞异常——一旦某步失败必须整体回滚，
+     * 否则会出现「部分清理成功 + 提交期抛 UnexpectedRollbackException」的静默删除失败。
+     * 磁盘上的项目文件与 Agent 状态目录不会被删除。
+     */
+    @Transactional
     public void deleteWorkspace(String workspaceId) {
         WorkspaceContext context = workspaceCache.remove(workspaceId);
+        // 工作区可能未加载进缓存（如重启后未访问过），缓存命中只决定是否 close Agent，
+        // DB 清理必须无条件执行，否则会残留工作区记录（表现为「删除不生效」）
         if (context != null) {
             try {
                 context.getAgent().close();
             } catch (Exception e) {
+                // 仅关闭 Agent 的异常可容忍：属于内存资源释放，不影响删除的数据一致性
                 log.warn("关闭 Agent 时出现异常: {}", e.getMessage());
             }
-            workspaceRepository.deleteById(workspaceId);
-            // 联动清理场景激活关系，避免悬挂记录
-            try {
-                workspaceScenarioRepository.deleteByWorkspaceId(workspaceId);
-            } catch (Exception e) {
-                log.warn("清理场景激活关系失败（忽略）: {}", e.getMessage());
-            }
-            log.info("Workspace 已删除: {}", workspaceId);
         }
+
+        // 清理内存中该工作区的会话，避免悬挂 SessionContext 持有已关闭的 Agent
+        sessionCache.entrySet().removeIf(e -> workspaceId.equals(e.getValue().getWorkspaceId()));
+
+        // 先清子表再删主表，避免外键/悬挂数据
+        List<SessionEntity> sessions = sessionRepository.findByWorkspaceId(workspaceId);
+        sessionRepository.deleteAll(sessions);
+        workspaceScenarioRepository.deleteByWorkspaceId(workspaceId);
+        int removedRules = permissionRuleService.removeAll(workspaceId);
+        workspaceRepository.deleteById(workspaceId);
+
+        log.info("Workspace 已删除: {}（清理 {} 条会话、{} 条权限规则）",
+                workspaceId, sessions.size(), removedRules);
+    }
+
+    /**
+     * 更新工作区基本信息（名称/描述）。路径不可改，避免 Agent 沙箱根目录漂移。
+     */
+    @Transactional
+    public WorkspaceSummary updateWorkspace(String workspaceId, String name, String description) {
+        WorkspaceEntity entity = workspaceRepository.findById(workspaceId)
+                .orElseThrow(() -> new IllegalArgumentException("工作区不存在: " + workspaceId));
+        if (name != null && !name.isBlank()) {
+            entity.setName(name.trim());
+        }
+        if (description != null) {
+            entity.setDescription(description);
+        }
+        entity.setUpdatedAt(Instant.now());
+        WorkspaceEntity saved = workspaceRepository.save(entity);
+        // 同步缓存，避免下次读到旧名称
+        WorkspaceContext ctx = workspaceCache.get(workspaceId);
+        if (ctx != null) {
+            ctx.setName(saved.getName());
+            ctx.setDescription(saved.getDescription());
+        }
+        log.info("Workspace 已更新: id={}, name={}", workspaceId, saved.getName());
+        return toSummary(saved);
     }
 
     public List<WorkspaceSummary> getUserWorkspaces(String userId) {

@@ -24,4 +24,9 @@ public interface PermissionRuleRepository extends JpaRepository<PermissionRuleEn
     @Transactional
     @Query("DELETE FROM PermissionRuleEntity p WHERE p.workspaceId = ?1 AND p.toolName = ?2")
     void deleteByWorkspaceIdAndToolName(String workspaceId, String toolName);
+
+    @Modifying
+    @Transactional
+    @Query("DELETE FROM PermissionRuleEntity p WHERE p.workspaceId = ?1")
+    int deleteByWorkspaceId(String workspaceId);
 }

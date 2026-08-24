@@ -36,6 +36,9 @@ public class WorkspaceController {
     public record CreateWorkspaceRequest(String name, String description, String path) {
     }
 
+    public record UpdateWorkspaceRequest(String name, String description) {
+    }
+
     public record CreateSessionRequest(String title) {
     }
 
@@ -68,6 +71,11 @@ public class WorkspaceController {
         return workspaceManager.createWorkspace(
                 com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID,
                 req.name(), req.description(), req.path());
+    }
+
+    @PutMapping("/{id}")
+    public WorkspaceSummary update(@PathVariable String id, @RequestBody UpdateWorkspaceRequest req) {
+        return workspaceManager.updateWorkspace(id, req.name(), req.description());
     }
 
     @DeleteMapping("/{id}")

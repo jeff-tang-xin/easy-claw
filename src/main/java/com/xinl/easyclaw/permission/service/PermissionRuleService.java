@@ -75,6 +75,13 @@ public class PermissionRuleService {
     }
 
     /**
+     * 清空该 Workspace 的全部权限规则（删除工作区时联动）
+     */
+    public int removeAll(String workspaceId) {
+        return repository.deleteByWorkspaceId(workspaceId);
+    }
+
+    /**
      * 该 Workspace 的规则列表（用于 UI 展示授权操作）
      */
     public List<PermissionRuleEntity> findForWorkspace(String workspaceId) {

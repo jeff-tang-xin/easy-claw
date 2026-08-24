@@ -58,6 +58,8 @@ export default function ScenariosPage() {
   const [steps, setSteps] = useState<Step[]>([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [deleting, setDeleting] = useState<Scenario | null>(null);
+  const [removing, setRemoving] = useState(false);
 
   const load = async () => {
     try {
@@ -115,13 +117,17 @@ export default function ScenariosPage() {
     }
   };
 
-  const remove = async (id: number) => {
-    if (!confirm('删除该场景？已激活该场景的工作区将自动回到默认模式。')) return;
+  const confirmRemove = async () => {
+    if (!deleting) return;
+    setRemoving(true);
     try {
-      await del(`/api/scenarios/${id}`);
+      await del(`/api/scenarios/${deleting.id}`);
+      setDeleting(null);
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -222,7 +228,7 @@ export default function ScenariosPage() {
                   {isActive ? '✓ 已激活' : '激活到当前工作区'}
                 </button>
                 <button className="btn small" onClick={() => openEdit(s)}>编辑</button>
-                <button className="btn danger small" onClick={() => remove(s.id)}>删除</button>
+                <button className="btn danger small" onClick={() => setDeleting(s)}>删除</button>
               </div>
             </div>
           );
@@ -328,6 +334,42 @@ export default function ScenariosPage() {
           <div style={{display: 'flex', gap: 8, justifyContent: 'flex-end'}}>
             <button className="btn" onClick={() => setEditing(null)}>取消</button>
             <button className="btn primary" onClick={save}>保存</button>
+          </div>
+        </Modal>
+      )}
+      {deleting && (
+        <Modal
+          title="🗑 删除场景"
+          subtitle={deleting.displayName || deleting.name}
+          onClose={() => setDeleting(null)}
+          width={520}
+        >
+          {(() => {
+            const affected = workspaces.filter((w) => activeMap[w.workspaceId] === deleting.id);
+            return (
+              <div className="hint" style={{lineHeight: 1.8, marginBottom: 12}}>
+                确定删除场景 <strong>{deleting.displayName || deleting.name}</strong>？
+                {affected.length > 0 ? (
+                  <>
+                    <div style={{marginTop: 8}}>
+                      以下 <strong>{affected.length}</strong> 个工作区正在使用该场景，将自动回到默认主智能体模式
+                      （Agent 会立即重建）：
+                    </div>
+                    <ul style={{margin: '8px 0 0', paddingLeft: 20}}>
+                      {affected.map((w) => <li key={w.workspaceId}>{w.name}</li>)}
+                    </ul>
+                  </>
+                ) : (
+                  <div style={{marginTop: 8}}>当前没有工作区激活该场景，删除不会影响任何对话。</div>
+                )}
+              </div>
+            );
+          })()}
+          <div style={{display: 'flex', gap: 8, justifyContent: 'flex-end'}}>
+            <button className="btn" onClick={() => setDeleting(null)}>取消</button>
+            <button className="btn danger" disabled={removing} onClick={confirmRemove}>
+              {removing ? '删除中…' : '确认删除'}
+            </button>
           </div>
         </Modal>
       )}

@@ -47,7 +47,11 @@ public class ToolRegistryService {
     /** 框架工具可读描述（供前端工具目录展示） */
     private static final Map<String, String> FRAMEWORK_DESC = Map.ofEntries(
             Map.entry("read_file", "读取工作区内文件内容，支持 offset/limit 分页。用于查看源码、配置、文档等。"),
-            Map.entry("write_file", "创建或覆盖写入文件。用于生成代码、配置、文档等。"),
+            Map.entry("write_file", "创建或覆盖写入文件。用于生成代码、配置、文档等。\n"
+                    + "【重要·长度限制】单次写入内容过长会被截断或失败。生成大文件（约 300 行 / 15KB 以上）时"
+                    + "必须分段：先用 write_file 写入第一段（骨架或前若干部分），再用 edit_file 逐段追加剩余内容，"
+                    + "禁止一次性提交超长内容。\n"
+                    + "【不要用于】局部修改已有文件（用 edit_file，避免整文件重写丢失内容）。"),
             Map.entry("edit_file", "局部编辑文件（按旧文本→新文本替换）。用于精确修改而非整文件重写。"),
             Map.entry("grep_files", "按正则/关键词搜索文件内容，返回匹配行与行号。用于定位代码、查找引用。"),
             Map.entry("glob_files", "按文件名通配符匹配文件路径。用于按扩展名或命名模式批量查找。"),

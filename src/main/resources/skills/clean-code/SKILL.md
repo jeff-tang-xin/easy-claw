@@ -1,3 +1,8 @@
+---
+name: clean-code
+description: 代码审查与质量标准——正确性、可读性、架构、安全、性能五维审查
+---
+
 # Code Review & Quality Skill
 
 > Inspired by Addy Osmani's `agent-skills` (`addyosmani/agent-skills/skills/code-review-and-quality/SKILL.md`).

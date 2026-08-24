@@ -1,6 +1,6 @@
 import {useEffect, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {del, getJson, postJson} from '../api';
+import {del, getJson, postJson, putJson} from '../api';
 import Modal from '../components/Modal';
 
 interface WorkspaceSummary {
@@ -30,6 +30,16 @@ export default function WorkspacesPage() {
   const [permRules, setPermRules] = useState<PermRule[]>([]);
   const [permTools, setPermTools] = useState<ToolDef[]>([]);
 
+  // 编辑弹窗状态（仅名称/描述可改，路径不可变以免沙箱根目录漂移）
+  const [editing, setEditing] = useState<WorkspaceSummary | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editDesc, setEditDesc] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  // 删除确认弹窗状态
+  const [deleting, setDeleting] = useState<WorkspaceSummary | null>(null);
+  const [removing, setRemoving] = useState(false);
+
   const load = async () => {
     try {
       setItems(await getJson<WorkspaceSummary[]>('/api/workspaces'));
@@ -58,13 +68,40 @@ export default function WorkspacesPage() {
     }
   };
 
-  const remove = async (id: string) => {
-    if (!confirm('确定删除该工作区？会删除其 Agent 状态与会话记录。')) return;
+  const openEdit = (ws: WorkspaceSummary) => {
+    setEditing(ws);
+    setEditName(ws.name);
+    setEditDesc(ws.description || '');
+  };
+
+  const saveEdit = async () => {
+    if (!editing || !editName.trim()) return;
+    setSaving(true);
     try {
-      await del(`/api/workspaces/${id}`);
+      await putJson(`/api/workspaces/${editing.workspaceId}`, {
+        name: editName.trim(),
+        description: editDesc,
+      });
+      setEditing(null);
       await load();
     } catch (e) {
       setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const confirmRemove = async () => {
+    if (!deleting) return;
+    setRemoving(true);
+    try {
+      await del(`/api/workspaces/${deleting.workspaceId}`);
+      setDeleting(null);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -192,6 +229,61 @@ export default function WorkspacesPage() {
         </Modal>
       )}
 
+      {editing && (
+        <Modal
+          title="✏️ 编辑工作区"
+          subtitle="项目目录不可修改（避免 Agent 沙箱根目录漂移）"
+          onClose={() => setEditing(null)}
+          width={560}
+        >
+          <div className="field">
+            <label>名称</label>
+            <input value={editName} onChange={(e) => setEditName(e.target.value)} />
+          </div>
+          <div className="field">
+            <label>项目目录（只读）</label>
+            <input value={editing.path} disabled readOnly />
+          </div>
+          <div className="field">
+            <label>描述（可选）</label>
+            <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={2} />
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => setEditing(null)}>取消</button>
+            <button className="btn primary" disabled={saving || !editName.trim()} onClick={saveEdit}>
+              {saving ? '保存中…' : '保存'}
+            </button>
+          </div>
+        </Modal>
+      )}
+
+      {deleting && (
+        <Modal
+          title="🗑 删除工作区"
+          subtitle={deleting.name}
+          onClose={() => setDeleting(null)}
+          width={520}
+        >
+          <div className="hint" style={{ lineHeight: 1.8, marginBottom: 12 }}>
+            确定删除工作区 <strong>{deleting.name}</strong>？将同时清理：
+            <ul style={{ margin: '8px 0 0', paddingLeft: 20 }}>
+              <li>工作区记录与内存中的 Agent</li>
+              <li>全部会话记录</li>
+              <li>场景激活关系与工具白名单</li>
+            </ul>
+            <div style={{ marginTop: 10 }}>
+              磁盘目录 <code>{deleting.path}</code> 不会被删除，你的项目文件是安全的。
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+            <button className="btn" onClick={() => setDeleting(null)}>取消</button>
+            <button className="btn danger" disabled={removing} onClick={confirmRemove}>
+              {removing ? '删除中…' : '确认删除'}
+            </button>
+          </div>
+        </Modal>
+      )}
+
       {loading ? (
         <div className="empty">加载中...</div>
       ) : items.length === 0 ? (
@@ -213,6 +305,13 @@ export default function WorkspacesPage() {
                 </div>
                 <button
                   className="btn small"
+                  title="编辑工作区"
+                  onClick={(e) => { e.stopPropagation(); openEdit(ws); }}
+                >
+                  ✏️
+                </button>
+                <button
+                  className="btn small"
                   title="工具白名单"
                   onClick={(e) => { e.stopPropagation(); openPerm(ws.workspaceId); }}
                 >
@@ -221,7 +320,7 @@ export default function WorkspacesPage() {
                 <button
                   className="btn danger small"
                   title="删除工作区"
-                  onClick={(e) => { e.stopPropagation(); remove(ws.workspaceId); }}
+                  onClick={(e) => { e.stopPropagation(); setDeleting(ws); }}
                 >
                   🗑
                 </button>
