@@ -199,6 +199,12 @@ public class WorkspaceAgentBuilder {
         fsSpec.project(workspacePath);
         fsSpec.projectWritable(true);
         fsSpec.isolationScope(IsolationScope.GLOBAL);
+        // 注意（AgentScope 2.0.2 已核实）：executeTimeoutSeconds 最终落到
+        // LocalFilesystemWithShell.defaultTimeout，但该默认值实际上是「死配置」——
+        // ShellExecuteTool 计算 timeout = (入参 != null ? 入参 : 30) 后，
+        // 总是传一个非 null 的 Integer 给 sandbox.execute(...)，defaultTimeout 永远走不到。
+        // 因此单条命令的真实上限由调用方传入的 timeout 参数决定（缺省 30s）。
+        // 这里仍然配置它，等上游修复后即可自动生效。
         fsSpec.executeTimeoutSeconds(agentCfg.getShellTimeoutSeconds());
         fsSpec.maxOutputBytes(agentCfg.getMaxShellOutputBytes());
         String refreshedPath = refreshedPaths.get(workspaceId);

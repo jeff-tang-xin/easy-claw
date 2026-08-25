@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.agent.SessionTranscriptStore;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
@@ -97,6 +98,9 @@ public class SessionHistoryService {
                     });
                 }
             }
+            // 必须同步清理转录计数缓存：否则同名 sessionId 复用时会继承已删除会话的
+            // seq 计数，新转录的序号从一个虚高值开始（历史渲染顺序错乱）
+            SessionTranscriptStore.evict(stateDir);
             log.info("已删除会话: {}（工作区 {}）", sessionId, workspace.getWorkspaceId());
         } catch (IOException e) {
             log.warn("删除会话状态文件失败: {}", e.getMessage());

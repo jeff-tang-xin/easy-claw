@@ -47,7 +47,9 @@ agentscope:
   agent:
     max-iters: 50
     model-timeout-minutes: 10
-    tool-timeout-minutes: 2
+    # 必须 > shell-timeout-seconds（当前 300s=5min），否则外层工具超时会先于
+    # shell 自身超时触发，shell-timeout-seconds 永远不生效
+    tool-timeout-minutes: 10
     # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放 SSE 与会话状态
     confirm-timeout-minutes: ${AGENTSCOPE_CONFIRM_TIMEOUT_MINUTES:10}
     # SSE 连接超时（分钟），需大于「单回合最长耗时 + confirm-timeout-minutes」

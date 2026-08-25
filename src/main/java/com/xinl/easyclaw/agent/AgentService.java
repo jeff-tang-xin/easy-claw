@@ -499,20 +499,17 @@ public class AgentService {
 
         // 清理上一轮遗留的挂起确认（刷新/离开页面导致的 ASKING 状态），
         // 避免新消息直接抛 "Agent is paused for human-in-the-loop confirmation"
-        HarnessAgent agent = workspace.getAgent();
-        RuntimeContext context = buildContext(workspace, sessionId);
-        boolean cleared = clearStaleConfirmation(workspace, sessionId, agent);
-        boolean polluted = cleanupPollutedContext(workspace, sessionId);
-        if (cleared || polluted) {
+        // 【单次读写】三项状态预处理（清挂起确认 / 净化污染 / 预设 plan 路径）合并为
+        // 一次 agent_state.json 读 + 最多一次写。此前是各自独立读写，长会话状态文件
+        // 可达数百 KB，每轮 3 次全量读 + 反序列化直接体现为「发消息后先卡一下」。
+        boolean needRebuild = prepareSessionState(workspace, sessionId);
+        if (needRebuild) {
             // 清理过挂起确认：重建 Agent 使其从清理后的状态文件加载（不阻塞、毫秒级）
             workspaceManager.rebuildAgent(workspaceId);
             workspace = workspaceManager.getWorkspace(workspaceId);
         }
-        agent = workspace.getAgent();
-        context = buildContext(workspace, sessionId);
-
-        // Plan Mode 按会话隔离：预设 plan 文件路径 plans/{sessionId}/PLAN.md
-        preconfigurePlanFile(workspace, sessionId);
+        HarnessAgent agent = workspace.getAgent();
+        RuntimeContext context = buildContext(workspace, sessionId);
 
         // 注入 Skill 提示（harness 自动发现所有 skill 并在 system prompt 里列出）
         // 用户选了 skill → 在用户消息前加一行引导，让 LLM 优先加载该 skill
@@ -648,73 +645,100 @@ public class AgentService {
     }
 
     /**
-     * 清理上一轮遗留的挂起确认（ASKING 状态的工具调用）。
-     * <p>用户在确认弹窗出现时刷新/离开页面后，该暂停状态会被持久化到
-     * agent_state.json；此时直接发新消息会抛
-     * {@code IllegalStateException: Agent is paused for human-in-the-loop confirmation}。
-     * 这里采用<b>文件级清理</b>（毫秒级、不阻塞请求线程）：把含 ASKING 工具调用的消息
-     * 从 agent_state.json 的上下文中移除并回写，由调用方重建 Agent 从清理后的状态加载。</p>
+     * 会话状态预处理：一次读取 agent_state.json，串行应用三项清理/预设，最多回写一次。
+     * <p>
+     * 此前三项各自独立读文件 + 反序列化 + 回写（{@code clearStaleConfirmation} /
+     * {@code cleanupPollutedContext} / {@code preconfigurePlanFile}），长会话下
+     * agent_state.json 可达数百 KB，每轮 3 次全量解析同步阻塞在发送线程上，
+     * 表现为「每次输入都要挂起一会儿才响应」。合并后 I/O 与解析各降至 1 次。
      *
-     * @return true 表示清理过挂起确认（调用方应 rebuildAgent）
+     * @return true 表示上下文被修改过（调用方应 rebuildAgent 以加载清理后的状态）
      */
-    private boolean clearStaleConfirmation(WorkspaceContext workspace, String sessionId, HarnessAgent agent) {
-        try {
-            Path stateFile = workspace.getPath().resolve(".easyClaw/agent/state")
-                    .resolve(workspace.getUserId() == null ? AppConstants.DEFAULT_USER_ID : workspace.getUserId())
-                    .resolve(sessionId).resolve("agent_state.json");
-            if (!Files.exists(stateFile)) {
-                return false;
-            }
-            AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
-            if (state.getContext() == null) {
-                return false;
-            }
-            boolean hasAsking = state.getContext().stream()
-                    .flatMap(m -> m.getContentBlocks(ToolUseBlock.class).stream())
-                    .anyMatch(t -> t.getState() == ToolCallState.ASKING);
-            if (!hasAsking) {
-                return false;
-            }
-            // 移除含挂起工具调用的消息（保留其余历史上下文），回写状态文件
-            List<Msg> mutable = state.contextMutable();
-            int before = mutable.size();
-            mutable.removeIf(m -> m.getContentBlocks(ToolUseBlock.class).stream()
-                    .anyMatch(t -> t.getState() == ToolCallState.ASKING));
-            Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
-            log.info("已清除挂起工具确认（移除 ASKING 消息 {}/{}）: session={}",
-                    before - mutable.size(), before, sessionId);
-            return true;
-        } catch (Exception e) {
-            log.warn("清理挂起确认失败（忽略）: {}", e.getMessage());
+    private boolean prepareSessionState(WorkspaceContext workspace, String sessionId) {
+        Path stateFile = sessionStateDir(workspace, sessionId).resolve("agent_state.json");
+        if (!Files.exists(stateFile)) {
             return false;
         }
+        try {
+            AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
+            // 注意：两项清理必须都执行，不能用 || 短路——残留的 ASKING 消息与被污染的
+            // 上下文是两个独立问题，可能同时存在
+            boolean askingRemoved = removeAskingMessages(state, sessionId);
+            boolean polluteRemoved = purgePollutedContext(state, sessionId);
+            // 上下文类改动需要重建 Agent；plan 路径只是预设字段，回写即可，无需重建
+            boolean contextChanged = askingRemoved || polluteRemoved;
+            boolean planChanged = applyPlanFile(state, sessionId);
+            if (contextChanged || planChanged) {
+                Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
+            }
+            return contextChanged;
+        } catch (Exception e) {
+            log.warn("会话状态预处理失败（忽略）: session={}, {}", sessionId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 移除含 ASKING 工具调用的消息（保留其余历史）。
+     * <p>用户在确认弹窗出现时刷新/离开页面后，暂停状态会被持久化到 agent_state.json，
+     * 此时直接发新消息会抛
+     * {@code IllegalStateException: Agent is paused for human-in-the-loop confirmation}。</p>
+     *
+     * @return true 表示确实移除过消息
+     */
+    private boolean removeAskingMessages(AgentState state, String sessionId) {
+        if (state.getContext() == null) {
+            return false;
+        }
+        List<Msg> mutable = state.contextMutable();
+        int before = mutable.size();
+        mutable.removeIf(m -> m.getContentBlocks(ToolUseBlock.class).stream()
+                .anyMatch(t -> t.getState() == ToolCallState.ASKING));
+        int removed = before - mutable.size();
+        if (removed == 0) {
+            return false;
+        }
+        log.info("已清除挂起工具确认（移除 ASKING 消息 {}/{}）: session={}", removed, before, sessionId);
+        return true;
     }
 
     /**
      * 清理上下文污染：
      * 1. 孤儿 ToolResultBlock（有 tool_call_id 但前面没有 assistant ToolUseBlock 声明过）
      * 2. 空 user 消息（content="" 且没有图片/附件，是 autoConfirmResume 注入的空消息）
-     * 这两种污染会导致 OpenAI-compatible API（方舟）报 InvalidParameter，
+     * 3. 悬空 ToolUseBlock（assistant 声明了 tool_call 但全程没有对应 ToolResultBlock）
+     * 这三种污染都会导致 OpenAI-compatible API（方舟）报 InvalidParameter，
      * 因为方舟严格校验 tool_call 链的配对关系。
+     * <p>
+     * 第 3 种是「用户在工具执行中点停止」的典型残留：中断发生在 TOOL_RESULT 落盘之前，
+     * 消息里留下一个永远等不到结果的 tool_call。它的 state 是 RUNNING 而非 ASKING，
+     * 因此 {@link #removeAskingMessages} 抓不到。此时下一条消息会在模型侧直接被拒，
+     * 且失败发生在流建立之前 → 前端收不到任何事件，表现为「点停止后再发消息就一直挂起」。
+     * <p>
+     * 对悬空 tool_call 采取「补一条 interrupted 结果」而非删除声明：保留了现场语义
+     * （模型能看到该工具被用户中断），也维持了 tool_call 链的配对完整性。
      */
-    private boolean cleanupPollutedContext(WorkspaceContext workspace, String sessionId) {
+    private boolean purgePollutedContext(AgentState state, String sessionId) {
+        if (state.getContext() == null) {
+            return false;
+        }
         try {
-            Path stateFile = workspace.getPath().resolve(".easyClaw/agent/state")
-                    .resolve(workspace.getUserId() == null ? AppConstants.DEFAULT_USER_ID : workspace.getUserId())
-                    .resolve(sessionId).resolve("agent_state.json");
-            if (!Files.exists(stateFile)) {
-                return false;
-            }
-            AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
-            if (state.getContext() == null) {
-                return false;
-            }
             List<Msg> original = state.getContext();
+            // 两个集合都基于 original 全量扫描（后续补配对遍历的是 cleaned）。
+            // 这样混用是安全的：孤儿清理只会删除「id 不在 declaredToolIds 中」的结果块，
+            // 而补配对只遍历 ToolUseBlock（其 id 必然在 declaredToolIds 中），
+            // 两者作用的 id 集合天然不相交，不会出现「结果被删掉却仍被视为已配对」。
             Set<String> declaredToolIds = new HashSet<>();
+            Set<String> resolvedToolIds = new HashSet<>();
             for (Msg m : original) {
                 for (ToolUseBlock tub : m.getContentBlocks(ToolUseBlock.class)) {
                     if (tub.getId() != null) {
                         declaredToolIds.add(tub.getId());
+                    }
+                }
+                for (ToolResultBlock trb : m.getContentBlocks(ToolResultBlock.class)) {
+                    if (trb.getId() != null) {
+                        resolvedToolIds.add(trb.getId());
                     }
                 }
             }
@@ -761,14 +785,40 @@ public class AgentService {
                     cleaned.add(m);
                 }
             }
-            if (orphanToolResults == 0 && emptyUserMsgs == 0) {
+            // 悬空 tool_call 补配对：为「声明了但没有结果」的 ToolUseBlock 追加一条
+            // interrupted 结果消息，紧跟在声明它的消息之后，保证 tool_call 链配对完整。
+            int danglingToolCalls = 0;
+            if (!declaredToolIds.isEmpty() && !resolvedToolIds.containsAll(declaredToolIds)) {
+                List<Msg> paired = new ArrayList<>(cleaned.size());
+                for (Msg m : cleaned) {
+                    paired.add(m);
+                    for (ToolUseBlock tub : m.getContentBlocks(ToolUseBlock.class)) {
+                        if (tub.getId() != null && !resolvedToolIds.contains(tub.getId())) {
+                            // 每个悬空 tool_call 必须单独一条 TOOL 消息：
+                            // OpenAIMessageConverter.convertToolMessage 用
+                            // getFirstContentBlock(ToolResultBlock.class) 取值，一条消息里
+                            // 塞多个结果块只有第一个会被发出，其余会被静默丢弃 → 仍然悬空
+                            paired.add(Msg.builder()
+                                    .role(MsgRole.TOOL)
+                                    .content(ToolResultBlock.of(tub.getId(), tub.getName(),
+                                            TextBlock.builder()
+                                                    .text("⚠️ 该工具调用已被用户中断，未执行完成。")
+                                                    .build()))
+                                    .build());
+                            resolvedToolIds.add(tub.getId());
+                            danglingToolCalls++;
+                        }
+                    }
+                }
+                cleaned = paired;
+            }
+            if (orphanToolResults == 0 && emptyUserMsgs == 0 && danglingToolCalls == 0) {
                 return false;
             }
             state.contextMutable().clear();
             state.contextMutable().addAll(cleaned);
-            Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
-            log.info("上下文净化: 移除孤儿 ToolResultBlock={}, 空 user 消息={}, 剩余消息 {}/{}: session={}",
-                    orphanToolResults, emptyUserMsgs, cleaned.size(), original.size(), sessionId);
+            log.info("上下文净化: 移除孤儿 ToolResultBlock={}, 空 user 消息={}, 补配对悬空 tool_call={}, 剩余消息 {}/{}: session={}",
+                    orphanToolResults, emptyUserMsgs, danglingToolCalls, cleaned.size(), original.size(), sessionId);
             return true;
         } catch (Exception e) {
             log.warn("上下文净化失败（忽略）: {}", e.getMessage());
@@ -777,37 +827,24 @@ public class AgentService {
     }
 
     /**
-     * Plan Mode 按会话隔离：预设 agent_state.json 中 PlanModeContextState.currentPlanFile
-     * 为 {@code plans/{sessionId}/PLAN.md}。
+     * Plan Mode 按会话隔离：预设 PlanModeContextState.currentPlanFile
+     * 为 {@code plans/{sessionId}/PLAN.md}（仅改内存状态，由调用方统一回写）。
      * <p>AgentScope 框架的 PlanModeManager.enter() 只会在 currentPlanFile 为空时，
      * 才回退到默认的 {@code planDir + "/PLAN.md"}（由 Builder.planFileDirectory 配置）。
      * 提前按 session 注入路径，即可让不同会话的方案文件各自独立，互不覆盖。</p>
+     *
+     * @return true 表示写入了新的 plan 路径（需要回写状态文件）
      */
-    private void preconfigurePlanFile(WorkspaceContext workspace, String sessionId) {
-        try {
-            String userId = workspace.getUserId() == null
-                    ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
-            Path stateFile = workspace.getPath().resolve(".easyClaw/agent/state")
-                    .resolve(userId).resolve(sessionId).resolve("agent_state.json");
-            if (!Files.exists(stateFile)) {
-                return;
-            }
-            AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
-            PlanModeContextState ctx = state.getPlanModeContext();
-            if (ctx != null && ctx.getCurrentPlanFile() != null && !ctx.getCurrentPlanFile().isBlank()) {
-                return;
-            }
-            String planFile = "plans/" + sessionId + "/PLAN.md";
-            if (ctx == null) {
-                ctx = new PlanModeContextState(false, planFile);
-            } else {
-                ctx.setCurrentPlanFile(planFile);
-            }
-            Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
-            log.debug("预设 Plan 文件路径: session={}, planFile={}", sessionId, planFile);
-        } catch (Exception e) {
-            log.warn("预设 Plan 文件路径失败（忽略）: {}", e.getMessage());
+    private boolean applyPlanFile(AgentState state, String sessionId) {
+        PlanModeContextState ctx = state.getPlanModeContext();
+        // 已有路径：保持不变（避免每轮无谓回写整个状态文件）
+        if (ctx == null || (ctx.getCurrentPlanFile() != null && !ctx.getCurrentPlanFile().isBlank())) {
+            return false;
         }
+        String planFile = "plans/" + sessionId + "/PLAN.md";
+        ctx.setCurrentPlanFile(planFile);
+        log.debug("预设 Plan 文件路径: session={}, planFile={}", sessionId, planFile);
+        return true;
     }
 
     /**
@@ -824,8 +861,6 @@ public class AgentService {
         }
         HarnessAgent agent = workspace.getAgent();
         RuntimeContext context = buildContext(workspace, sessionId);
-
-        preconfigurePlanFile(workspace, sessionId);
 
         // 会话 → Workspace 映射（权限按 workspace 隔离）
         sessions.bindWorkspace(sessionId, workspaceId);
