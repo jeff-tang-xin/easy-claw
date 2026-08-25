@@ -12,13 +12,14 @@ import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 聊天 WebSocket 处理器（全局单连接，sessionId 区分会话）。
+ * 聊天 WebSocket 处理器（sessionId 区分会话，事件按会话定向投递）。
  * <p><b>消息分层（前端 → 后端，JSON）：</b></p>
  * <ul>
  *   <li><b>心跳类</b>：{@code {"type":"ping"}} → 后端回 {@code {"type":"pong"}}（保活/探活，不进 LLM）</li>
@@ -41,15 +42,59 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final WorkspaceManager workspaceManager;
     private final ObjectMapper mapper = new ObjectMapper();
 
-    private final Set<WebSocketSession> activeSessions = ConcurrentHashMap.newKeySet();
+    /** WS 发送超时（ms）：超过即关闭慢客户端，避免慢消费者拖住事件推送线程 */
+    private static final int SEND_TIME_LIMIT_MS = 5_000;
+    /** 单连接发送缓冲上限（字节）：超限自动关闭连接，防止无界堆积 */
+    private static final int SEND_BUFFER_LIMIT_BYTES = 512 * 1024;
+
+    /** connectionId → 线程安全包装后的连接（WebSocketSession 本身非线程安全） */
+    private final Map<String, WebSocketSession> connections = new ConcurrentHashMap<>();
+    /**
+     * sessionId → 订阅该会话的 connectionId 集合。
+     * <p>事件只投递给订阅了该 sessionId 的连接，而非全体广播——否则 A 用户的对话正文、
+     * 工具参数会原样送到 B 用户浏览器（前端过滤是客户端行为，不构成隔离边界）。
+     * 用 Set 而非单值：同一会话允许多标签页同时观看。
+     */
+    private final Map<String, Set<String>> sessionOwners = new ConcurrentHashMap<>();
     private final Map<String, String> sessionWorkspaceIds = new ConcurrentHashMap<>();
     private final Map<String, PendingBuffer> pendingEvents = new ConcurrentHashMap<>();
     /** 已警告过 workspaceId 为空的 sessionId（避免每条事件刷一个 warn） */
+    /** 「workspaceId 为空」告警去重集合的容量上限：仅用于降噪，达到上限后停止记录，防止长跑无界增长 */
+    private static final int MAX_WARNED_SESSIONS = 1_000;
     private final Set<String> warnedEmptyWorkspace = ConcurrentHashMap.newKeySet();
 
-    public ChatWebSocketHandler(AgentService agentService, WorkspaceManager workspaceManager) {
+    /**
+     * WS 入口与 REST 走同一套归属校验（Finding 6）：WS 帧里的 workspaceId / sessionId
+     * 同样是纯客户端输入，若只在 REST 侧校验，攻击者改用 WS 即可绕过。
+     */
+    private final com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard;
+    private final com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator;
+
+    public ChatWebSocketHandler(AgentService agentService, WorkspaceManager workspaceManager,
+                                com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard,
+                                com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
+        this.accessGuard = accessGuard;
+        this.toolConfirmValidator = toolConfirmValidator;
+    }
+
+    /**
+     * 校验 WS 帧中的归属关系，失败时把原因作为 error+end 事件回推给该会话。
+     *
+     * @return true 表示校验通过，可继续处理
+     */
+    private boolean guardOk(String workspaceId, String sessionId) {
+        try {
+            accessGuard.checkSession(workspaceId, sessionId, false);
+            return true;
+        } catch (RuntimeException e) {
+            log.warn("WS 归属校验失败: workspaceId={}, sessionId={}, reason={}",
+                    workspaceId, sessionId, e.getMessage());
+            sendJson(sessionId, StreamEvent.error("请求被拒绝: " + e.getMessage()));
+            sendJson(sessionId, StreamEvent.end());
+            return false;
+        }
     }
 
     private static final class PendingBuffer {
@@ -60,9 +105,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
-        // 全局单连接：连接建立即加入活跃集合，事件一律广播（前端按 sessionId 路由）
-        activeSessions.add(session);
-        log.info("WS 连接建立: id={}, 活跃连接数={}", session.getId(), activeSessions.size());
+        // 用 ConcurrentWebSocketSessionDecorator 包装：多个会话流可能并发向同一连接写入，
+        // 裸 WebSocketSession 并发 sendMessage 会抛 TEXT_PARTIAL_WRITING 并撕裂消息帧。
+        connections.put(session.getId(),
+                new ConcurrentWebSocketSessionDecorator(session, SEND_TIME_LIMIT_MS, SEND_BUFFER_LIMIT_BYTES));
+        log.info("WS 连接建立: id={}, 活跃连接数={}", session.getId(), connections.size());
     }
 
     @Override
@@ -88,11 +135,20 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                         // 忽略
                     }
                 }
-                case "chat" -> handleChat(root, sessionId);
-                case "confirm" -> handleConfirm(root, sessionId);
+                case "chat" -> {
+                    bindSession(sessionId, session.getId());
+                    handleChat(root, sessionId);
+                }
+                case "confirm" -> {
+                    bindSession(sessionId, session.getId());
+                    handleConfirm(root, sessionId);
+                }
                 case "stop" -> handleStop(root);
-                case "pending" -> handlePending(root, sessionId);
-                case "register" -> handleRegister(root, sessionId);
+                case "pending" -> {
+                    bindSession(sessionId, session.getId());
+                    handlePending(root, sessionId);
+                }
+                case "register" -> handleRegister(root, sessionId, session.getId());
                 default -> log.warn("未知 WS 消息类型: {}", type);
             }
         } catch (Exception e) {
@@ -100,7 +156,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    private void handleRegister(JsonNode root, String sessionId) {
+    /** 登记「该连接订阅了该会话」，后续事件据此定向投递 */
+    private void bindSession(String sessionId, String connectionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        sessionOwners.computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet()).add(connectionId);
+    }
+
+    private void handleRegister(JsonNode root, String sessionId, String connectionId) {
+        bindSession(sessionId, connectionId);
         String workspaceId = root.path("workspaceId").asText("");
         if (!workspaceId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
@@ -130,7 +195,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         buf.events.clear();
         log.info("WS flush 缓冲事件: sessionId={}, count={}", sessionId, events.size());
         for (String json : events) {
-            broadcastJson(json);
+            sendToSession(sessionId, json);
         }
     }
 
@@ -145,27 +210,49 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
     }
 
-    private boolean hasOpenSession() {
-        for (WebSocketSession s : activeSessions) {
-            if (s.isOpen()) return true;
+    /** 该会话是否还有活跃订阅连接（无则事件进缓冲，等重连后 flush） */
+    private boolean hasOpenSession(String sessionId) {
+        Set<String> owners = sessionOwners.get(sessionId);
+        if (owners == null || owners.isEmpty()) {
+            return false;
+        }
+        for (String cid : owners) {
+            WebSocketSession s = connections.get(cid);
+            if (s != null && s.isOpen()) {
+                return true;
+            }
         }
         return false;
     }
 
-    private void broadcastJson(String json) {
+    /**
+     * 定向投递：只发给订阅了该 sessionId 的连接。
+     * <p>发送失败（客户端断开 / 缓冲超限被关闭）的连接立即解绑，避免死引用堆积。
+     */
+    private void sendToSession(String sessionId, String json) {
+        Set<String> owners = sessionOwners.get(sessionId);
+        if (owners == null || owners.isEmpty()) {
+            log.debug("WS 无订阅连接，事件丢弃: sessionId={}", sessionId);
+            return;
+        }
         boolean sent = false;
-        for (WebSocketSession s : activeSessions) {
-            if (s.isOpen()) {
-                try {
-                    s.sendMessage(new TextMessage(json));
-                    sent = true;
-                } catch (Exception e) {
-                    log.warn("WS 发送失败: err={}", e.getMessage());
-                }
+        for (String cid : owners) {
+            WebSocketSession s = connections.get(cid);
+            if (s == null || !s.isOpen()) {
+                owners.remove(cid);
+                continue;
+            }
+            try {
+                s.sendMessage(new TextMessage(json));
+                sent = true;
+            } catch (Exception e) {
+                log.warn("WS 发送失败，解绑连接: sessionId={}, cid={}, err={}", sessionId, cid, e.getMessage());
+                owners.remove(cid);
+                connections.remove(cid);
             }
         }
         if (!sent) {
-            log.debug("WS broadcast 无活跃连接");
+            log.debug("WS 定向投递无可用连接: sessionId={}", sessionId);
         }
     }
 
@@ -200,6 +287,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         }
         log.info("WS chat 收到: workspaceId={}, sessionId={}, skill={}, msgLen={}, atts={}",
                 workspaceId, sessionId, skillName, msg.length(), atts.size());
+        if (!guardOk(workspaceId, sessionId)) {
+            return;
+        }
         final int[] counter = {0};
         try {
             agentService.streamChat(workspaceId, sessionId, msg, atts,
@@ -242,6 +332,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (toolNames.isEmpty()) {
             return;
         }
+        if (!guardOk(workspaceId, sessionId)) {
+            return;
+        }
+        // 与 REST /confirm 同一道白名单：未知工具名不得写入永久授权规则
+        List<String> unknown = toolConfirmValidator.rejectUnknown(sessionId, toolNames);
+        if (!unknown.isEmpty()) {
+            log.warn("WS confirm 含未知工具: sessionId={}, unknown={}", sessionId, unknown);
+            sendJson(sessionId, StreamEvent.error("未知工具: " + unknown));
+            sendJson(sessionId, StreamEvent.end());
+            return;
+        }
         if ("turn".equals(action)) {
             agentService.allowTurn(sessionId, toolNames);
         } else if ("always".equals(action)) {
@@ -280,6 +381,9 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (!workspaceId.isBlank() && !sessionId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
         }
+        if (!guardOk(workspaceId, sessionId)) {
+            return;
+        }
         agentService.stopChat(workspaceId, sessionId);
         // 主动推 stopped 事件让前端立即复位（dispose 后 Flux 不再推，不能等它自己发）。
         // 用 stopped 而非 end：end 会触发前端 messageQueue 自动发送下一条，与「停止」语义相反。
@@ -300,20 +404,38 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             log.warn("WS JSON 序列化失败: sessionId={}, err={}", sessionId, e.getMessage());
             return;
         }
-        if (workspaceId.isEmpty() && warnedEmptyWorkspace.add(sessionId)) {
+        if (workspaceId.isEmpty() && warnedEmptyWorkspace.size() < MAX_WARNED_SESSIONS
+                && warnedEmptyWorkspace.add(sessionId)) {
             log.warn("WS sendJson workspaceId 为空（仅首次）: sessionId={}, type={}", sessionId, evt == null ? "?" : evt.type());
         }
-        if (!hasOpenSession()) {
+        if (!hasOpenSession(sessionId)) {
             bufferEvent(sessionId, json);
             return;
         }
-        broadcastJson(json);
+        sendToSession(sessionId, json);
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
-        activeSessions.remove(session);
+        String cid = session.getId();
+        connections.remove(cid);
+        // 解除该连接的所有会话订阅；会话若已无任何订阅者则移除空条目并登记待释放
+        List<String> orphaned = new ArrayList<>();
+        sessionOwners.entrySet().removeIf(e -> {
+            e.getValue().remove(cid);
+            if (e.getValue().isEmpty()) {
+                orphaned.add(e.getKey());
+                return true;
+            }
+            return false;
+        });
         log.info("WS 连接关闭: id={}, 活跃连接数={}, status={}",
-                session.getId(), activeSessions.size(), status);
+                cid, connections.size(), status);
+        // 释放已无任何订阅者且确实空转的会话内存状态，避免 Map 只增不减。
+        // 用 IfIdle 版本：浏览器刷新/切网也会触发断连，但后端回合可能仍在跑
+        // （前端重连后靠 pendingEvents 缓冲续看），不能无条件 dispose 订阅
+        for (String sid : orphaned) {
+            agentService.releaseSessionIfIdle(sid);
+        }
     }
 }

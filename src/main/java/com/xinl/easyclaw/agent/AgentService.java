@@ -1,13 +1,16 @@
 package com.xinl.easyclaw.agent;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
+import com.xinl.easyclaw.agent.orchestrator.OrchestrationAuditVerifier;
 import com.xinl.easyclaw.config.AgentFactory;
+import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
-import com.xinl.easyclaw.config.RetryableHttpTransport;
+import com.xinl.easyclaw.config.RetryScope;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
@@ -24,6 +27,7 @@ import io.agentscope.core.state.PlanModeContextState;
 import io.agentscope.harness.agent.HarnessAgent;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import reactor.core.Disposable;
 
@@ -52,29 +56,27 @@ public class AgentService {
     private final WorkspaceManager workspaceManager;
     private final AgentFactory agentFactory;
     private final PermissionRuleService permissionRuleService;
-    /** 待用户确认的工具调用（按会话隔离） */
-    private final Map<String, List<ToolUseBlock>> pendingConfirms = new ConcurrentHashMap<>();
-    /** 本回合已允许的工具名（按会话隔离） */
-    private final Map<String, Set<String>> turnAllowed = new ConcurrentHashMap<>();
-    /** 会话 → Workspace 映射（权限判断按 workspace 隔离） */
-    private final Map<String, String> sessionWorkspaces = new ConcurrentHashMap<>();
-    /** 子 Agent 调度计数（sessionId → subagentName → 次数），用于循环调度防护 */
-    private final Map<String, Map<String, Integer>> subagentCallCounts = new ConcurrentHashMap<>();
-    /** 子 Agent 工具结果文本缓冲（source → 累积文本），用于 end 时推断真实状态 */
-    private final Map<String, StringBuilder> subagentResultBuffers = new ConcurrentHashMap<>();
-    /** 每个会话正在运行的流订阅（用于 stopChat 时 dispose 取消） */
-    private final Map<String, Disposable> sessionDisposables = new ConcurrentHashMap<>();
-    /** 是否处于「确认后恢复」阶段：原暂停流结束时抑制其 end，由恢复流统一发送，避免重复/提前结束 UI */
-    private final Map<String, AtomicBoolean> resuming = new ConcurrentHashMap<>();
-    /** 工具连续失败计数（sessionId → toolName → 次数），用于护栏 */
-    private final Map<String, Map<String, Integer>> toolFailCounts = new ConcurrentHashMap<>();
+    private final AgentScopeProperties agentScopeProperties;
+    /** 会话级运行时状态（待确认工具、回合授权、订阅句柄、护栏计数……）统一由此持有 */
+    private final SessionRegistry sessions;
+    /** 激活场景查询（编排审计需要对照工作流计划） */
+    private final com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver;
+
+    /** 空闲会话 TTL：超过此时长无活动且无挂起确认的会话，其内存状态被清扫 */
+    private static final long IDLE_TTL_MS = 2 * 60 * 60 * 1000L;
 
     public AgentService(WorkspaceManager workspaceManager,
                         AgentFactory agentFactory,
-                        PermissionRuleService permissionRuleService) {
+                        PermissionRuleService permissionRuleService,
+                        AgentScopeProperties agentScopeProperties,
+                        SessionRegistry sessions,
+                        com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver) {
         this.workspaceManager = workspaceManager;
         this.agentFactory = agentFactory;
         this.permissionRuleService = permissionRuleService;
+        this.agentScopeProperties = agentScopeProperties;
+        this.sessions = sessions;
+        this.scenarioResolver = scenarioResolver;
     }
 
     /**
@@ -84,8 +86,7 @@ public class AgentService {
         if (toolNames == null || toolNames.isEmpty()) {
             return;
         }
-        Set<String> set = turnAllowed.computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet());
-        set.addAll(toolNames);
+        sessions.allowForTurn(sessionId, toolNames);
         log.info("本回合已允许工具: sessionId={}, tools={}", sessionId, toolNames);
     }
 
@@ -128,10 +129,8 @@ public class AgentService {
         if (workspace == null || workspace.getAgent() == null) {
             return;
         }
-        for (Map.Entry<String, String> e : sessionWorkspaces.entrySet()) {
-            if (workspaceId.equals(e.getValue())) {
-                syncPermissionRules(workspace.getAgent(), workspace, e.getKey(), workspaceId);
-            }
+        for (String sessionId : sessions.sessionsOfWorkspace(workspaceId)) {
+            syncPermissionRules(workspace.getAgent(), workspace, sessionId, workspaceId);
         }
     }
 
@@ -158,10 +157,7 @@ public class AgentService {
 
             // 目标用户级 ALLOW 集合：DB 永久规则 ∪ 本回合授权
             Set<String> allowed = new HashSet<>(permissionRuleService.alwaysAllowedTools(workspaceId));
-            Set<String> turn = turnAllowed.get(sessionId);
-            if (turn != null) {
-                allowed.addAll(turn);
-            }
+            allowed.addAll(sessions.turnAllowedTools(sessionId));
 
             // 无变化则跳过（replacePermissionContext 会触发状态落盘）
             Set<String> existingUserTools = new HashSet<>();
@@ -224,7 +220,7 @@ public class AgentService {
      * 查询当前挂起的工具确认（前端轮询兜底：SSE confirm 事件丢失时也能弹窗）
      */
     public List<Map<String, Object>> pendingConfirmInfo(String sessionId) {
-        List<ToolUseBlock> tools = pendingConfirms.get(sessionId);
+        List<ToolUseBlock> tools = sessions.peekPendingConfirm(sessionId);
         if (tools == null || tools.isEmpty()) {
             return List.of();
         }
@@ -249,11 +245,12 @@ public class AgentService {
     public void stopChat(String workspaceId, String sessionId) {
         log.info("停止会话流: workspaceId={}, sessionId={}", workspaceId, sessionId);
 
-        // 1. 立即中止所有 HTTP 重试（让正在等待退避的 retry 下次判断时直接放弃）
-        RetryableHttpTransport.abortAll();
+        // 1. 仅中止本会话的 HTTP 重试（让正在等待退避的 retry 下次判断时直接放弃）；
+        //    进程级 abortAll 会误伤其他会话，见 RetryScope 注释
+        RetryScope.abort(sessionId);
 
-        // 2. 取消 Flux 订阅
-        Disposable disp = sessionDisposables.remove(sessionId);
+        // 2. 取消 Flux 订阅并清理本轮状态（保留 abort 标记，见方法末注释）
+        Disposable disp = sessions.abortTurn(sessionId);
         if (disp != null && !disp.isDisposed()) {
             try {
                 disp.dispose();
@@ -291,10 +288,123 @@ public class AgentService {
             }
         }
 
-        pendingConfirms.remove(sessionId);
-        turnAllowed.remove(sessionId);
-        resuming.remove(sessionId);
-        toolFailCounts.remove(sessionId);
+        // 本轮状态已由上面的 sessions.abortTurn 一次性清理（待确认工具、回合授权、
+        // 恢复标记、工具失败计数、确认超时倒计时与挂起回调）
+        // 注意：此处**不能** RetryScope.clear(sessionId)——上面刚设置的 abort 标记需要保留，
+        // 供正在退避等待的重试读取；标记由下一次 streamChat 或 releaseSession 清除
+    }
+
+    /**
+     * 统一会话状态驱逐入口：连接断开 / 会话删除 / 空闲超时都走这里。
+     * <p>
+     * 与 {@link #stopChat} 的区别：stopChat 表达「用户主动停止本轮」（需 interrupt Agent），
+     * 本方法表达「该会话的内存状态不再需要」——释放订阅并清空全部会话级 Map 条目。
+     * <p>
+     * 必须清空 {@code turnAllowed} / {@code sessionWorkspaces}：残留的工具授权若被
+     * 复用的 sessionId 继承，新会话会绕过确认弹窗（权限问题而非单纯内存问题）。
+     */
+    public void releaseSession(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        Disposable disp = sessions.release(sessionId);
+        if (disp != null && !disp.isDisposed()) {
+            try {
+                disp.dispose();
+            } catch (Exception e) {
+                // 释放失败不阻塞后续清理
+                log.warn("releaseSession dispose 异常: sessionId={}, err={}", sessionId, e.getMessage());
+            }
+        }
+    }
+
+    /** 记录会话活跃时间（清扫任务据此判定空闲） */
+    private void touchSession(String sessionId) {
+        sessions.touch(sessionId);
+    }
+
+    /**
+     * 保守释放：仅当会话既无活跃订阅、又无挂起确认时才驱逐。
+     * <p>
+     * 供「连接断开」这类**不代表用户意图终止**的场景调用：浏览器刷新/切网会触发断连，
+     * 但后端回合仍在跑（前端重连后凭 pendingEvents 缓冲继续观看），此时若无条件
+     * dispose 订阅会把正常回合杀掉。因此这里只回收确实已经空转的会话状态。
+     *
+     * @return true 表示已释放
+     */
+    public boolean releaseSessionIfIdle(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return false;
+        }
+        if (sessions.hasPendingConfirm(sessionId)) {
+            return false;
+        }
+        if (sessions.isRunning(sessionId)) {
+            // 回合仍在执行：保留状态，交由 TTL 清扫或后续正常收尾处理
+            return false;
+        }
+        releaseSession(sessionId);
+        return true;
+    }
+
+    /**
+     * 兜底清扫：驱逐空闲超过 {@link #IDLE_TTL_MS} 且无挂起确认、无活跃订阅的会话状态。
+     * <p>
+     * 正常路径（SSE 断开 / WS 断连 / 删除会话）已直接调用 {@link #releaseSession}，
+     * 本任务只处理这些路径全部失效的漏网情况，保证 Map 不会无界增长。
+     */
+    @Scheduled(fixedDelay = 300_000L)
+    void sweepIdleSessions() {
+        long cutoff = System.currentTimeMillis() - IDLE_TTL_MS;
+        List<String> expired = sessions.sessionsIdleBefore(cutoff).stream()
+                // 挂起等待确认的会话不清（用户可能稍后回来确认）
+                .filter(sid -> !sessions.hasPendingConfirm(sid))
+                // 仍有活跃订阅说明流还在跑，不清
+                .filter(sid -> !sessions.isRunning(sid))
+                .toList();
+        if (expired.isEmpty()) {
+            return;
+        }
+        log.info("清扫空闲会话内存状态: count={}", expired.size());
+        expired.forEach(this::releaseSession);
+    }
+
+    /**
+     * 工具确认超时清扫：用户永不点确认/拒绝（关页面、切走、误触）时，挂起回合的
+     * {@code doFinally} 已 early return，不会触发 onFinish/onError —— 前端永久停留
+     * 「思考中」，SSE 连接与会话 Map 条目常驻。本任务是该路径唯一的反向出口。
+     */
+    @Scheduled(fixedDelay = 60_000L)
+    void sweepExpiredConfirmations() {
+        long now = System.currentTimeMillis();
+        List<String> expired = sessions.expiredConfirmations(now);
+        for (String sessionId : expired) {
+            // 先摘除 deadline：确保即使后续步骤抛异常也不会重复触发本分支
+            sessions.clearConfirmDeadline(sessionId);
+            if (!sessions.hasPendingConfirm(sessionId)) {
+                // 用户已在本轮扫描间隙响应，无需取消
+                sessions.takePendingFinisher(sessionId);
+                sessions.takePendingEmitter(sessionId);
+                continue;
+            }
+            log.warn("工具确认超时，自动取消本轮: sessionId={}", sessionId);
+            try {
+                Consumer<StreamEvent> emitter = sessions.takePendingEmitter(sessionId);
+                if (emitter != null) {
+                    emitter.accept(StreamEvent.error("工具确认超时，已自动取消本轮操作"));
+                }
+                Runnable finisher = sessions.takePendingFinisher(sessionId);
+                if (finisher != null) {
+                    finisher.run();
+                }
+            } catch (Exception ex) {
+                log.warn("确认超时收尾失败: sessionId={}, err={}", sessionId, ex.toString());
+            } finally {
+                // 复用 stopChat 完成中止 + 状态清理，与用户手动点「停止」路径一致
+                stopChat(sessions.workspaceOf(sessionId), sessionId);
+                releaseSession(sessionId);
+            }
+        }
     }
 
     /**
@@ -303,11 +413,7 @@ public class AgentService {
      * @return Map 包含 running(是否有活跃流)、pending(是否挂起等待确认)、pendingTools(待确认工具列表)
      */
     public Map<String, Object> getSessionStatus(String sessionId) {
-        boolean running = false;
-        Disposable disp = sessionDisposables.get(sessionId);
-        if (disp != null && !disp.isDisposed()) {
-            running = true;
-        }
+        boolean running = sessions.isRunning(sessionId);
         List<Map<String, Object>> pendingTools = pendingConfirmInfo(sessionId);
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("running", running);
@@ -318,12 +424,11 @@ public class AgentService {
     }
 
     private boolean isAllowed(String sessionId, String toolName) {
-        String workspaceId = sessionWorkspaces.get(sessionId);
+        String workspaceId = sessions.workspaceOf(sessionId);
         if (workspaceId != null && permissionRuleService.isAlwaysAllowed(workspaceId, toolName)) {
             return true;
         }
-        Set<String> turn = turnAllowed.get(sessionId);
-        return turn != null && turn.contains(toolName);
+        return sessions.isAllowedThisTurn(sessionId, toolName);
     }
 
     /**
@@ -375,8 +480,8 @@ public class AgentService {
             return;
         }
 
-        // 重置上次 stopChat 设置的 abort 标志（允许新请求重试）
-        RetryableHttpTransport.resetAll();
+        // 清除本会话上次 stopChat 设置的 abort 标志（允许新回合重试）
+        RetryScope.clear(sessionId);
 
         WorkspaceContext workspace = workspaceManager.getWorkspace(workspaceId);
         if (workspace == null) {
@@ -385,14 +490,12 @@ public class AgentService {
         }
 
         // 会话 → Workspace 映射（权限按 workspace 隔离）
-        sessionWorkspaces.put(sessionId, workspaceId);
+        sessions.bindWorkspace(sessionId, workspaceId);
+        touchSession(sessionId);
 
-        // 每轮对话重置子 Agent 调度计数（循环防护基准）
-        subagentCallCounts.remove(sessionId);
-        // 新一轮用户消息：清除「确认恢复」标记，恢复常规 end 逻辑
-        resuming.remove(sessionId);
-        // 每轮重置工具连续失败计数
-        toolFailCounts.remove(sessionId);
+        // 新一轮用户消息：重置子 Agent 调度计数与工具失败计数（循环防护基准），
+        // 并清除「确认恢复」标记，恢复常规 end 逻辑
+        sessions.beginTurn(sessionId);
 
         // 清理上一轮遗留的挂起确认（刷新/离开页面导致的 ASKING 状态），
         // 避免新消息直接抛 "Agent is paused for human-in-the-loop confirmation"
@@ -476,7 +579,7 @@ public class AgentService {
      */
     private TranscriptRecorder newTranscriptRecorder(String sessionId, Consumer<StreamEvent> onEvent) {
         try {
-            String wid = sessionWorkspaces.get(sessionId);
+            String wid = sessions.workspaceOf(sessionId);
             if (wid == null) {
                 return null;
             }
@@ -725,11 +828,16 @@ public class AgentService {
         preconfigurePlanFile(workspace, sessionId);
 
         // 会话 → Workspace 映射（权限按 workspace 隔离）
-        sessionWorkspaces.put(sessionId, workspaceId);
+        sessions.bindWorkspace(sessionId, workspaceId);
+        touchSession(sessionId);
         // 标记进入「确认恢复」阶段：恢复流统一负责发送 end，原暂停流不再发送
-        resuming.put(sessionId, new AtomicBoolean(true));
+        sessions.markResuming(sessionId);
 
-        List<ToolUseBlock> tools = pendingConfirms.remove(sessionId);
+        List<ToolUseBlock> tools = sessions.takePendingConfirm(sessionId);
+        // 用户已响应：撤销确认超时倒计时与挂起收尾回调，避免清扫任务误取消已恢复的回合
+        sessions.disarmConfirmTimeout(sessionId);
+        // 恢复执行等同新回合：清除可能残留的 abort 标记，否则续跑的请求一遇 429 就直接放弃
+        RetryScope.clear(sessionId);
         // 无待确认工具（可能已自动放行、或确认请求已过期/重复）：直接结束，避免起一个幽灵空轮
         if (tools == null || tools.isEmpty()) {
             log.warn("resumeChat 无待确认工具（可能已自动放行或过期），直接结束: sessionId={}", sessionId);
@@ -781,6 +889,7 @@ public class AgentService {
         private final StringBuilder textBuf = new StringBuilder();
         private final StringBuilder thinkBuf = new StringBuilder();
         private final Map<String, StringBuilder> subagentBufs = new HashMap<>();
+        private final Map<String, StringBuilder> subagentThinkBufs = new HashMap<>();
         private long lastEmitAt = 0;
         private final Consumer<StreamEvent> emitter;
 
@@ -789,7 +898,7 @@ public class AgentService {
         }
 
         void onText(String delta) {
-            if (textBuf.length() == 0 && thinkBuf.length() == 0 && subagentBufs.isEmpty()) {
+            if (idle()) {
                 emitter.accept(StreamEvent.text(delta));
                 lastEmitAt = System.currentTimeMillis();
             } else {
@@ -799,7 +908,7 @@ public class AgentService {
         }
 
         void onReasoning(String delta) {
-            if (textBuf.length() == 0 && thinkBuf.length() == 0 && subagentBufs.isEmpty()) {
+            if (idle()) {
                 emitter.accept(StreamEvent.reasoning(delta));
                 lastEmitAt = System.currentTimeMillis();
             } else {
@@ -809,13 +918,29 @@ public class AgentService {
         }
 
         void onSubagentText(String subName, String delta) {
-            if (textBuf.length() == 0 && thinkBuf.length() == 0 && subagentBufs.isEmpty()) {
+            if (idle()) {
                 emitter.accept(StreamEvent.subagentText(subName, delta));
                 lastEmitAt = System.currentTimeMillis();
             } else {
                 subagentBufs.computeIfAbsent(subName, k -> new StringBuilder()).append(delta);
                 tryBurstFlush();
             }
+        }
+
+        void onSubagentReasoning(String subName, String delta) {
+            if (idle()) {
+                emitter.accept(StreamEvent.subagentReasoning(subName, delta));
+                lastEmitAt = System.currentTimeMillis();
+            } else {
+                subagentThinkBufs.computeIfAbsent(subName, k -> new StringBuilder()).append(delta);
+                tryBurstFlush();
+            }
+        }
+
+        /** 所有缓冲区都为空时可直接透传，无需担心乱序 */
+        private boolean idle() {
+            return textBuf.length() == 0 && thinkBuf.length() == 0
+                    && subagentBufs.isEmpty() && subagentThinkBufs.isEmpty();
         }
 
         /** 非 delta 事件到来前调用，保证 delta 在非 delta 事件之前发出 */
@@ -836,6 +961,14 @@ public class AgentService {
                 }
                 subagentBufs.clear();
             }
+            if (!subagentThinkBufs.isEmpty()) {
+                for (Map.Entry<String, StringBuilder> e : subagentThinkBufs.entrySet()) {
+                    if (e.getValue().length() > 0) {
+                        emitter.accept(StreamEvent.subagentReasoning(e.getKey(), e.getValue().toString()));
+                    }
+                }
+                subagentThinkBufs.clear();
+            }
             lastEmitAt = System.currentTimeMillis();
         }
 
@@ -855,6 +988,9 @@ public class AgentService {
             for (StringBuilder sb : subagentBufs.values()) {
                 total += sb.length();
             }
+            for (StringBuilder sb : subagentThinkBufs.values()) {
+                total += sb.length();
+            }
             return total;
         }
     }
@@ -867,6 +1003,11 @@ public class AgentService {
         debugLogContext(agent, sessionId);
         final boolean[] ended = {false};
         final boolean[] retried = {false};
+        // NO_REPLY 续问标记：绝不能在 doOnNext 内递归 startStream —— 子流开头会 dispose
+        // “上一轮”订阅，而那正是当前仍在执行回调的父流自己；父流随后的 doFinally 又会
+        // remove 掉子流刚登记的句柄，使续问流成为孤儿流（stopChat 取不到 Disposable，
+        // 停止按钮失效）。因此这里只置标记，真正发起放到流终止后的单一决策点。
+        final boolean[] needFollowUp = {false};
         final ToolTrace trace = new ToolTrace();
         // 会话转录：把推送给 UI 的完整事件流聚合落盘（append-only），与模型上下文压缩解耦，
         // 保证历史消息不因 compaction / agent 重建而丢失。落盘失败不影响主流程。
@@ -878,7 +1019,7 @@ public class AgentService {
         // 避免原暂停流与「确认恢复流」重复推送事件 / 重复发送 end。
         // 注：AgentScope 的暂停状态已持久化到 state 文件，释放原事件流不会丢失待确认上下文，
         // 新流（resumeChat / autoConfirmResume）凭确认结果从同一状态恢复执行。
-        Disposable prev = sessionDisposables.remove(sessionId);
+        Disposable prev = sessions.takeDisposable(sessionId);
         if (prev != null && !prev.isDisposed()) {
             try {
                 prev.dispose();
@@ -903,19 +1044,17 @@ public class AgentService {
                             recorder.flushAll();
                         }
                         emitContextStatus(agent, eventSink);
+                        // 编排审计（P1）：team 场景下比对「计划阶段」与主智能体自报的实际执行
+                        if (mainTurn) {
+                            emitOrchestrationAudit(sessionId, trace, eventSink);
+                        }
                         // NO_REPLY 兜底：主回合调用了工具但无任何文本输出（模型输出 NO_REPLY 被
-                        // MemoryFlush 压缩询问吞掉等场景）→ 自动续问一次，强制给用户总结
+                        // MemoryFlush 压缩询问吞掉等场景）→ 标记待续问，由 doFinally 统一发起
                         if (mainTurn && trace.toolCalled && !trace.hasText && !retried[0]) {
                             retried[0] = true;
-                            log.info("主回合调用了工具但无文本回复（NO_REPLY?），自动续问总结: session={}", sessionId);
-                            Msg followUp = Msg.builder()
-                                    .name("user")
-                                    .role(MsgRole.USER)
-                                    .textContent("（系统提示）请基于刚才的工具执行结果，直接给用户完整、清晰的中文总结回复。"
-                                            + "不要输出 NO_REPLY，不要重复工具调用，直接总结。")
-                                    .build();
-                            startStream(agent, context, followUp, sessionId, false, false,
-                                    onEvent, onError, onFinish);
+                            needFollowUp[0] = true;
+                            log.info("主回合调用了工具但无文本回复（NO_REPLY?），待流终止后自动续问总结: session={}", sessionId);
+                            // 本回合不收尾：end 由续问流负责发送
                             return;
                         }
                         finishTurn(sessionId, isResumeStream, onFinish);
@@ -933,7 +1072,7 @@ public class AgentService {
                     // Agent 内部状态可能已损坏（模型 API 失败/流中断）：
                     // 重建 Agent，避免后续消息"无响应"（新消息从 state 文件干净加载）
                     try {
-                        String wid = sessionWorkspaces.get(sessionId);
+                        String wid = sessions.workspaceOf(sessionId);
                         if (wid != null) {
                             workspaceManager.rebuildAgent(wid);
                             log.info("流式错误后已重建 Agent: workspaceId={}", wid);
@@ -949,17 +1088,20 @@ public class AgentService {
                         recorder.flushAll();
                     }
                     // 清理本会话的订阅引用（已结束/出错/被 dispose 都要清）
-                    sessionDisposables.remove(sessionId);
+                    sessions.clearDisposable(sessionId);
                     // 流终止（complete/error/cancel）兜底：确保 UI 一定复位，状态最终落盘
                     if (mainTurn) {
                         // 主回合结束：清空"本回合允许"授权，避免残留导致后续写工具不再弹窗
-                        turnAllowed.remove(sessionId);
+                        sessions.endTurn(sessionId);
                     }
                     // Agent 暂停等待用户确认（pendingConfirms 未清）：此时事件流会 complete，
                     // 但绝不能 complete 掉 SSE 连接 —— 否则 confirm 弹窗后的 resume 事件无处推送。
                     // 保持连接，待 resumeChat 清空 pendingConfirms 后由 resume 的流正常收尾。
-                    if (pendingConfirms.containsKey(sessionId)) {
+                    if (sessions.hasPendingConfirm(sessionId)) {
                         log.info("Agent 暂停等待确认，保持 SSE 连接: sessionId={}", sessionId);
+                        // 登记收尾回调：确认迟迟不来时由 sweepExpiredConfirmations 调用它复位
+                        // 前端并关闭 SSE —— 这是本路径唯一的反向出口
+                        sessions.registerPendingCallbacks(sessionId, onFinish, onEvent);
                         return;
                     }
                     // 流终止兜底（被新消息顶替 dispose / 用户停止 / 异常取消）：
@@ -967,6 +1109,21 @@ public class AgentService {
                     closeInFlightTool(trace, eventSink, "已中断");
                     if (recorder != null) {
                         recorder.flushAll();
+                    }
+                    // 单一决策点：父流已终止且句柄已清理，此时发起续问流是安全的
+                    // （子流的 sessionDisposables.put 不会再被父流 remove 覆盖）
+                    if (needFollowUp[0]) {
+                        Msg followUp = Msg.builder()
+                                .name("user")
+                                .role(MsgRole.USER)
+                                .textContent("（系统提示）请基于刚才的工具执行结果，直接给用户完整、清晰的中文总结回复。"
+                                        + "不要输出 NO_REPLY，不要重复工具调用，直接总结。")
+                                .build();
+                        log.info("发起 NO_REPLY 续问流: sessionId={}", sessionId);
+                        // 续问流继承 isResumeStream，保证 end 抑制语义与父流一致
+                        startStream(agent, context, followUp, sessionId, false, isResumeStream,
+                                onEvent, onError, onFinish);
+                        return;
                     }
                     if (!ended[0]) {
                         try {
@@ -977,8 +1134,11 @@ public class AgentService {
                         finishTurn(sessionId, isResumeStream, onFinish);
                     }
                 })
+                // 向下游 transport 传递 sessionId：RetryableHttpTransport 据此判断是否放弃重试
+                // （Reactor Context 是反应式链路中唯一可靠的会话标识传递方式）
+                .contextWrite(ctx -> ctx.put(RetryScope.CONTEXT_KEY, sessionId))
                 .subscribe();
-        sessionDisposables.put(sessionId, disp);
+        sessions.setDisposable(sessionId, disp);
     }
 
     /**
@@ -1007,14 +1167,14 @@ public class AgentService {
      * </ul>
      */
     private void finishTurn(String sessionId, boolean isResumeStream, Runnable onFinish) {
-        boolean isResuming = resuming.getOrDefault(sessionId, new AtomicBoolean(false)).get();
+        boolean isResuming = sessions.isResuming(sessionId);
         if (!isResumeStream && isResuming) {
             log.debug("抑制旧流(end)：确认恢复流将统一发送, sessionId={}", sessionId);
             return;
         }
         onFinish.run();
         if (isResumeStream) {
-            resuming.remove(sessionId);
+            sessions.clearResuming(sessionId);
         }
     }
 
@@ -1027,6 +1187,23 @@ public class AgentService {
         boolean toolInFlight = false;
         final StringBuilder args = new StringBuilder();
         final StringBuilder result = new StringBuilder();
+        /**
+         * 主智能体最终回复文本（仅用于编排审计比对，容量上限见 {@link #appendReply}）。
+         * team 模式下需要从回复中提取 &lt;orchestration-audit&gt; 标记。
+         */
+        final StringBuilder reply = new StringBuilder();
+
+        /** 追加回复文本；超过上限后停止累积，避免长回复占用内存（审计标记在尾部，改用滑动保留尾部） */
+        void appendReply(String delta) {
+            if (delta == null || delta.isEmpty()) {
+                return;
+            }
+            reply.append(delta);
+            int max = 8192;
+            if (reply.length() > max) {
+                reply.delete(0, reply.length() - max);
+            }
+        }
     }
 
     /**
@@ -1035,12 +1212,15 @@ public class AgentService {
      * TEXT/THINKING delta 通过 batcher 合并；工具调用/结果等非 delta 事件立即 flush 后发送。
      */
     private void handleSubagentEvent(AgentEvent event, String subName, Consumer<StreamEvent> onEvent,
-                                     DeltaBatcher batcher) {
+                                     DeltaBatcher batcher, String sessionId) {
         String source = event.getSource();
+        // 缓冲 key 带上 sessionId：原先仅用 source，跨会话同名子 Agent 会互相串写，
+        // 且会话结束后无法按会话前缀清理残留条目
+        String bufKey = sessionId + "::" + source;
         if (event instanceof TextBlockDeltaEvent e) {
             batcher.onSubagentText(subName, e.getDelta());
         } else if (event instanceof ThinkingBlockDeltaEvent e) {
-            batcher.onSubagentText(subName, "🧠 " + e.getDelta());
+            batcher.onSubagentReasoning(subName, e.getDelta());
         } else if (event.getType() == AgentEventType.EXCEED_MAX_ITERS) {
             // 子 Agent 迭代耗尽：这是「子 Agent 回复被截断」最常见的原因。
             // 声明文件的 steps（框架默认仅 10）用尽后框架强行结束，此前无任何提示。
@@ -1060,19 +1240,22 @@ public class AgentService {
             // 非 delta 事件：先 flush 累积的 subagent delta，保证顺序正确
             batcher.flush();
             if (event instanceof ToolCallStartEvent e) {
-                subagentResultBuffers.remove(source);
-                onEvent.accept(StreamEvent.subagentText(subName, "\n🔧 调用: " + e.getToolCallName()));
+                sessions.clearSubagentResult(bufKey);
+                onEvent.accept(StreamEvent.subagentTool(subName, e.getToolCallName()));
             } else if (event instanceof ToolCallDeltaEvent e) {
-                onEvent.accept(StreamEvent.subagentText(subName, e.getDelta()));
+                onEvent.accept(StreamEvent.subagentToolArgs(subName, e.getDelta()));
             } else if (event instanceof ToolResultTextDeltaEvent e) {
-                subagentResultBuffers.computeIfAbsent(source, k -> new StringBuilder()).append(e.getDelta());
-                onEvent.accept(StreamEvent.subagentText(subName, e.getDelta()));
+                // 结果文本只累积不逐字外发：等 ToolResultEndEvent 带状态一次性下发，
+                // 避免工具原始输出混进子 Agent 的正文时间线。
+                // 累积上限见 SessionRegistry.MAX_SUBAGENT_BUFFER_CHARS：超限后停止追加，
+                // 避免超长工具输出（如全量日志）撑爆内存。
+                sessions.appendSubagentResult(bufKey, e.getDelta());
             } else if (event instanceof ToolResultEndEvent e) {
-                String result = String.valueOf(subagentResultBuffers.remove(source));
+                String result = sessions.takeSubagentResult(bufKey);
                 String state = inferToolResultState(
                         e.getState() != null ? e.getState().name() : null,
                         result);
-                onEvent.accept(StreamEvent.subagentText(subName, "\n📤 结果(" + state + ")"));
+                onEvent.accept(StreamEvent.subagentToolResult(subName, state, result));
             }
         }
         // 其余子 Agent 内部事件忽略（不进入主流程）
@@ -1086,6 +1269,42 @@ public class AgentService {
      * <p>设计原则：只匹配 AgentScope 框架错误的精确特征，避免把 read_file 返回的
      * 代码内容（可能含 error: 属性、failed 注释等）误判为 ERROR。</p>
      */
+    /**
+     * 写类工具（会改动工作区文件的工具）名单。
+     * <p>
+     * 只列出「确定会写文件」的工具：{@code execute} 虽然也可能改文件，但无法从命令行
+     * 可靠解析出受影响路径，误报会导致前端无意义地反复重拉，故不纳入。
+     */
+    private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file");
+
+    /**
+     * 写类工具成功后推送 file_changed 事件，驱动前端实时刷新。
+     * <p>
+     * 路径从工具入参 JSON 的 {@code path} 字段取。入参可能因流式累积而不是合法 JSON
+     * （见 ToolCallsAccumulator 的静默降级行为），此时静默跳过——刷新是增强能力，
+     * 不能因为解析失败影响主对话流程。
+     */
+    private static void emitFileChangedIfWriteTool(String toolName,
+                                                   String argsJson,
+                                                   Consumer<StreamEvent> onEvent) {
+        if (toolName == null || !FILE_WRITE_TOOLS.contains(toolName.toLowerCase(Locale.ROOT))) {
+            return;
+        }
+        if (argsJson == null || argsJson.isBlank()) {
+            return;
+        }
+        try {
+            JsonNode node = mapper.readTree(argsJson);
+            String path = node.path("path").asText("");
+            if (path.isBlank()) {
+                return;
+            }
+            onEvent.accept(StreamEvent.fileChanged(path.replace('\\', '/')));
+        } catch (Exception e) {
+            log.debug("file_changed 事件跳过（工具入参非合法 JSON）: tool={}", toolName);
+        }
+    }
+
     private static String inferToolResultState(String state, String resultText) {
         if (state != null && !"SUCCESS".equalsIgnoreCase(state) && !"RUNNING".equalsIgnoreCase(state)) {
             return state;
@@ -1151,13 +1370,14 @@ public class AgentService {
         boolean fromSubagent = source != null && source.contains("/")
                 && !(event instanceof RequireUserConfirmEvent);
         if (fromSubagent) {
-            handleSubagentEvent(event, source.substring(source.lastIndexOf('/') + 1), onEvent, batcher);
+            handleSubagentEvent(event, source.substring(source.lastIndexOf('/') + 1), onEvent, batcher, sessionId);
             return;
         }
         switch (event.getType()) {
             case TEXT_BLOCK_DELTA -> {
                 if (event instanceof TextBlockDeltaEvent e) {
                     trace.hasText = true;
+                    trace.appendReply(e.getDelta());
                     batcher.onText(e.getDelta());
                 }
             }
@@ -1200,11 +1420,10 @@ public class AgentService {
                     if (name != null && name.toLowerCase().contains("subagent")) {
                         String subName = extractSubagentName(name);
                         onEvent.accept(StreamEvent.subagent(subName));
-                        // 循环调度防护：同一会话内同一子 Agent 超过 3 次 → 打断
-                        int count = subagentCallCounts
-                                .computeIfAbsent(sessionId, k -> new HashMap<>())
-                                .merge(subName, 1, Integer::sum);
-                        if (count > 3) {
+                        // 循环调度防护：同一会话内同一子 Agent 超过配置次数 → 打断
+                        int maxSameSubagent = agentScopeProperties.getAgent().getMaxSameSubagentCalls();
+                        int count = sessions.recordSubagentCall(sessionId, subName);
+                        if (maxSameSubagent > 0 && count > maxSameSubagent) {
                             log.warn("检测到子 Agent 循环调度: session={}, subagent={}, count={}", sessionId, subName, count);
                             try {
                                 agent.interrupt();
@@ -1249,12 +1468,11 @@ public class AgentService {
                         : inferToolResultState(null, result);
                 onEvent.accept(StreamEvent.toolResult("(" + state + ") "
                         + (result.isEmpty() ? "(空结果)" : result)));
-                // 工具连续失败护栏：同一工具连续失败 ≥2 次时注入停止提示
+                // 工具连续失败护栏：同一工具连续失败达到配置阈值时注入停止提示
                 if ("ERROR".equalsIgnoreCase(state)) {
-                    int fails = toolFailCounts
-                            .computeIfAbsent(sessionId, k -> new HashMap<>())
-                            .merge(trace.toolName, 1, Integer::sum);
-                    if (fails >= 2) {
+                    int maxFails = agentScopeProperties.getAgent().getMaxConsecutiveToolFailures();
+                    int fails = sessions.recordToolFailure(sessionId, trace.toolName);
+                    if (maxFails > 0 && fails >= maxFails) {
                         log.warn("工具连续失败护栏触发: session={}, tool={}, fails={}",
                                 sessionId, trace.toolName, fails);
                         onEvent.accept(StreamEvent.context(
@@ -1265,10 +1483,9 @@ public class AgentService {
                     }
                 } else {
                     // 成功则重置该工具的失败计数
-                    toolFailCounts.computeIfPresent(sessionId, (k, m) -> {
-                        m.remove(trace.toolName);
-                        return m;
-                    });
+                    sessions.resetToolFailure(sessionId, trace.toolName);
+                    // 写类工具成功 → 通知前端刷新文件树/已打开预览（实时刷新，免手动点「刷新」）
+                    emitFileChangedIfWriteTool(trace.toolName, trace.args.toString(), onEvent);
                 }
                 onEvent.accept(StreamEvent.toolEnd(trace.toolName));
             }
@@ -1279,7 +1496,10 @@ public class AgentService {
                 // 拒绝时由框架回 "Permission denied by user" 工具结果给 LLM（有感）。
                 if (event instanceof RequireUserConfirmEvent e) {
                     List<ToolUseBlock> tools = e.getToolCalls();
-                    pendingConfirms.put(sessionId, tools);
+                    // 登记待确认工具 + 确认截止时间：用户永不响应时由 sweepExpiredConfirmations
+                    // 兜底取消，否则 SSE 连接与会话 Map 条目会永久常驻（稳定的 OOM 路径）
+                    sessions.armPendingConfirm(sessionId, tools,
+                            agentScopeProperties.getAgent().getConfirmTimeoutMinutes());
                     log.info("收到工具确认请求: session={}, tools={}",
                             sessionId,
                             tools.stream().map(ToolUseBlock::getName).toList());
@@ -1376,6 +1596,60 @@ public class AgentService {
             }
             log.info(sb.toString());
         } catch (Exception ignore) {
+        }
+    }
+
+    /**
+     * 编排审计上报（P1）
+     * <p>
+     * team 场景的控制流由主 LLM 依提示词自行执行，系统侧无强制力。本方法在回合结束时
+     * 比对「场景计划的阶段」与主智能体自报的 {@code <orchestration-audit>} 标记，把
+     * 「编排是否真的按计划发生」由不可观测变为可观测，并在不一致时推送 context 事件给 UI。
+     * <p>
+     * 注意：这是可观测性手段，不能阻止 LLM 漏做或谎报；执行保证需依赖确定性编排执行器。
+     * 审计失败绝不影响主流程。
+     */
+    private void emitOrchestrationAudit(String sessionId, ToolTrace trace,
+                                        Consumer<StreamEvent> onEvent) {
+        try {
+            String workspaceId = sessions.workspaceOf(sessionId);
+            if (workspaceId == null) {
+                return;
+            }
+            String workflowJson = scenarioResolver.activeWorkflowJson(workspaceId);
+            if (workflowJson == null || workflowJson.isBlank()) {
+                return;
+            }
+            OrchestrationAuditVerifier.verify(workflowJson, trace.reply.toString())
+                    .ifPresent(result -> {
+                        if (result.consistent()) {
+                            log.debug("编排审计通过: session={}, {}", sessionId, result.summary());
+                            return;
+                        }
+                        log.warn("编排审计不一致: session={}, planned={}, executed={}, detail={}",
+                                sessionId, result.plannedStages(), result.executedStages(),
+                                result.summary());
+                        onEvent.accept(StreamEvent.context(buildAuditJson(result)));
+                    });
+        } catch (Exception e) {
+            log.debug("编排审计跳过（不影响主流程）: session={}, {}", sessionId, e.getMessage());
+        }
+    }
+
+    /** 构造编排审计告警的 context 事件 JSON */
+    private String buildAuditJson(OrchestrationAuditVerifier.AuditResult result) {
+        try {
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("type", "orchestration_audit");
+            root.put("auditPresent", result.auditPresent());
+            root.put("plannedStages", result.plannedStages());
+            root.put("executedStages", result.executedStages());
+            root.put("skippedStages", result.skippedStages());
+            root.put("mismatches", result.mismatches());
+            root.put("message", "编排执行与场景计划不一致：" + result.summary());
+            return mapper.writeValueAsString(root);
+        } catch (Exception e) {
+            return "{\"type\":\"orchestration_audit\",\"message\":\"编排执行与场景计划不一致\"}";
         }
     }
 

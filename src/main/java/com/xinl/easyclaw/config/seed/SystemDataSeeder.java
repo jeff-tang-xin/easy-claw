@@ -10,9 +10,17 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import javax.sql.DataSource;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.security.MessageDigest;
+import java.util.Arrays;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * 系统内置数据播种器。
@@ -52,8 +60,18 @@ public class SystemDataSeeder {
     }
 
     /**
-     * 播种内置子 Agent（仅当全局 subagents 目录缺少对应文件时写入，
-     * 用户自己创建/修改过的同名声明不会被覆盖）
+     * 播种内置子 Agent 声明。
+     * <p>
+     * 用 frontmatter 的 {@code seedVersion} 标记模板版本，实现「可升级但不覆盖用户修改」：
+     * <ul>
+     *   <li>文件不存在 → 写入当前版本</li>
+     *   <li>文件存在且 {@code seedVersion} 等于历史内置版本 → 用户没改过，刷新为当前版本</li>
+     *   <li>文件存在但无 {@code seedVersion} 或版本更高 → 视为用户自定义，保留不动</li>
+     * </ul>
+     * 这解决了旧实现「{@code if (exists) return;} 导致内置模板改了也永不生效」的漂移问题。
+     * <p>
+     * 刻意不写 {@code steps}：迭代上限由 {@code agentscope.agent.subagent-steps} 统一管控，
+     * 避免散落在各 md 文件里需要手工同步（历史上工作区那份 {@code steps: 8} 就是这么失控的）。
      */
     private void seedBuiltinSubagents() {
         Path dir = SystemHomePaths.globalSubagentsDir();
@@ -84,16 +102,164 @@ public class SystemDataSeeder {
                 4. 给出结论：通过 / 有条件通过 / 需要返工。不执行代码修改。""");
     }
 
+    /** 内置子 Agent 模板的当前版本。修改任一内置声明正文时递增，使旧的未改动文件自动刷新。 */
+    static final int SUBAGENT_SEED_VERSION = 3;
+
+    /** frontmatter 扫描行数上限：正常声明的头部远小于此值，防止无闭合分隔符时扫全文。 */
+    private static final int MAX_FRONTMATTER_LINES = 50;
+
+    /** frontmatter 中 seedVersion 的宽松匹配：容忍额外空格、引号、行尾注释。 */
+    private static final Pattern SEED_VERSION_PATTERN =
+            Pattern.compile("^seedVersion\\s*:\\s*\"?(\\d{1,9})\"?\\s*(?:#.*)?$");
+
+    /** frontmatter 中 seedHash 的匹配（内置模板正文指纹，用于识别用户是否改动过）。 */
+    private static final Pattern SEED_HASH_PATTERN =
+            Pattern.compile("^seedHash\\s*:\\s*\"?([0-9a-f]{8,64})\"?\\s*(?:#.*)?$");
+
+    /**
+     * 判断一份已存在的声明文件是否应被内置模板覆盖。
+     * <p>
+     * 严格语义：**只有确认用户从未改动过**才允许刷新。判据是磁盘正文指纹与该文件自称的
+     * seedHash 一致；一旦用户编辑过正文，指纹不匹配，文件即被永久视为用户资产。
+     * <p>
+     * 抽成静态纯函数便于单测。
+     *
+     * @param existing 已存在文件的解析结果，null 表示无法解析（视为用户自定义）
+     * @return true 表示可安全刷新为当前内置模板
+     */
+    static boolean shouldOverwrite(SeedMeta existing) {
+        if (existing == null || existing.version() == null) {
+            // 无版本标记 → 用户手写或旧版遗留，保守不动
+            return false;
+        }
+        int v = existing.version();
+        // 范围判断代替手工维护的白名单集合：避免升版时忘记登记导致文件永久不再刷新
+        if (v < 1 || v > SUBAGENT_SEED_VERSION) {
+            // 未来版本或非法值 → 不回退覆盖
+            return false;
+        }
+        if (v >= SUBAGENT_SEED_VERSION) {
+            // 已是最新，无需写盘
+            return false;
+        }
+        if (existing.hash() == null) {
+            // 旧版模板尚未写入指纹，无法证明未被改动 → 保守保留
+            return false;
+        }
+        // 仅当正文与「该版本原始模板」完全一致，才认定用户未改动过
+        return existing.hash().equals(existing.actualHash());
+    }
+
+    /** 声明文件 frontmatter 的播种元数据。actualHash 为磁盘正文实际指纹。 */
+    record SeedMeta(Integer version, String hash, String actualHash) {
+    }
+
     private void seedSubagent(Path dir, String name, String description, String prompt) {
         Path file = dir.resolve(name + ".md");
-        if (Files.exists(file)) {
-            return;
-        }
+        String body = prompt + "\n";
+        String content = "---\ndescription: " + description
+                + "\nseedVersion: " + SUBAGENT_SEED_VERSION
+                + "\nseedHash: " + bodyHash(body)
+                + "\n---\n\n" + body;
         try {
-            Files.writeString(file, "---\ndescription: " + description + "\nsteps: 15\n---\n\n" + prompt + "\n");
+            if (Files.exists(file)) {
+                SeedMeta existing = readSeedMeta(file);
+                if (!shouldOverwrite(existing)) {
+                    return;
+                }
+                writeAtomically(file, content);
+                log.info("内置子 Agent [{}] 模板由 v{} 升级到 v{}", name, existing.version(), SUBAGENT_SEED_VERSION);
+                return;
+            }
+            writeAtomically(file, content);
             log.info("播种内置子 Agent: {}", name);
         } catch (Exception e) {
             log.warn("播种子 Agent {} 失败: {}", name, e.getMessage());
+        }
+    }
+
+    /** 正文指纹：SHA-256 前 16 位十六进制，足够区分且不臃肿 frontmatter。 */
+    static String bodyHash(String body) {
+        try {
+            // 归一化换行，避免 CRLF/LF 差异被误判为「用户改动过」
+            String normalized = body.replace("\r\n", "\n").replace("\r", "\n");
+            byte[] digest = MessageDigest.getInstance("SHA-256")
+                    .digest(normalized.getBytes(StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(16);
+            for (int i = 0; i < 8; i++) {
+                sb.append(String.format("%02x", digest[i]));
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            // SHA-256 属 JDK 必备算法，理论不可达
+            throw new IllegalStateException("计算模板指纹失败", e);
+        }
+    }
+
+    /** 原子写入：先写临时文件再 move，避免中途崩溃留下截断的声明文件。 */
+    private static void writeAtomically(Path file, String content) throws IOException {
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.writeString(tmp, content, StandardCharsets.UTF_8);
+        try {
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        } catch (AtomicMoveNotSupportedException e) {
+            // 部分文件系统不支持原子移动，退化为普通替换
+            Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    /**
+     * 解析声明文件 frontmatter 中的播种元数据。
+     * <p>
+     * 一次性读取全文：既算正文指纹，也取 seedVersion / seedHash，避免重复 I/O。
+     * 任何解析失败都返回 null（保守视为用户自定义，绝不覆盖）。
+     */
+    static SeedMeta readSeedMeta(Path file) {
+        try {
+            String raw = Files.readString(file, StandardCharsets.UTF_8);
+            // 剥离 UTF-8 BOM，否则首行不等于 "---" 会误判为无 frontmatter
+            if (!raw.isEmpty() && raw.charAt(0) == '\uFEFF') {
+                raw = raw.substring(1);
+            }
+            String[] lines = raw.replace("\r\n", "\n").replace("\r", "\n").split("\n", -1);
+            if (lines.length == 0 || !lines[0].trim().equals("---")) {
+                return null;
+            }
+            Integer version = null;
+            String hash = null;
+            int closeIdx = -1;
+            // 只扫描 frontmatter 区，且限制行数，避免无闭合分隔符时扫全文
+            int limit = Math.min(lines.length, MAX_FRONTMATTER_LINES);
+            for (int i = 1; i < limit; i++) {
+                String l = lines[i].trim();
+                if (l.equals("---")) {
+                    closeIdx = i;
+                    break;
+                }
+                Matcher mv = SEED_VERSION_PATTERN.matcher(l);
+                if (mv.matches()) {
+                    version = Integer.valueOf(mv.group(1));
+                    continue;
+                }
+                Matcher mh = SEED_HASH_PATTERN.matcher(l);
+                if (mh.matches()) {
+                    hash = mh.group(1);
+                }
+            }
+            if (closeIdx < 0) {
+                // frontmatter 未闭合 → 结构不可信，视为用户自定义
+                return null;
+            }
+            // 正文 = 闭合分隔符之后，跳过紧随的空行（播种时写入的是 "---\n\n" + body）
+            int start = closeIdx + 1;
+            while (start < lines.length && lines[start].isEmpty()) {
+                start++;
+            }
+            String body = String.join("\n", Arrays.asList(lines).subList(start, lines.length));
+            return new SeedMeta(version, hash, bodyHash(body));
+        } catch (Exception e) {
+            log.debug("解析播种元数据失败 {}: {}", file, e.getMessage());
+            return null;
         }
     }
 

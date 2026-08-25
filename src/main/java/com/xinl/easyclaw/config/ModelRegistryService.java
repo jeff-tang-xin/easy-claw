@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.config;
 
+import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.model.transport.HttpTransport;
 import io.agentscope.core.model.transport.HttpTransportFactory;
@@ -10,6 +11,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.Locale;
+import java.util.Map;
 
 /**
  * 模型注册中心服务
@@ -163,8 +165,145 @@ public class ModelRegistryService {
                 .apiKey(apiKey)
                 .modelName(modelName == null ? "" : modelName.trim())
                 .stream(stream == null || stream)
+           //     .generateOptions(buildGenerateOptions(providerName, cfg, modelName))
                 .httpTransport(transport)
                 .build();
+    }
+
+    /**
+     * 构建生成参数。
+     * <p>
+     * 这里是「大文件 write_file / edit_file 参数丢失」的修复点，必须同时设置两项：
+     * <ol>
+     *   <li><b>maxTokens</b> —— 不设置时走服务端默认上限（常见 4096）。长文件内容会让
+     *       tool_call 的 arguments JSON 超限被截断，收到的分片拼起来形如
+     *       {@code {"path":"a.md","content":"....}（缺尾部引号与花括号）。
+     *       上游 {@code ToolCallBuilder.build()} 会用
+     *       {@code JsonUtils.isValidJsonObject(raw)} 校验，不合法就把整个 arguments
+     *       替换成 {@code "{}"}，且只打 debug 日志不抛错 —— 于是工具方法拿到
+     *       全 null 的入参，报「未找到 path/content 参数」。同时
+     *       {@code maxCompletionTokens} 一并设置以兼容较新的 OpenAI 端点。</li>
+     *   <li><b>parallelToolCalls=false</b> —— 上游流式累积器
+     *       {@code ToolCallsAccumulator.determineKey()} 对「只有 arguments 分片、
+     *       没有 id 和 name」的 chunk 用 {@code lastToolCallKey} 兜底归组。
+     *       并行 tool_call 时多路分片交错，会把 B 的 arguments 追加进 A 的
+     *       {@code rawContent}，同样导致 JSON 破损 → 降级成 {@code {}}。</li>
+     * </ol>
+     * <p>
+     * <b>route / 网关型 provider 注意</b>：同一 base-url 后面可能挂着 kimi、豆包、
+     * deepseek、glm 等模型，各家输出 token 上限差异极大，统一下发一个值会让上限低的
+     * 模型直接报 400。因此这里按
+     * 「模型名（{@code agentscope.model-limits}）→ provider（{@code agentscope.providers.*.max-tokens}）→ 全局」
+     * 三级回退取值，并支持对个别不接受 {@code max_tokens} 的模型完全不下发该参数。
+     */
+    private GenerateOptions buildGenerateOptions(String providerName,
+                                                 AgentScopeProperties.ProviderConfig cfg,
+                                                 String modelName) {
+        AgentScopeProperties.Model global = props.getModel();
+        AgentScopeProperties.ModelLimit limit = resolveModelLimit(providerName, modelName);
+
+        GenerateOptions.Builder builder = GenerateOptions.builder();
+
+        boolean unsupported = limit != null && Boolean.TRUE.equals(limit.getMaxTokensUnsupported());
+        if (!unsupported) {
+            Integer maxTokens = resolveMaxTokens(providerName, cfg, modelName);
+            if (maxTokens != null && maxTokens > 0) {
+                builder.maxTokens(maxTokens).maxCompletionTokens(maxTokens);
+            }
+        }
+
+        Double temperature = firstNonNull(
+                cfg == null ? null : cfg.getTemperature(),
+                global.getTemperature());
+        if (temperature != null) {
+            builder.temperature(temperature);
+        }
+
+        Boolean parallelToolCalls = firstNonNull(
+                limit == null ? null : limit.getParallelToolCalls(),
+                cfg == null ? null : cfg.getParallelToolCalls(),
+                global.getParallelToolCalls());
+        if (parallelToolCalls != null) {
+            builder.parallelToolCalls(parallelToolCalls);
+        }
+        return builder.build();
+    }
+
+    /**
+     * 解析某个 provider + 模型名最终生效的 max output tokens（三级回退）。
+     * <p>
+     * 返回 null 表示不下发 {@code max_tokens} 参数（模型声明不支持，或各级均未配置）。
+     * 包可见以便单元测试直接断言优先级。
+     */
+    Integer resolveMaxTokens(String providerName,
+                             AgentScopeProperties.ProviderConfig cfg,
+                             String modelName) {
+        AgentScopeProperties.ModelLimit limit = resolveModelLimit(providerName, modelName);
+        if (limit != null && Boolean.TRUE.equals(limit.getMaxTokensUnsupported())) {
+            return null;
+        }
+        return firstNonNull(
+                limit == null ? null : limit.getMaxTokens(),
+                cfg == null ? null : cfg.getMaxTokens(),
+                props.getModel().getMaxTokens());
+    }
+
+    /**
+     * 按模型名解析生成参数上限，匹配优先级：
+     * <ol>
+     *   <li>{@code <provider>:<modelName>} 精确匹配（同名模型挂在不同 provider 下时可区分）</li>
+     *   <li>{@code <modelName>} 精确匹配</li>
+     *   <li>前缀通配 {@code xxx*}，多个命中时取最长前缀（更具体的优先）</li>
+     * </ol>
+     * 全部未命中返回 null，交由调用方回退 provider 级 / 全局配置。
+     */
+    AgentScopeProperties.ModelLimit resolveModelLimit(String providerName, String modelName) {
+        Map<String, AgentScopeProperties.ModelLimit> limits = props.getModelLimits();
+        if (limits == null || limits.isEmpty() || modelName == null || modelName.isBlank()) {
+            return null;
+        }
+        String name = modelName.trim().toLowerCase(Locale.ROOT);
+        String qualified = (providerName == null ? "" : providerName.trim().toLowerCase(Locale.ROOT)) + ":" + name;
+
+        AgentScopeProperties.ModelLimit best = null;
+        int bestPrefixLen = -1;
+        for (var entry : limits.entrySet()) {
+            if (entry.getKey() == null || entry.getValue() == null) {
+                continue;
+            }
+            String key = entry.getKey().trim().toLowerCase(Locale.ROOT);
+            if (key.isEmpty()) {
+                continue;
+            }
+            if (key.equals(qualified)) {
+                return entry.getValue();
+            }
+            if (key.equals(name)) {
+                // 精确匹配模型名：记住它，但仍让 qualified 精确匹配有机会胜出
+                best = entry.getValue();
+                bestPrefixLen = Integer.MAX_VALUE;
+                continue;
+            }
+            if (key.endsWith("*")) {
+                String prefix = key.substring(0, key.length() - 1);
+                if (!prefix.isEmpty() && name.startsWith(prefix)
+                        && bestPrefixLen != Integer.MAX_VALUE && prefix.length() > bestPrefixLen) {
+                    best = entry.getValue();
+                    bestPrefixLen = prefix.length();
+                }
+            }
+        }
+        return best;
+    }
+
+    @SafeVarargs
+    private static <T> T firstNonNull(T... values) {
+        for (T v : values) {
+            if (v != null) {
+                return v;
+            }
+        }
+        return null;
     }
 
     /**

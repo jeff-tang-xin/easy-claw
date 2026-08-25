@@ -10,4 +10,7 @@ import java.util.List;
 public interface SessionRepository extends JpaRepository<SessionEntity, String> {
     List<SessionEntity> findByWorkspaceId(String workspaceId);
     List<SessionEntity> findByWorkspaceIdOrderByCreatedAtDesc(String workspaceId);
+
+    /** 归属校验：会话是否确实属于该工作区（防止跨工作区读历史 / 停他人回合） */
+    boolean existsByIdAndWorkspaceId(String id, String workspaceId);
 }

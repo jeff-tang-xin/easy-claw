@@ -8,6 +8,7 @@ package com.xinl.easyclaw.agent.domain;
  *   <li>reasoning - 推理过程增量</li>
  *   <li>text - 回复正文增量</li>
  *   <li>tool - 工具调用开始（content 为工具名）</li>
+ *   <li>file_changed - 工作区文件被写类工具修改（content 为相对路径）</li>
  *   <li>subagent - 子 Agent 开始工作（content 为子 Agent 名称）</li>
  *   <li>context - 上下文状态（content 为 JSON：消息数/token/是否已压缩）</li>
  *   <li>end - 回复完成</li>
@@ -62,6 +63,19 @@ public record StreamEvent(
         return new StreamEvent("tool_end", toolName);
     }
 
+    /**
+     * 工作区文件发生变更（content 为相对工作区根目录的路径，'/' 分隔）。
+     * <p>
+     * 由写类工具（write_file / edit_file 等）成功执行后推送，供前端刷新文件树与
+     * 已打开的预览标签页，避免用户必须手动点「刷新」才能看到 Agent 的改动。
+     * <p>
+     * 只携带路径而不携带文件内容：内容仍走 {@code /api/workspaces/{id}/file-content}
+     * 按需拉取，既复用了该端点的沙箱校验与大小截断，也避免把大文件塞进 WS 帧。
+     */
+    public static StreamEvent fileChanged(String relativePath) {
+        return new StreamEvent("file_changed", relativePath);
+    }
+
     public static StreamEvent subagent(String agentName) {
         return new StreamEvent("subagent", agentName);
     }
@@ -69,6 +83,30 @@ public record StreamEvent(
     /** 子 Agent 输出增量（content 编码：agentName + \u0001 + delta） */
     public static StreamEvent subagentText(String agentName, String delta) {
         return new StreamEvent("subagent_text", agentName + "\u0001" + delta);
+    }
+
+    /** 子 Agent 思考增量（content 编码：agentName + \u0001 + delta） */
+    public static StreamEvent subagentReasoning(String agentName, String delta) {
+        return new StreamEvent("subagent_reasoning", agentName + "\u0001" + delta);
+    }
+
+    /** 子 Agent 开始调用工具（content 编码：agentName + \u0001 + toolName） */
+    public static StreamEvent subagentTool(String agentName, String toolName) {
+        return new StreamEvent("subagent_tool", agentName + "\u0001" + toolName);
+    }
+
+    /** 子 Agent 工具入参增量（content 编码：agentName + \u0001 + delta） */
+    public static StreamEvent subagentToolArgs(String agentName, String delta) {
+        return new StreamEvent("subagent_tool_args", agentName + "\u0001" + delta);
+    }
+
+    /**
+     * 子 Agent 工具执行结果（content 编码：agentName + \u0001 + state + \u0001 + result）。
+     * state 取值同主流程（SUCCESS / ERROR 等），供前端按状态着色。
+     */
+    public static StreamEvent subagentToolResult(String agentName, String state, String result) {
+        return new StreamEvent("subagent_tool_result",
+                agentName + "\u0001" + state + "\u0001" + result);
     }
 
     /** 子 Agent 结束运行（配套 subagent 事件；content 为子 Agent 名） */

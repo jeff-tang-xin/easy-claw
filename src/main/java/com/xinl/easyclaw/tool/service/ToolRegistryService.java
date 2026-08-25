@@ -283,6 +283,20 @@ public class ToolRegistryService {
                 .orElse(true);
     }
 
+    /**
+     * 工具名是否已注册（框架内置或 DB 中登记过）。
+     * <p>用于确认端点的白名单校验：拒绝把未知工具名写进永久授权规则。
+     */
+    public boolean isRegistered(String toolName) {
+        if (toolName == null || toolName.isBlank()) {
+            return false;
+        }
+        if (ALL_FRAMEWORK_TOOLS.contains(toolName)) {
+            return true;
+        }
+        return toolService.findByName(toolName).isPresent();
+    }
+
     private String toJson(List<ToolParamDef> params) {
         Map<String, Object> root = new LinkedHashMap<>();
         root.put("type", "object");

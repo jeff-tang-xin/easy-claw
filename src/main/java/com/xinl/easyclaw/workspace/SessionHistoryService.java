@@ -24,10 +24,15 @@ public class SessionHistoryService {
 
     private static final Logger log = LoggerFactory.getLogger(SessionHistoryService.class);
 
-    private final SessionRepository sessionRepository;
+    /** 会话标题长度上限：够长以容纳一句摘要，又不至于撑破列表布局与数据库列 */
+    private static final int MAX_TITLE_LENGTH = 100;
 
-    public SessionHistoryService(SessionRepository sessionRepository) {
+    private final SessionRepository sessionRepository;
+    private final WorkspaceManager workspaceManager;
+
+    public SessionHistoryService(SessionRepository sessionRepository, WorkspaceManager workspaceManager) {
         this.sessionRepository = sessionRepository;
+        this.workspaceManager = workspaceManager;
     }
 
     /**
@@ -35,6 +40,41 @@ public class SessionHistoryService {
      */
     public List<SessionEntity> listSessions(String workspaceId) {
         return sessionRepository.findByWorkspaceIdOrderByCreatedAtDesc(workspaceId);
+    }
+
+    /**
+     * 重命名会话。
+     * <p>
+     * 标题会去除首尾空白并截断到 {@value #MAX_TITLE_LENGTH} 字符；空白标题视为非法输入而拒绝，
+     * 避免会话在列表里变成不可点选的空条目。
+     * 同时同步 {@code WorkspaceManager} 的会话缓存，否则缓存里的旧标题会在后续读取时把改名覆盖回去。
+     *
+     * @return 重命名后的实体
+     * @throws WorkspaceExceptions.SessionNotFoundException 会话不存在
+     * @throws IllegalArgumentException                     标题为空或仅含空白
+     */
+    public SessionEntity renameSession(String workspaceId, String sessionId, String rawTitle) {
+        String title = normalizeTitle(rawTitle);
+        SessionEntity entity = sessionRepository.findById(sessionId)
+                .orElseThrow(() -> new WorkspaceExceptions.SessionNotFoundException("会话未找到: " + sessionId));
+        // 校验归属，防止越过工作区边界改动他人会话
+        if (!entity.getWorkspaceId().equals(workspaceId)) {
+            throw new WorkspaceExceptions.SessionNotFoundException(
+                    "会话 " + sessionId + " 不属于工作区 " + workspaceId);
+        }
+        entity.setTitle(title);
+        SessionEntity saved = sessionRepository.save(entity);
+        workspaceManager.updateSessionTitle(sessionId, title);
+        log.info("会话已重命名: {} → 「{}」（工作区 {}）", sessionId, title, workspaceId);
+        return saved;
+    }
+
+    private String normalizeTitle(String rawTitle) {
+        if (rawTitle == null || rawTitle.isBlank()) {
+            throw new IllegalArgumentException("会话标题不能为空");
+        }
+        String trimmed = rawTitle.trim();
+        return trimmed.length() > MAX_TITLE_LENGTH ? trimmed.substring(0, MAX_TITLE_LENGTH) : trimmed;
     }
 
     /**

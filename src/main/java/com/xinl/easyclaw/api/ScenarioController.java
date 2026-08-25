@@ -62,9 +62,14 @@ public class ScenarioController {
         return ResponseEntity.ok(scenarioService.activeScenario(workspaceId));
     }
 
-    /** 可用于编排的子 Agent 名单（全局 subagents 目录） */
+    /**
+     * 可用于编排的子 Agent 名单（全局 + 工作区级合并，与运行时实际加载口径一致）
+     *
+     * @param workspaceId 可选；传入时附加该工作区级成员
+     */
     @GetMapping("/subagents")
-    public List<Map<String, String>> subagents() {
-        return scenarioService.availableSubagents();
+    public List<Map<String, String>> subagents(
+            @RequestParam(required = false) String workspaceId) {
+        return scenarioService.availableSubagents(workspaceId);
     }
 }

@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.scenario.service;
 
-import com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder;
+import com.xinl.easyclaw.agent.orchestrator.WorkflowParseResult;
+import com.xinl.easyclaw.agent.orchestrator.WorkflowParser;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.scenario.repository.ScenarioRepository;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
@@ -16,6 +17,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -153,34 +155,58 @@ public class ScenarioService {
     }
 
     /**
-     * 可用于编排的子 Agent 名单（全局目录 ~/.easyClaw/subagents 下的声明文件名）
+     * 可用于编排的子 Agent 名单
+     * <p>
+     * 与 {@code SubagentLoader.loadMerged} 保持一致：全局目录 + 当前工作区目录合并，
+     * 工作区级同名覆盖全局级。修复此前只扫全局目录、导致工作区级子 Agent 在编排 UI
+     * 中不可见（但运行时真实存在）的不一致问题。
+     *
+     * @param workspaceId 工作区 ID（为空时只返回全局成员）
      */
-    public List<Map<String, String>> availableSubagents() {
+    public List<Map<String, String>> availableSubagents(String workspaceId) {
+        Map<String, String> merged = new LinkedHashMap<>();
+        collectSubagents(SystemHomePaths.globalSubagentsDir(), "global", merged);
+        if (workspaceId != null && !workspaceId.isBlank()) {
+            collectSubagents(workspaceManager.subagentsDir(workspaceId), "workspace", merged);
+        }
         List<Map<String, String>> result = new ArrayList<>();
-        Path dir = SystemHomePaths.globalSubagentsDir();
-        if (!Files.isDirectory(dir)) {
-            return result;
-        }
-        try (Stream<Path> files = Files.list(dir)) {
-            files.filter(p -> p.getFileName().toString().endsWith(".md"))
-                    .sorted()
-                    .forEach(p -> result.add(Map.of(
-                            "name", p.getFileName().toString().replaceAll("\\.md$", ""))));
-        } catch (IOException e) {
-            log.warn("读取全局子 Agent 目录失败: {}", e.getMessage());
-        }
+        merged.forEach((name, scope) -> result.add(Map.of("name", name, "scope", scope)));
         return result;
     }
 
-    /** team 模式必须带至少一个合法步骤（single 模式忽略 workflow） */
-    private void validateWorkflow(ScenarioEntity scenario) {
-        if (!"team".equals(scenario.getMode())) {
+    /** 扫描目录下的 .md 声明文件名，写入 merged（后写入的 scope 覆盖先前的） */
+    private void collectSubagents(Path dir, String scope, Map<String, String> merged) {
+        if (dir == null || !Files.isDirectory(dir)) {
             return;
         }
-        List<OrchestrationPromptBuilder.WorkflowStep> steps =
-                OrchestrationPromptBuilder.parseWorkflow(scenario.getWorkflow());
-        if (steps.isEmpty()) {
-            throw new IllegalArgumentException("team 模式需要至少一个工作流步骤（subagent 不能为空）");
+        try (Stream<Path> files = Files.list(dir)) {
+            files.filter(p -> Files.isRegularFile(p) && p.getFileName().toString().endsWith(".md"))
+                    .sorted()
+                    .forEach(p -> merged.put(
+                            p.getFileName().toString().replaceAll("\\.md$", ""), scope));
+        } catch (IOException e) {
+            log.warn("读取子 Agent 目录失败: dir={}, {}", dir, e.getMessage());
+        }
+    }
+
+    /**
+     * 校验工作流：team 模式必须带至少一个合法步骤，且 JSON 必须通过 schema 校验。
+     * <p>
+     * 修复此前「JSON 语法错误也报成 subagent 不能为空」的误导性文案：
+     * 现在语法错误、未知字段、类型错误都会带下标精确报出。
+     */
+    private void validateWorkflow(ScenarioEntity scenario) {
+        boolean team = "team".equals(scenario.getMode());
+        WorkflowParseResult parsed = WorkflowParser.parse(scenario.getWorkflow());
+
+        if (!parsed.ok()) {
+            throw new IllegalArgumentException("工作流配置非法：" + parsed.errorMessage());
+        }
+        if (team && !parsed.hasSteps()) {
+            throw new IllegalArgumentException("team 模式需要至少一个工作流步骤");
+        }
+        for (String warning : parsed.warnings()) {
+            log.warn("场景[{}] 工作流告警: {}", scenario.getName(), warning);
         }
     }
 

@@ -20,6 +20,19 @@ public class AgentScopeProperties {
     /** 多 Provider 配置表：key 为 provider 名（如 deepseek、openai） */
     private Map<String, ProviderConfig> providers = new LinkedHashMap<>();
 
+    /**
+     * 按「模型名」粒度的生成参数上限表：key 为模型名或前缀通配（如 {@code glm-4-flash}、{@code kimi-*}）。
+     * <p>
+     * 适用于 route / 网关型 provider：同一个 base-url + api-key 后面挂着 kimi、豆包、
+     * deepseek、glm 等多个模型，而各家的单次输出 token 上限差异极大
+     * （glm-4-flash 仅 4095，deepseek-reasoner 可达 32K+）。若统一按最大值下发，
+     * 上限低的模型会被服务端直接拒绝（HTTP 400 max_tokens 超限）；
+     * 若统一按最小值下发，大文件写入的 tool_call arguments 又会被截断。
+     * <p>
+     * 生效优先级：模型名精确匹配 &gt; 模型名前缀通配（最长优先）&gt; provider 级配置 &gt; 全局 model 配置。
+     */
+    private Map<String, ModelLimit> modelLimits = new LinkedHashMap<>();
+
     /** Agent 运行时配置（迭代、超时等） */
     private Agent agent = new Agent();
 
@@ -37,6 +50,14 @@ public class AgentScopeProperties {
 
     public void setProviders(Map<String, ProviderConfig> providers) {
         this.providers = providers;
+    }
+
+    public Map<String, ModelLimit> getModelLimits() {
+        return modelLimits;
+    }
+
+    public void setModelLimits(Map<String, ModelLimit> modelLimits) {
+        this.modelLimits = modelLimits;
     }
 
     /**
@@ -58,6 +79,25 @@ public class AgentScopeProperties {
         private String defaultModel = "gpt-4o-mini";
         private Double temperature = 0.7;
         private Boolean stream = true;
+
+        /**
+         * 单次响应最大输出 token 数。
+         * <p>
+         * 必须显式配置：不配置时服务端默认上限（常见 4096）会把长 tool_call arguments
+         * 的 JSON 直接截断，累积后不是合法 JSON 对象，被上游
+         * {@code ToolCallBuilder.build()} 静默降级为 {@code {}}，
+         * 表现为「未找到 path/content/old_string 参数」。
+         */
+        private Integer maxTokens = 32768;
+
+        /**
+         * 是否允许模型在一轮内并行发起多个 tool_call。
+         * <p>
+         * 置为 false：上游流式分片累积器用「最后一个 tool_call key」兜底路由无名分片
+         * （{@code ToolCallsAccumulator.determineKey} → {@code lastToolCallKey}），
+         * 多个 tool_call 的 arguments 分片交错到达时会串台，导致 JSON 破损、参数丢失。
+         */
+        private Boolean parallelToolCalls = false;
 
         public String getProvider() {
             return provider;
@@ -114,6 +154,22 @@ public class AgentScopeProperties {
         public void setStream(Boolean stream) {
             this.stream = stream;
         }
+
+        public Integer getMaxTokens() {
+            return maxTokens;
+        }
+
+        public void setMaxTokens(Integer maxTokens) {
+            this.maxTokens = maxTokens;
+        }
+
+        public Boolean getParallelToolCalls() {
+            return parallelToolCalls;
+        }
+
+        public void setParallelToolCalls(Boolean parallelToolCalls) {
+            this.parallelToolCalls = parallelToolCalls;
+        }
     }
 
     /**
@@ -124,6 +180,12 @@ public class AgentScopeProperties {
         private String baseUrl;
         private String modelName;
         private Double temperature;
+
+        /** 该 Provider 的单次最大输出 token（null 表示继承全局 model.max-tokens） */
+        private Integer maxTokens;
+
+        /** 该 Provider 是否允许并行 tool_call（null 表示继承全局 model.parallel-tool-calls） */
+        private Boolean parallelToolCalls;
 
         public String getApiKey() {
             return apiKey;
@@ -156,6 +218,62 @@ public class AgentScopeProperties {
         public void setTemperature(Double temperature) {
             this.temperature = temperature;
         }
+
+        public Integer getMaxTokens() {
+            return maxTokens;
+        }
+
+        public void setMaxTokens(Integer maxTokens) {
+            this.maxTokens = maxTokens;
+        }
+
+        public Boolean getParallelToolCalls() {
+            return parallelToolCalls;
+        }
+
+        public void setParallelToolCalls(Boolean parallelToolCalls) {
+            this.parallelToolCalls = parallelToolCalls;
+        }
+    }
+
+    /**
+     * 单个模型（或模型名通配前缀）的生成参数上限。
+     * <p>
+     * 只覆盖需要区别对待的项，未设置的字段继承 provider 级 / 全局配置。
+     */
+    public static class ModelLimit {
+        /** 单次最大输出 token */
+        private Integer maxTokens;
+
+        /** 是否允许并行 tool_call */
+        private Boolean parallelToolCalls;
+
+        /** 该模型是否完全不支持 max_tokens 参数（部分推理模型会拒绝该字段），true 时不下发 */
+        private Boolean maxTokensUnsupported;
+
+        public Integer getMaxTokens() {
+            return maxTokens;
+        }
+
+        public void setMaxTokens(Integer maxTokens) {
+            this.maxTokens = maxTokens;
+        }
+
+        public Boolean getParallelToolCalls() {
+            return parallelToolCalls;
+        }
+
+        public void setParallelToolCalls(Boolean parallelToolCalls) {
+            this.parallelToolCalls = parallelToolCalls;
+        }
+
+        public Boolean getMaxTokensUnsupported() {
+            return maxTokensUnsupported;
+        }
+
+        public void setMaxTokensUnsupported(Boolean maxTokensUnsupported) {
+            this.maxTokensUnsupported = maxTokensUnsupported;
+        }
     }
 
     public Agent getAgent() {
@@ -187,6 +305,49 @@ public class AgentScopeProperties {
 
         /** 单次工具调用超时（分钟）。子 Agent 通过 agent_spawn 同步调用，必须大于子 Agent 任务耗时 */
         private int toolTimeoutMinutes = 30;
+
+        /**
+         * 工具确认等待超时（分钟）。用户迟迟不点确认/拒绝（关页面、切走、误触）时，
+         * 超过该时长自动取消本轮，释放 SSE 连接与会话内存状态。0 或负数表示不超时。
+         */
+        private int confirmTimeoutMinutes = 10;
+
+        /**
+         * SSE 连接超时（分钟）。0 表示永不超时（不推荐：存在「流已终止但连接不关」的路径，
+         * 会让异步请求与会话状态常驻）。应大于单回合最长耗时 + confirmTimeoutMinutes。
+         */
+        private int sseTimeoutMinutes = 60;
+
+        /** 单次请求附件数量上限，入口即拒，避免超量 base64 进入内存 */
+        private int maxAttachments = 20;
+
+        /** 单次请求附件 base64 总长度上限（字节），默认 32MB */
+        private long maxAttachmentBytes = 32L * 1024 * 1024;
+
+        /**
+         * 同时活跃的 SSE 连接数上限。每条连接背后挂着一个 Agent 回合与一份会话内存，
+         * 不限流则单个客户端反复调 /stream 即可耗尽容器工作线程。0 或负数表示不限制。
+         */
+        private int maxSseConnections = 64;
+
+        /**
+         * 同一会话内同一子 Agent 的最大调度次数。超过即视为循环调度并 interrupt。
+         * 这是策略参数而非实现细节，故可配置（原先硬编码在事件分发逻辑中）。
+         */
+        private int maxSameSubagentCalls = 3;
+
+        /** 同一工具连续失败次数阈值，达到即向模型注入「停止重试」提示 */
+        private int maxConsecutiveToolFailures = 2;
+
+        /**
+         * Workspace Agent 缓存上限。每个 WorkspaceContext 持有 HarnessAgent
+         * （模型客户端 + 工具集 + MCP 连接），无上限则句柄与内存随工作区数线性增长。
+         * 超限时按 lastAccessed 最旧优先驱逐并 close。0 或负数表示不限制。
+         */
+        private int maxCachedWorkspaces = 32;
+
+        /** Workspace Agent 缓存空闲驱逐时长（分钟）：超过该时长未访问即关闭释放资源 */
+        private int workspaceIdleMinutes = 120;
 
         /** 单条 shell 命令超时（秒）。编译、npm install 等长命令需要足够时间 */
         private int shellTimeoutSeconds = 300;
@@ -239,6 +400,78 @@ public class AgentScopeProperties {
 
         public void setToolTimeoutMinutes(int toolTimeoutMinutes) {
             this.toolTimeoutMinutes = toolTimeoutMinutes;
+        }
+
+        public int getConfirmTimeoutMinutes() {
+            return confirmTimeoutMinutes;
+        }
+
+        public void setConfirmTimeoutMinutes(int confirmTimeoutMinutes) {
+            this.confirmTimeoutMinutes = confirmTimeoutMinutes;
+        }
+
+        public int getSseTimeoutMinutes() {
+            return sseTimeoutMinutes;
+        }
+
+        public void setSseTimeoutMinutes(int sseTimeoutMinutes) {
+            this.sseTimeoutMinutes = sseTimeoutMinutes;
+        }
+
+        public int getMaxAttachments() {
+            return maxAttachments;
+        }
+
+        public void setMaxAttachments(int maxAttachments) {
+            this.maxAttachments = maxAttachments;
+        }
+
+        public long getMaxAttachmentBytes() {
+            return maxAttachmentBytes;
+        }
+
+        public void setMaxAttachmentBytes(long maxAttachmentBytes) {
+            this.maxAttachmentBytes = maxAttachmentBytes;
+        }
+
+        public int getMaxSameSubagentCalls() {
+            return maxSameSubagentCalls;
+        }
+
+        public void setMaxSameSubagentCalls(int maxSameSubagentCalls) {
+            this.maxSameSubagentCalls = maxSameSubagentCalls;
+        }
+
+        public int getMaxConsecutiveToolFailures() {
+            return maxConsecutiveToolFailures;
+        }
+
+        public void setMaxConsecutiveToolFailures(int maxConsecutiveToolFailures) {
+            this.maxConsecutiveToolFailures = maxConsecutiveToolFailures;
+        }
+
+        public int getMaxCachedWorkspaces() {
+            return maxCachedWorkspaces;
+        }
+
+        public void setMaxCachedWorkspaces(int maxCachedWorkspaces) {
+            this.maxCachedWorkspaces = maxCachedWorkspaces;
+        }
+
+        public int getWorkspaceIdleMinutes() {
+            return workspaceIdleMinutes;
+        }
+
+        public void setWorkspaceIdleMinutes(int workspaceIdleMinutes) {
+            this.workspaceIdleMinutes = workspaceIdleMinutes;
+        }
+
+        public int getMaxSseConnections() {
+            return maxSseConnections;
+        }
+
+        public void setMaxSseConnections(int maxSseConnections) {
+            this.maxSseConnections = maxSseConnections;
         }
 
         public int getShellTimeoutSeconds() {

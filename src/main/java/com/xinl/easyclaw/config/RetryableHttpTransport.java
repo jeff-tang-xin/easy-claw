@@ -16,8 +16,13 @@ import java.util.concurrent.CopyOnWriteArrayList;
 /**
  * 给任何 {@link HttpTransport} 加上 429/5xx 自动重试能力。
  * <p>
- * 退避策略：500ms → 1s → 2s → 4s → 8s → 16s → 32s → 64s → 128s → 256s
- * 共 10 次，总等待约 511.5s（≈8.5min）。
+ * 退避策略：最多重试 {@code MAX_RETRIES} 次（可由构造器参数 {@code maxRetries} 覆盖），
+ * 首次等待 {@code INITIAL_BACKOFF}（可由构造器参数 {@code initialBackoff} 覆盖），
+ * 之后按 2 的幂指数增长，单次等待上限为 {@code MAX_BACKOFF}。
+ * <p>
+ * 非流式 {@link #execute(HttpRequest)} 在上述指数退避基础上额外叠加 ±10% 抖动，
+ * 避免多个请求同时重试造成惊群；流式 {@link #stream(HttpRequest)} 由
+ * {@link Retry#backoff(long, Duration)} 自带抖动。
  * <p>
  * 同时解析 {@code Retry-After} 响应头，若服务端明确指定了等待时间则优先使用。
  */
@@ -46,6 +51,12 @@ public class RetryableHttpTransport implements HttpTransport {
         ALL.add(this);
     }
 
+    /**
+     * @deprecated 进程级中止会误伤其他会话的重试。请改用
+     *         {@link RetryScope#abort(String)} 按会话中止。仅保留给无 sessionId 上下文的
+     *         全局关停场景（如应用 shutdown）。
+     */
+    @Deprecated
     public static void abortAll() {
         for (RetryableHttpTransport t : ALL) {
             t.aborted = true;
@@ -53,6 +64,10 @@ public class RetryableHttpTransport implements HttpTransport {
         log.info("已中止所有 HTTP 重试 (共 {} 个 transport)", ALL.size());
     }
 
+    /**
+     * @deprecated 同 {@link #abortAll()}，请改用 {@link RetryScope#clear(String)}。
+     */
+    @Deprecated
     public static void resetAll() {
         for (RetryableHttpTransport t : ALL) {
             t.aborted = false;
@@ -68,7 +83,8 @@ public class RetryableHttpTransport implements HttpTransport {
                 return delegate.execute(request);
             } catch (HttpTransportException e) {
                 lastException = e;
-                if (!isRetryable(e) || attempt == maxRetries) {
+                if (!isRetryable(e) || attempt == maxRetries
+                        || isAborted(RetryScope.currentSessionId())) {
                     throw e;
                 }
                 attempt++;
@@ -88,28 +104,43 @@ public class RetryableHttpTransport implements HttpTransport {
 
     @Override
     public Flux<String> stream(HttpRequest request) {
-        Retry retrySpec = Retry.backoff(maxRetries, initialBackoff)
-                .maxBackoff(MAX_BACKOFF)
-                .filter(t -> !aborted && isRetryable(t))
-                .doBeforeRetry(signal -> {
-                    if (aborted) {
-                        throw new RuntimeException("请求已被用户取消");
-                    }
-                    Throwable t = signal.failure();
-                    long attempt = signal.totalRetries() + 1;
-                    if (t instanceof HttpTransportException hte) {
-                        log.warn("HTTP {} 流式请求限流/失败，第 {}/{} 次重试: {}",
-                                hte.getStatusCode(), attempt, maxRetries, hte.getMessage());
-                    } else {
-                        log.warn("流式请求失败，第 {}/{} 次重试: {}",
-                                attempt, maxRetries, t.getMessage());
-                    }
-                });
-        return delegate.stream(request).retryWhen(retrySpec);
+        // sessionId 从 Reactor Context 取（由 AgentService 在订阅时 contextWrite 注入）：
+        // 反应式链路会跨线程调度，ThreadLocal 在此不可靠
+        return Flux.deferContextual(ctx -> {
+            String sessionId = ctx.getOrDefault(RetryScope.CONTEXT_KEY, null);
+            Retry retrySpec = Retry.backoff(maxRetries, initialBackoff)
+                    .maxBackoff(MAX_BACKOFF)
+                    .filter(t -> !isAborted(sessionId) && isRetryable(t))
+                    .doBeforeRetry(signal -> {
+                        if (isAborted(sessionId)) {
+                            throw new RuntimeException("请求已被用户取消");
+                        }
+                        Throwable t = signal.failure();
+                        long attempt = signal.totalRetries() + 1;
+                        if (t instanceof HttpTransportException hte) {
+                            log.warn("HTTP {} 流式请求限流/失败，第 {}/{} 次重试: {}",
+                                    hte.getStatusCode(), attempt, maxRetries, hte.getMessage());
+                        } else {
+                            log.warn("流式请求失败，第 {}/{} 次重试: {}",
+                                    attempt, maxRetries, t.getMessage());
+                        }
+                    });
+            return delegate.stream(request).retryWhen(retrySpec);
+        });
+    }
+
+    /**
+     * 是否应放弃重试：会话级标记优先；{@code aborted} 实例标记仅为
+     * {@link #abort()} 单实例调用与无 sessionId 上下文时的兜底。
+     */
+    private boolean isAborted(String sessionId) {
+        return aborted || RetryScope.isAborted(sessionId);
     }
 
     @Override
     public void close() {
+        // 先从静态列表注销，避免 delegate.close() 抛异常导致实例（及其底层连接池）永久泄漏
+        ALL.remove(this);
         delegate.close();
     }
 

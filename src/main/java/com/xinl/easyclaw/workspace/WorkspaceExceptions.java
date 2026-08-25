@@ -31,4 +31,10 @@ public class WorkspaceExceptions {
             super(message);
         }
     }
+
+    public static class SessionNotFoundException extends RuntimeException {
+        public SessionNotFoundException(String message) {
+            super(message);
+        }
+    }
 }

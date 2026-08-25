@@ -13,6 +13,23 @@ import {useEffect, useReducer} from 'react';
 
 export type SegmentType = 'text' | 'reasoning' | 'tool' | 'subagent' | 'note';
 
+/** 子 Agent 内部的一步：正文 / 思考 / 工具调用，按到达顺序线性排列 */
+export interface SubStep {
+  kind: 'text' | 'reasoning' | 'tool';
+  /** 正文或思考内容 */
+  content?: string;
+  /** 工具名（kind==='tool'） */
+  name?: string;
+  /** 工具入参（JSON 字符串） */
+  args?: string;
+  /** 工具结果 */
+  result?: string;
+  /** 工具结果状态，如 SUCCESS / ERROR */
+  state?: string;
+  /** 是否仍在执行 */
+  running?: boolean;
+}
+
 export interface Segment {
   type: SegmentType;
   /** 正文 / 思考 / 子 Agent 正文 */
@@ -25,6 +42,12 @@ export interface Segment {
   result?: string;
   /** 是否正在执行（用于渲染 spinner / 展开态） */
   running?: boolean;
+  /** 开始时间戳（ms）。子 Agent / 工具节点用于计算耗时 */
+  startedAt?: number;
+  /** 结束时间戳（ms） */
+  endedAt?: number;
+  /** 子 Agent 内部步骤（type==='subagent'），按时间顺序 */
+  steps?: SubStep[];
 }
 
 export interface ChatMessage {

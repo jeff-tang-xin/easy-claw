@@ -37,10 +37,32 @@ agentscope:
     base-url: ${AGENTSCOPE_BASE_URL:}
     temperature: 0.3
     stream: true
+    # 单次响应最大输出 token：防止长 tool_call arguments（如 write_file 的大 content）
+    # 被服务端默认上限截断 → JSON 不合法 → 上游降级为 {} → 报「未找到 path/content 参数」
+    # 这里只是「全局兜底值」，取所有模型都能接受的保守值；
+    # 具体模型的真实上限在下方 model-limits 中按模型名覆盖（route 网关多模型必读）
+    max-tokens: ${AGENTSCOPE_MAX_TOKENS:8192}
+    # 禁用并行 tool_call：避免多路 arguments 流式分片交错串台，破坏 JSON
+    parallel-tool-calls: false
   agent:
     max-iters: 50
     model-timeout-minutes: 10
-    tool-timeout-minutes: 30
+    tool-timeout-minutes: 2
+    # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放 SSE 与会话状态
+    confirm-timeout-minutes: ${AGENTSCOPE_CONFIRM_TIMEOUT_MINUTES:10}
+    # SSE 连接超时（分钟），需大于「单回合最长耗时 + confirm-timeout-minutes」
+    sse-timeout-minutes: ${AGENTSCOPE_SSE_TIMEOUT_MINUTES:60}
+    # 单请求附件数量 / base64 总体积上限（防止超大附件直接打满堆）
+    max-attachments: 20
+    max-attachment-bytes: 33554432
+    # 同时活跃 SSE 连接数上限：每条连接背后挂一个 Agent 回合，防止被反复调用打满线程池
+    max-sse-connections: ${AGENTSCOPE_MAX_SSE_CONNECTIONS:64}
+    # 循环护栏阈值（策略参数，原先硬编码在事件分发逻辑中）
+    max-same-subagent-calls: 3
+    max-consecutive-tool-failures: 2
+    # Workspace Agent 缓存驱逐：每个 context 持有模型客户端/工具集/MCP 连接，需上限 + 空闲回收
+    max-cached-workspaces: ${AGENTSCOPE_MAX_CACHED_WORKSPACES:32}
+    workspace-idle-minutes: ${AGENTSCOPE_WORKSPACE_IDLE_MINUTES:120}
     shell-timeout-seconds: 300
     max-shell-output-bytes: 200000
   providers:
@@ -73,6 +95,57 @@ agentscope:
       api-key: ${ZHIPU_API_KEY:}
       base-url: https://open.bigmodel.cn/api/paas/v4
       model-name: glm-4-flash
+
+  # ============================
+  # 按模型名的输出上限覆盖表（route / 网关型 provider 必需）
+  # ----------------------------
+  # 场景：一个 base-url + api-key 后面挂着 kimi、豆包、deepseek、glm 等多个模型，
+  #       各家单次输出 token 上限差异极大：
+  #         - 统一取大值 → 上限低的模型服务端直接 400（max_tokens 超限）
+  #         - 统一取小值 → 大文件 write_file 的 arguments JSON 被截断 → 参数丢失
+  # 匹配优先级：provider:model 精确 > model 精确 > 前缀通配（xxx*，最长优先）> providers.*.max-tokens > model.max-tokens
+  # 说明：max-tokens-unsupported: true 表示该模型完全不接受 max_tokens 字段，届时不下发该参数。
+  # ============================
+  model-limits:
+    # —— DeepSeek ——（deepseek-chat 8K；reasoner 含思维链，上限更高）
+    deepseek-chat:
+      max-tokens: 8192
+    deepseek-reasoner:
+      max-tokens: 32768
+    deepseek-v3*:
+      max-tokens: 8192
+    # —— Kimi / Moonshot ——（8k 型号输出上限最小，必须单独压低）
+    moonshot-v1-8k:
+      max-tokens: 4096
+    moonshot-v1-32k:
+      max-tokens: 16384
+    moonshot-v1-128k:
+      max-tokens: 32768
+    kimi-k2*:
+      max-tokens: 32768
+    kimi-*:
+      max-tokens: 16384
+    # —— 智谱 GLM ——（glm-4-flash 输出上限 4095，最容易被踩）
+    glm-4-flash:
+      max-tokens: 4095
+    glm-4-plus:
+      max-tokens: 8192
+    glm-4.5*:
+      max-tokens: 32768
+    glm-*:
+      max-tokens: 8192
+    # —— 豆包 / 火山方舟 ——
+    doubao-*:
+      max-tokens: 16384
+    ark-code-latest:
+      max-tokens: 32768
+    # —— 通义千问 ——
+    qwen-plus:
+      max-tokens: 16384
+    qwen-max:
+      max-tokens: 8192
+    qwen*:
+      max-tokens: 8192
 
 # ============================
 # Workspace 安全配置

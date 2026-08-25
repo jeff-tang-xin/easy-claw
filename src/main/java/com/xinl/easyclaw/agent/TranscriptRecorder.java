@@ -82,17 +82,20 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 subagentName = evt.content();
                 subBuf.setLength(0);
             }
-            case "subagent_text" -> {
+            case "subagent_text" -> appendSubagent(evt.content(), "");
+            // 结构化子 Agent 事件：转录里退化为带标记的纯文本，保证历史回放仍可读
+            case "subagent_reasoning" -> appendSubagent(evt.content(), "🧠 ");
+            case "subagent_tool" -> appendSubagent(evt.content(), "\n🔧 调用: ");
+            case "subagent_tool_args" -> appendSubagent(evt.content(), "");
+            case "subagent_tool_result" -> {
+                // 编码为 name \u0001 state \u0001 result，转录只保留状态摘要
                 String c = evt.content();
                 int i = c == null ? -1 : c.indexOf(SEP);
                 if (i >= 0) {
-                    String name = c.substring(0, i);
-                    String delta = c.substring(i + 1);
-                    if (subagentName == null || !subagentName.equals(name)) {
-                        flushSubagent();
-                        subagentName = name;
-                    }
-                    subBuf.append(delta);
+                    String rest = c.substring(i + 1);
+                    int j = rest.indexOf(SEP);
+                    String state = j >= 0 ? rest.substring(0, j) : rest;
+                    appendSubagent(c.substring(0, i) + SEP + "\n📤 结果(" + state + ")", "");
                 }
             }
             case "subagent_end" -> flushSubagent();
@@ -108,8 +111,26 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
         }
     }
 
-    private void flushText() {
-        if (thinkBuf.length() > 0) {
+    /**
+     * 追加一段子 Agent 增量。content 编码为 {@code name \u0001 delta}；
+     * prefix 用于把结构化事件（思考/工具）在纯文本转录里标记出来。
+     * 切换子 Agent 时先固化上一段，避免两个子 Agent 的输出串到一条记录里。
+     */
+    private void appendSubagent(String content, String prefix) {
+        int i = content == null ? -1 : content.indexOf(SEP);
+        if (i < 0) {
+            return;
+        }
+        String name = content.substring(0, i);
+        String delta = content.substring(i + 1);
+        if (subagentName == null || !subagentName.equals(name)) {
+            flushSubagent();
+            subagentName = name;
+        }
+        subBuf.append(prefix).append(delta);
+    }
+
+    private void flushText() {        if (thinkBuf.length() > 0) {
             BoxMessage bm = new BoxMessage(BoxMessage.Type.THINKING, ++seq);
             bm.setContent(thinkBuf.toString());
             SessionTranscriptStore.append(sessionDir, bm);

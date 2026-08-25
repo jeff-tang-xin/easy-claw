@@ -126,6 +126,14 @@ public class SettingsService {
                         Object s = m.get("stream");
                         if (s instanceof Boolean b) target.setStream(b);
                     }
+                    if (m.containsKey("max-tokens")) {
+                        Object t = m.get("max-tokens");
+                        if (t instanceof Number n) target.setMaxTokens(n.intValue());
+                    }
+                    if (m.containsKey("parallel-tool-calls")) {
+                        Object t = m.get("parallel-tool-calls");
+                        if (t instanceof Boolean b) target.setParallelToolCalls(b);
+                    }
                 }
                 Object providers = agentscopeMap.get("providers");
                 if (providers instanceof Map) {
@@ -141,7 +149,29 @@ public class SettingsService {
                                 Object t = pv.get("temperature");
                                 if (t instanceof Number n) pc.setTemperature(n.doubleValue());
                             }
+                            if (pv.containsKey("max-tokens")) {
+                                Object t = pv.get("max-tokens");
+                                if (t instanceof Number n) pc.setMaxTokens(n.intValue());
+                            }
+                            if (pv.containsKey("parallel-tool-calls")) {
+                                Object t = pv.get("parallel-tool-calls");
+                                if (t instanceof Boolean b) pc.setParallelToolCalls(b);
+                            }
                             props.getProviders().put(e.getKey(), pc);
+                        }
+                    }
+                }
+                Object modelLimits = agentscopeMap.get("model-limits");
+                if (modelLimits instanceof Map) {
+                    Map<String, Object> lm = (Map<String, Object>) modelLimits;
+                    props.getModelLimits().clear();
+                    for (var e : lm.entrySet()) {
+                        if (e.getValue() instanceof Map<?, ?> lv) {
+                            AgentScopeProperties.ModelLimit ml = new AgentScopeProperties.ModelLimit();
+                            if (lv.get("max-tokens") instanceof Number n) ml.setMaxTokens(n.intValue());
+                            if (lv.get("parallel-tool-calls") instanceof Boolean b) ml.setParallelToolCalls(b);
+                            if (lv.get("max-tokens-unsupported") instanceof Boolean b) ml.setMaxTokensUnsupported(b);
+                            props.getModelLimits().put(e.getKey(), ml);
                         }
                     }
                 }

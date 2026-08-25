@@ -22,15 +22,19 @@ public class WorkspaceController {
     private final SessionHistoryService sessionHistoryService;
     private final AgentService agentService;
     private final WorkspaceSandbox sandbox;
+    /** PATH 刷新态由 Agent 装配器持有（Agent 重建时需重新注入 env） */
+    private final WorkspaceAgentBuilder agentBuilder;
 
     public WorkspaceController(WorkspaceManager workspaceManager,
                                SessionHistoryService sessionHistoryService,
                                AgentService agentService,
-                               WorkspaceSandbox sandbox) {
+                               WorkspaceSandbox sandbox,
+                               WorkspaceAgentBuilder agentBuilder) {
         this.workspaceManager = workspaceManager;
         this.sessionHistoryService = sessionHistoryService;
         this.agentService = agentService;
         this.sandbox = sandbox;
+        this.agentBuilder = agentBuilder;
     }
 
     public record CreateWorkspaceRequest(String name, String description, String path) {
@@ -40,6 +44,20 @@ public class WorkspaceController {
     }
 
     public record CreateSessionRequest(String title) {
+    }
+
+    /** 会话不存在 → 404，而不是让调用方看到裸 500 */
+    @ExceptionHandler(WorkspaceExceptions.SessionNotFoundException.class)
+    @ResponseStatus(org.springframework.http.HttpStatus.NOT_FOUND)
+    public Map<String, String> handleSessionNotFound(WorkspaceExceptions.SessionNotFoundException e) {
+        return Map.of("error", e.getMessage());
+    }
+
+    /** 标题非法（空白）→ 400 */
+    @ExceptionHandler(IllegalArgumentException.class)
+    @ResponseStatus(org.springframework.http.HttpStatus.BAD_REQUEST)
+    public Map<String, String> handleIllegalArgument(IllegalArgumentException e) {
+        return Map.of("error", e.getMessage());
     }
 
     public record FileEntryDto(String name, String path, boolean directory, long size, long modifiedAt) {
@@ -101,11 +119,20 @@ public class WorkspaceController {
         return entity;
     }
 
+    @PutMapping("/{id}/sessions/{sessionId}")
+    public SessionEntity renameSession(@PathVariable String id, @PathVariable String sessionId,
+                                      @RequestBody CreateSessionRequest req) {
+        return sessionHistoryService.renameSession(id, sessionId, req.title());
+    }
+
     @DeleteMapping("/{id}/sessions/{sessionId}")
     public void deleteSession(@PathVariable String id, @PathVariable String sessionId) {
         WorkspaceContext ws = workspaceManager.getWorkspace(id);
         if (ws != null) {
             sessionHistoryService.deleteSession(ws, sessionId);
+            // 会话被删除是明确的终止意图：强制驱逐内存状态（订阅、工具授权、计数器），
+            // 否则 sessionId 若被复用会继承旧的 turnAllowed 授权而绕过确认弹窗
+            agentService.releaseSession(sessionId);
         }
     }
 
@@ -296,7 +323,7 @@ public class WorkspaceController {
             p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
 
             if (output != null && !output.isBlank()) {
-                workspaceManager.setRefreshedPath(workspaceId, output.trim());
+                agentBuilder.setRefreshedPath(workspaceId, output.trim());
                 workspaceManager.rebuildAgent(workspaceId, null);
                 result.put("success", true);
                 result.put("pathPreview", output.length() > 200 ? output.substring(0, 200) + "..." : output);
@@ -316,7 +343,7 @@ public class WorkspaceController {
     @GetMapping("/{workspaceId}/cached-path")
     public ResponseEntity<Map<String, Object>> getCachedPath(@PathVariable String workspaceId) {
         Map<String, Object> result = new LinkedHashMap<>();
-        String path = workspaceManager.getRefreshedPath(workspaceId);
+        String path = agentBuilder.getRefreshedPath(workspaceId);
         if (path == null) {
             path = System.getenv("PATH");
         }

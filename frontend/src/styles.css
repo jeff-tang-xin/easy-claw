@@ -397,6 +397,20 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
 .session-del { opacity: 0; border: none; background: none; cursor: pointer; color: var(--text-tertiary); padding: 2px; border-radius: 4px; transition: all 0.12s; }
 .session-item:hover .session-del { opacity: 1; }
 .session-del:hover { color: #dc2626; background: rgba(220, 38, 38, 0.08); }
+.session-rename { opacity: 0; border: none; background: none; cursor: pointer; color: var(--text-tertiary); padding: 2px; border-radius: 4px; transition: all 0.12s; font-size: 13px; }
+.session-item:hover .session-rename { opacity: 1; }
+.session-rename:hover { color: var(--accent); background: rgba(59, 130, 246, 0.08); }
+.session-rename-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  padding: 1px 4px;
+  outline: none;
+}
 
 /* ============ 工具目录 ============ */
 .tools-panel { font-size: 13px; }
@@ -1135,6 +1149,72 @@ details.fold.loading summary::before {
 .file-entry.fc-image .file-entry-icon { color: #ec4899; }
 .file-entry.fc-binary .file-entry-icon { color: #94a3b8; }
 
+/* ---- 复制路径按钮（文件树条目内，hover 才显形，避免干扰列表阅读） ---- */
+.file-entry .file-entry-copy {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.file-entry:hover .file-entry-copy {
+  opacity: 1;
+}
+.file-entry .file-entry-copy:hover {
+  color: var(--accent);
+  background: rgba(59, 130, 246, 0.12);
+}
+/* 复制成功后保持可见，让 ✓ 反馈不被 hover 状态藏起来 */
+.file-entry .file-entry-copy:focus-visible {
+  opacity: 1;
+  outline: 1px solid var(--accent);
+}
+
+/* ---- 预览面板顶部路径栏 ---- */
+.file-path-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-secondary);
+  font-size: 11px;
+}
+.file-path-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono, monospace);
+  direction: rtl;
+  text-align: left;
+}
+.file-path-copy {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+.file-path-copy:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(59, 130, 246, 0.08);
+}
+
 /* ============ 文件预览模态框 ============ */
 .file-preview-modal {
   width: 720px;
@@ -1341,4 +1421,192 @@ details.fold.loading summary::before {
   display: flex;
   gap: 6px;
   margin-top: auto;
+}
+
+/* ============ 子 Agent 执行时间线 ============ */
+/* 说明：本项目调色板变量为 --panel(主表面) / --bg(次级表面) / --border / --text-secondary，
+   不存在 --bg-primary / --bg-secondary，故按语义映射：
+   --bg-primary -> var(--panel)，--bg-secondary -> var(--bg) */
+
+.sa-timeline {
+  position: relative;
+  padding-left: 26px;
+}
+.sa-timeline::before {
+  content: '';
+  position: absolute;
+  left: 9px;
+  top: 4px;
+  bottom: 4px;
+  width: 2px;
+  background: var(--border);
+  border-radius: 1px;
+}
+
+.sa-node {
+  position: relative;
+  margin-bottom: 10px;
+}
+.sa-node:last-child { margin-bottom: 0; }
+.sa-node::before {
+  content: '';
+  position: absolute;
+  left: -22px;
+  top: 6px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  box-sizing: border-box;
+  background: var(--panel);
+  border: 2px solid var(--border);
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+.sa-node.running::before {
+  border-color: #3b82f6;
+  animation: sa-pulse 1.5s infinite;
+}
+.sa-node.done::before {
+  border-color: #22c55e;
+  background: #22c55e;
+}
+.sa-node.error::before {
+  border-color: #ef4444;
+  background: #ef4444;
+}
+
+@keyframes sa-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.5); }
+  100% { box-shadow: 0 0 0 6px transparent; }
+}
+
+.sa-node-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+}
+.sa-node-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sa-node-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.sa-node-body {
+  margin-top: 6px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sa-node-body.collapsed { display: none; }
+
+.sa-group {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 8px 0;
+  background: var(--bg);
+}
+.sa-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  cursor: pointer;
+}
+.sa-group-badge {
+  font-size: 11px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.sa-typing {
+  display: inline-block;
+  width: 2px;
+  height: 14px;
+  background: currentColor;
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: sa-blink 1s step-end infinite;
+}
+@keyframes sa-blink {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0; }
+}
+
+/* ============ 子 Agent 内部线性步骤 ============ */
+.sa-step {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  margin: 4px 0;
+  background: var(--panel);
+  font-size: 12px;
+  overflow: hidden;
+}
+.sa-step.err { border-color: rgba(239, 68, 68, 0.5); }
+
+.sa-step-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text-secondary);
+}
+.sa-step-head:hover { background: var(--bg); }
+
+.sa-step-meta {
+  font-size: 11px;
+  opacity: 0.75;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.sa-step-body {
+  padding: 6px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+  color: var(--text-secondary);
+}
+.sa-step-body b {
+  display: block;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sa-step-text {
+  font-size: 13px;
+  line-height: 1.6;
+  margin: 4px 0;
+  color: var(--text);
 }

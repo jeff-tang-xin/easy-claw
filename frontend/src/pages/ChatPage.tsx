@@ -1,9 +1,9 @@
 import {memo, useCallback, useEffect, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {del, getJson, postJson, type StreamEvent} from '../api';
+import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
-import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem, Segment} from '../chatStore';
+import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem, Segment, SubStep} from '../chatStore';
 import {
     chatKey,
     getActiveSession,
@@ -100,7 +100,69 @@ const mdCache = new Map<string, string>();
 const mdCacheMax = 256;
 
 // 收到这些事件说明 Agent 正在输出，可用于重连后自动恢复 running 状态
-const DATA_EVENT_TYPES = new Set(['text', 'reasoning', 'tool', 'tool_args', 'tool_result', 'subagent', 'subagent_text']);
+const DATA_EVENT_TYPES = new Set(['text', 'reasoning', 'tool', 'tool_args', 'tool_result', 'subagent', 'subagent_text',
+  'subagent_reasoning', 'subagent_tool', 'subagent_tool_args', 'subagent_tool_result']);
+
+type SubStepEvent = 'text' | 'reasoning' | 'tool' | 'toolArgs' | 'toolResult';
+
+/**
+ * 把子 Agent 的一条增量并入其 subagent 段的 steps 序列。
+ *
+ * 线性关键：连续同类的 text/reasoning 合并进最后一步，遇到不同类型就开新步，
+ * 从而保留「思考 → 调工具 → 继续说」的真实时序，而不是把三者拍平成一坨。
+ */
+function appendSubStep(
+  segments: Segment[], name: string, kind: SubStepEvent, delta: string, state?: string,
+): Segment[] {
+  const segs = [...segments];
+  // 找该子 Agent 最后一个段（同名可能被多次调度，只并入最近一次）
+  let idx = -1;
+  for (let i = segs.length - 1; i >= 0; i--) {
+    if (segs[i].type === 'subagent' && segs[i].name === name) { idx = i; break; }
+  }
+  if (idx < 0) {
+    segs.push({ type: 'subagent', name, content: '', running: true, startedAt: Date.now(), steps: [] });
+    idx = segs.length - 1;
+  }
+  const seg = segs[idx];
+  const steps: SubStep[] = [...(seg.steps || [])];
+  const lastStep = steps[steps.length - 1];
+
+  switch (kind) {
+    case 'text':
+    case 'reasoning':
+      if (lastStep && lastStep.kind === kind) {
+        steps[steps.length - 1] = { ...lastStep, content: (lastStep.content || '') + delta };
+      } else {
+        steps.push({ kind, content: delta });
+      }
+      break;
+    case 'tool':
+      steps.push({ kind: 'tool', name: delta, args: '', running: true });
+      break;
+    case 'toolArgs':
+      // 入参增量归属最近一个仍在执行的工具步
+      for (let i = steps.length - 1; i >= 0; i--) {
+        if (steps[i].kind === 'tool' && steps[i].running) {
+          steps[i] = { ...steps[i], args: (steps[i].args || '') + delta };
+          break;
+        }
+      }
+      break;
+    case 'toolResult':
+      for (let i = steps.length - 1; i >= 0; i--) {
+        if (steps[i].kind === 'tool' && steps[i].running) {
+          steps[i] = { ...steps[i], result: delta, state, running: false };
+          break;
+        }
+      }
+      break;
+  }
+  // content 同步累积正文，供折叠预览与「是否有输出」判断复用
+  const content = kind === 'text' ? (seg.content || '') + delta : seg.content;
+  segs[idx] = { ...seg, steps, content };
+  return segs;
+}
 function md(raw: string): string {
   if (!raw) return '';
   const cached = mdCache.get(raw);
@@ -226,7 +288,9 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       break;
     }
     case 'subagent': {
-      const seg: Segment = { type: 'subagent', name: evt.content, content: '', running: true };
+      const seg: Segment = {
+        type: 'subagent', name: evt.content, content: '', running: true, startedAt: Date.now(),
+      };
       if (last && last.role === 'ai') {
         next[lastIdx] = { ...last, segments: [...last.segments, seg] };
       } else {
@@ -240,7 +304,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
         const name = evt.content;
         for (let j = segs.length - 1; j >= 0; j--) {
           if (segs[j].type === 'subagent' && segs[j].name === name && segs[j].running) {
-            segs[j] = { ...segs[j], running: false };
+            segs[j] = { ...segs[j], running: false, endedAt: Date.now() };
             break;
           }
         }
@@ -253,13 +317,50 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
       const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
-        const segs = last.segments.map((sg) =>
-          sg.type === 'subagent' && sg.name === name ? { ...sg, content: (sg.content || '') + delta } : sg,
-        );
-        if (!last.segments.some((sg) => sg.type === 'subagent' && sg.name === name)) {
-          segs.push({ type: 'subagent', name, content: delta });
-        }
-        next[lastIdx] = { ...last, segments: segs };
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'text', delta) };
+      }
+      break;
+    }
+    case 'subagent_reasoning': {
+      const sep = evt.content.indexOf('\u0001');
+      const name = sep >= 0 ? evt.content.slice(0, sep) : '';
+      const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
+      if (last && last.role === 'ai') {
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'reasoning', delta) };
+      }
+      break;
+    }
+    case 'subagent_tool': {
+      const sep = evt.content.indexOf('\u0001');
+      const name = sep >= 0 ? evt.content.slice(0, sep) : '';
+      const toolName = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
+      if (last && last.role === 'ai') {
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'tool', toolName) };
+      }
+      break;
+    }
+    case 'subagent_tool_args': {
+      const sep = evt.content.indexOf('\u0001');
+      const name = sep >= 0 ? evt.content.slice(0, sep) : '';
+      const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
+      if (last && last.role === 'ai') {
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'toolArgs', delta) };
+      }
+      break;
+    }
+    case 'subagent_tool_result': {
+      // 编码：name \u0001 state \u0001 result
+      const p1 = evt.content.indexOf('\u0001');
+      const rest = p1 >= 0 ? evt.content.slice(p1 + 1) : '';
+      const p2 = rest.indexOf('\u0001');
+      const name = p1 >= 0 ? evt.content.slice(0, p1) : '';
+      const state = p2 >= 0 ? rest.slice(0, p2) : rest;
+      const result = p2 >= 0 ? rest.slice(p2 + 1) : '';
+      if (last && last.role === 'ai') {
+        next[lastIdx] = {
+          ...last,
+          segments: appendSubStep(last.segments, name, 'toolResult', result, state),
+        };
       }
       break;
     }
@@ -354,6 +455,164 @@ function ToolCallCard({ seg }: { seg: Segment }) {
   );
 }
 
+/** 耗时格式化：ms → "1.2s" / "1m05s" */
+function fmtDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return '';
+  if (ms < 1000) return `${ms}ms`;
+  const s = ms / 1000;
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m${String(Math.floor(s % 60)).padStart(2, '0')}s`;
+}
+
+/** 子 Agent 输出里的失败信号（后端 EXCEED_MAX_ITERS / 异常会带这些字样） */
+function subagentStateOf(seg: Segment): 'running' | 'error' | 'done' {
+  if (seg.running) return 'running';
+  const c = seg.content || '';
+  const steps = seg.steps || [];
+  // 有工具调用但无正文，仍算完成（有些子 Agent 只做副作用）；完全无步骤才是异常
+  if (!c.trim() && steps.length === 0) return 'error';
+  if (/^\s*(?:❌|⚠️)|迭代次数已达上限|执行失败|EXCEED_MAX_ITERS/.test(c)) return 'error';
+  return 'done';
+}
+
+/** 子 Agent 内部单步渲染：思考 / 工具调用 折叠，正文直出 */
+function SubStepView({ step }: { step: SubStep }) {
+  const [open, setOpen] = useState(false);
+  if (step.kind === 'text') {
+    const c = step.content || '';
+    if (!c.trim()) return null;
+    return <div className="sa-step-text md-content" dangerouslySetInnerHTML={{ __html: md(c) }} />;
+  }
+  if (step.kind === 'reasoning') {
+    const c = step.content || '';
+    if (!c.trim()) return null;
+    return (
+      <div className="sa-step">
+        <div className="sa-step-head" onClick={() => setOpen((v) => !v)}>
+          <span>{open ? '▾' : '▸'} 🧠 思考</span>
+          <span className="sa-step-meta">{c.trim().length} 字</span>
+        </div>
+        {open && <div className="sa-step-body">{c}</div>}
+      </div>
+    );
+  }
+  // 工具调用
+  const isErr = (step.state || '').toUpperCase().includes('ERROR');
+  return (
+    <div className={`sa-step tool ${isErr ? 'err' : ''}`}>
+      <div className="sa-step-head" onClick={() => setOpen((v) => !v)}>
+        <span>{open ? '▾' : '▸'} 🔧 {step.name || '工具'}</span>
+        <span className="sa-step-meta">
+          {step.running ? <span className="spinner-small" /> : isErr ? '失败' : (step.state || '完成')}
+        </span>
+      </div>
+      {open && (
+        <div className="sa-step-body">
+          {step.args ? <><b>入参</b>{'\n'}{prettyArgs(step.args)}{'\n\n'}</> : null}
+          {step.result ? <><b>结果</b>{'\n'}{step.result}</> : (!step.running && '（无输出）')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 工具入参尽量格式化为可读 JSON，失败则原样返回 */
+function prettyArgs(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2);
+  } catch {
+    return raw;
+  }
+}
+
+/**
+ * 时间线单节点：一次子 Agent 调用。
+ * 默认展开运行中的节点、折叠已完成的，避免多个子 Agent 的输出堆成一片。
+ */
+function TimelineNode({ seg, index }: { seg: Segment; index: number }) {
+  const state = subagentStateOf(seg);
+  // 运行中默认展开（要能看到实时输出）；结束后默认收起，由用户按需展开
+  const [open, setOpen] = useState(state === 'running');
+  const wasRunning = useRef(state === 'running');
+  useEffect(() => {
+    // 从 running → 结束的瞬间自动收起；用户手动开合后不再被覆盖
+    if (wasRunning.current && state !== 'running') {
+      wasRunning.current = false;
+      setOpen(false);
+    }
+    if (state === 'running') wasRunning.current = true;
+  }, [state]);
+
+  const dur = seg.endedAt && seg.startedAt ? fmtDuration(seg.endedAt - seg.startedAt) : '';
+  // 历史回放的消息只有聚合后的 content、没有 steps：退化成单个正文步，避免误显示「未返回内容」
+  const steps: SubStep[] = (seg.steps && seg.steps.length > 0)
+    ? seg.steps
+    : (seg.content || '').trim() ? [{ kind: 'text', content: seg.content }] : [];
+  const toolCount = steps.filter((s) => s.kind === 'tool').length;
+  const body = seg.content || '';
+  const meta = state === 'running'
+    ? '执行中…'
+    : state === 'error' ? (body.trim() ? '异常' : '无输出')
+      : [toolCount ? `${toolCount} 次工具` : '', dur].filter(Boolean).join(' · ');
+
+  return (
+    <div className={`sa-node ${state}`}>
+      <div className="sa-node-head" onClick={() => setOpen((v) => !v)}>
+        <span className="sa-node-title">
+          {open ? '▾' : '▸'} {index}. {seg.name || '子 Agent'}
+        </span>
+        <span className="sa-node-meta">{meta}</span>
+      </div>
+      <div className={`sa-node-body ${open ? '' : 'collapsed'}`}>
+        {steps.length > 0
+          ? steps.map((s, i) => <SubStepView key={i} step={s} />)
+          : <span style={{ opacity: 0.6 }}>（该子 Agent 未返回内容）</span>}
+        {state === 'running' && <span className="sa-typing" />}
+      </div>
+    </div>
+  );
+}
+
+/** 子 Agent 分组：把连续的多次子 Agent 调用收进一条时间线 */
+function SubagentGroup({ segs }: { segs: Segment[] }) {
+  const [open, setOpen] = useState(true);
+  const running = segs.some((s) => s.running);
+  const doneCount = segs.filter((s) => !s.running).length;
+  return (
+    <div className="sa-group">
+      <div className="sa-group-head" onClick={() => setOpen((v) => !v)}>
+        {running && <span className="spinner-small" />}
+        <span>{open ? '▾' : '▸'} 🤖 子 Agent 执行</span>
+        <span className="sa-group-badge">{doneCount}/{segs.length}</span>
+      </div>
+      {open && (
+        <div className="sa-timeline">
+          {segs.map((s, i) => <TimelineNode key={i} seg={s} index={i + 1} />)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 把相邻的 subagent 段合并成组，其余段原样保留，供渲染层按块输出 */
+type RenderBlock = { kind: 'seg'; seg: Segment; i: number } | { kind: 'sa'; segs: Segment[]; i: number };
+
+function groupSegments(segments: Segment[]): RenderBlock[] {
+  const out: RenderBlock[] = [];
+  for (let i = 0; i < segments.length; i++) {
+    const s = segments[i];
+    if (s.type === 'subagent') {
+      const last = out[out.length - 1];
+      if (last && last.kind === 'sa') last.segs.push(s);
+      else out.push({ kind: 'sa', segs: [s], i });
+    } else {
+      out.push({ kind: 'seg', seg: s, i });
+    }
+  }
+  return out;
+}
+
 const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
   msg: ChatMessage; isStreaming?: boolean; agentLabel?: string;
 }) {
@@ -366,7 +625,12 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
       <div className="chat-row">
         <div className="chat-avatar">🤖</div>
         <div className="chat-bubble">
-          {msg.segments.map((seg, i) => {
+          {groupSegments(msg.segments).map((blk) => {
+            if (blk.kind === 'sa') {
+              return <SubagentGroup key={`sa-${blk.i}`} segs={blk.segs} />;
+            }
+            const seg = blk.seg;
+            const i = blk.i;
             switch (seg.type) {
               case 'text':
                 return (
@@ -379,12 +643,6 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
                 return <FoldBlock key={i} title="🧠 思考过程" className="reasoning">{seg.content || ''}</FoldBlock>;
               case 'tool':
                 return <ToolCallCard key={i} seg={seg} />;
-              case 'subagent':
-                return (
-                  <FoldBlock key={i} title={`🤖 子 Agent · ${seg.name}`} className="subagent" loading={seg.running}>
-                    {seg.content || ''}
-                  </FoldBlock>
-                );
               case 'note':
                 return <div key={i} className="system-note">⚠️ {seg.content}</div>;
               default:
@@ -402,7 +660,18 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
   for (let i = 0; i < prev.msg.segments.length; i++) {
     const a = prev.msg.segments[i], b = next.msg.segments[i];
     if (a.type !== b.type || a.content !== b.content || a.name !== b.name
-        || a.args !== b.args || a.result !== b.result || a.running !== b.running) return false;
+        || a.args !== b.args || a.result !== b.result || a.running !== b.running
+        || a.endedAt !== b.endedAt) return false;
+    // 子 Agent 内部步骤是流式追加的，须逐步比较否则时间线不刷新
+    const as = a.steps || [];
+    const bs = b.steps || [];
+    if (as.length !== bs.length) return false;
+    for (let k = 0; k < as.length; k++) {
+      const x = as[k];
+      const y = bs[k];
+      if (x.kind !== y.kind || x.content !== y.content || x.name !== y.name
+          || x.args !== y.args || x.result !== y.result || x.running !== y.running) return false;
+    }
   }
   return true;
 });
@@ -482,6 +751,8 @@ export default function ChatPage() {
   const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
   const [sessionId, setSessionId] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -494,6 +765,9 @@ export default function ChatPage() {
   const [filePath, setFilePath] = useState('');
   interface OpenFile { entry: FileEntry; kind: 'text' | 'image'; content?: string; error?: string; loading: boolean; }
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+  // openFiles 的 ref 镜像：file_changed 的防抖回调在闭包外执行，需要读到最新的打开列表
+  const openFilesRef = useRef<OpenFile[]>([]);
+  useEffect(() => { openFilesRef.current = openFiles; }, [openFiles]);
   const [activeFileTab, setActiveFileTab] = useState<string | null>(null);
   const [panelWidth, setPanelWidth] = useState(320);
   const [resizing, setResizing] = useState(false);
@@ -551,7 +825,15 @@ export default function ChatPage() {
   // 否则前端刚复位又被打回 running（按钮在「停止/发送」间闪烁）。
   const stoppedAtRef = useRef(0);
   const STOP_GRACE_MS = 3000;
+  // 文件变更刷新的防抖窗口：Agent 分段写大文件时会连续推多个 file_changed，
+  // 合并到同一窗口内只做一次刷新。250ms 兼顾「感知上即时」与「请求不放大」。
+  const FILE_REFRESH_DEBOUNCE_MS = 250;
+  // 复制成功后 ✓ 图标的显示时长
+  const COPY_FEEDBACK_MS = 1500;
   const pendingEvtsRef = useRef<StreamEvent[]>([]);
+  // file_changed 处理器的 ref 转发：实现定义在文件面板逻辑处（在 handleWsEvent 之后），
+  // 用 ref 打破声明顺序依赖，避免为此把整块文件逻辑上移。
+  const onFileChangedRef = useRef<(path: string) => void>(() => {});
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const flushNow = useCallback(() => {
@@ -637,6 +919,9 @@ export default function ChatPage() {
       flushNow();
       pendingEvtsRef.current.push(evt);
       scheduleFlush();
+    } else if (evt.type === 'file_changed') {
+      // 工作区文件被写类工具改动：不进消息流，只触发文件面板刷新（副作用，非渲染数据）
+      onFileChangedRef.current(evt.content);
     } else if (evt.type === 'text') {
       // text 增量走统一批量渲染（32ms 节流，比打字机快且不丢帧）
       pendingEvtsRef.current.push(evt);
@@ -995,6 +1280,127 @@ export default function ChatPage() {
     });
   };
 
+  // ---- 文件实时刷新（file_changed 事件驱动）----
+  // 待刷新路径缓冲：Agent 连续写同一文件会高频推事件，合并到一个时间窗口内统一处理，
+  // 避免每次写入都触发一轮 fetch（否则长文档分段追加会打出几十个请求）。
+  const pendingFileChangesRef = useRef<Set<string>>(new Set());
+  const fileRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // 重新拉取单个已打开文本文件的内容。
+  // 带 cache-buster：file-content 对图片设了 max-age=600，不加会命中浏览器缓存拿到旧内容。
+  const reloadOpenFile = useCallback(async (path: string) => {
+    if (!workspaceId) return;
+    try {
+      const res = await fetch(
+        `/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(path)}&t=${Date.now()}`,
+        { cache: 'no-store' },
+      );
+      if (!res.ok) return;
+      const text = await res.text();
+      setOpenFiles((prev) => prev.map((f) => (
+        f.entry.path === path ? { ...f, content: text, error: undefined } : f
+      )));
+    } catch {
+      // 静默失败：实时刷新是增强能力，网络抖动不该弹错误打断用户
+    }
+  }, [workspaceId]);
+
+  // 图片无法用 fetch 替换内容，只能靠改 src 上的版本号强制重新解码
+  const [imageVersion, setImageVersion] = useState(0);
+
+  const flushFileChanges = useCallback(() => {
+    const changed = Array.from(pendingFileChangesRef.current);
+    pendingFileChangesRef.current.clear();
+    if (changed.length === 0 || !workspaceId) return;
+
+    // 1) 文件树：只要有变更就刷新当前目录（新增/删除文件需要重新列举）
+    loadFiles(workspaceId, filePath);
+
+    // 2) 已打开的标签页：只重拉真正受影响的那些，避免无意义的 N 次请求
+    const openPaths = new Set(openFilesRef.current.map((f) => f.entry.path));
+    let touchedImage = false;
+    for (const p of changed) {
+      if (!openPaths.has(p)) continue;
+      const target = openFilesRef.current.find((f) => f.entry.path === p);
+      if (!target) continue;
+      if (target.kind === 'text') {
+        reloadOpenFile(p);
+      } else if (target.kind === 'image') {
+        touchedImage = true;
+      }
+    }
+    if (touchedImage) setImageVersion((v) => v + 1);
+  }, [workspaceId, filePath, reloadOpenFile]);
+
+  const flushFileChangesRef = useRef(flushFileChanges);
+  useEffect(() => {
+    flushFileChangesRef.current = flushFileChanges;
+  }, [flushFileChanges]);
+
+  const onFileChanged = useCallback((path: string) => {
+    pendingFileChangesRef.current.add(path);
+    if (fileRefreshTimerRef.current) return;
+    fileRefreshTimerRef.current = setTimeout(() => {
+      fileRefreshTimerRef.current = null;
+      flushFileChangesRef.current();
+    }, FILE_REFRESH_DEBOUNCE_MS);
+  }, []);
+
+  // 卸载时清理定时器，避免组件销毁后仍触发 setState
+  useEffect(() => () => {
+    if (fileRefreshTimerRef.current) clearTimeout(fileRefreshTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    onFileChangedRef.current = onFileChanged;
+  }, [onFileChanged]);
+
+  // ---- 复制文件路径 ----
+  // 复制成功的路径（用于短暂显示 ✓ 反馈）
+  const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const copyResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // navigator.clipboard 只在 HTTPS 或 localhost 可用；局域网 http 访问时需要
+  // textarea + execCommand 兜底，否则复制会静默失效。
+  const writeClipboard = async (text: string): Promise<boolean> => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch {
+      // 落到兜底方案
+    }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch {
+      return false;
+    }
+  };
+
+  const copyFilePath = useCallback(async (path: string) => {
+    const ok = await writeClipboard(path);
+    if (!ok) {
+      patch({ error: '复制失败，请手动选择路径复制' });
+      return;
+    }
+    setCopiedPath(path);
+    if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
+    copyResetTimerRef.current = setTimeout(() => setCopiedPath(null), COPY_FEEDBACK_MS);
+  }, [patch]);
+
+  useEffect(() => () => {
+    if (copyResetTimerRef.current) clearTimeout(copyResetTimerRef.current);
+  }, []);
+
   // 自动滚动
   useEffect(() => {
     if (!stickRef.current) return;
@@ -1024,6 +1430,38 @@ export default function ChatPage() {
     const created = await postJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions`, { title: `会话 ${sessions.length + 1}` });
     setSessions([created, ...sessions]);
     setSessionId(created.id);
+  };
+
+  // 会话重命名：双击标题或点击 ✎ 进入行内编辑
+  const startRename = (s: SessionItem) => {
+    setRenamingId(s.id);
+    setRenameDraft(s.title);
+  };
+
+  const cancelRename = () => {
+    setRenamingId(null);
+    setRenameDraft('');
+  };
+
+  const commitRename = async () => {
+    if (!renamingId || !workspaceId) return;
+    const sid = renamingId;
+    const title = renameDraft.trim();
+    const original = sessions.find((s) => s.id === sid);
+    // 空标题或未改动：直接退出编辑，不打无意义的请求
+    if (!title || !original || title === original.title) {
+      cancelRename();
+      return;
+    }
+    // 乐观更新，请求失败再回滚，避免输入框闪烁
+    setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, title } : s)));
+    cancelRename();
+    try {
+      await putJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions/${sid}`, { title });
+    } catch (e) {
+      setSessions((prev) => prev.map((s) => (s.id === sid ? { ...s, title: original.title } : s)));
+      alert(`重命名失败：${e instanceof Error ? e.message : String(e)}`);
+    }
   };
 
   const deleteSession = async (sid: string) => {
@@ -1320,6 +1758,17 @@ export default function ChatPage() {
                  title="进入目录">
               <span className="file-entry-icon">📂</span>
               <span className="file-entry-name">{f.name}</span>
+              <button
+                type="button"
+                className="file-entry-copy"
+                title="复制相对路径"
+                onClick={(e) => {
+                  e.stopPropagation(); // 不要连带触发进入目录
+                  copyFilePath(filePath ? `${filePath}/${f.name}` : f.name);
+                }}
+              >
+                {copiedPath === (filePath ? `${filePath}/${f.name}` : f.name) ? '✓' : '⧉'}
+              </button>
             </div>
           ))}
           {files.filter(f => !f.directory).map((f, i) => {
@@ -1336,6 +1785,17 @@ export default function ChatPage() {
                 <span className="file-entry-icon">{fileIcon(f)}</span>
                 <span className="file-entry-name">{f.name}</span>
                 <span className="file-entry-size">{formatSize(f.size)}</span>
+                <button
+                  type="button"
+                  className="file-entry-copy"
+                  title="复制相对路径"
+                  onClick={(e) => {
+                    e.stopPropagation(); // 不要连带触发打开预览
+                    copyFilePath(filePath ? `${filePath}/${f.name}` : f.name);
+                  }}
+                >
+                  {copiedPath === (filePath ? `${filePath}/${f.name}` : f.name) ? '✓' : '⧉'}
+                </button>
                 {canOpen && <span className="file-entry-open">↗</span>}
               </div>
             );
@@ -1607,7 +2067,7 @@ export default function ChatPage() {
         <div className="file-preview-image-wrap">
           <img
             className="file-preview-image"
-            src={`/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(file.entry.path)}`}
+            src={`/api/workspaces/${workspaceId}/file-content?path=${encodeURIComponent(file.entry.path)}&v=${imageVersion}`}
             alt={file.entry.name}
           />
         </div>
@@ -1644,7 +2104,21 @@ export default function ChatPage() {
             ))}
           </div>
           <div className="file-tab-content">
-            {activeFile ? fileContentView(activeFile) : <div className="hint" style={{ padding: 16 }}>无内容</div>}
+            {activeFile ? (
+              <>
+                <div className="file-path-bar" title="点击复制相对路径">
+                  <span className="file-path-text">{activeFile.entry.path}</span>
+                  <button
+                    type="button"
+                    className="file-path-copy"
+                    onClick={() => copyFilePath(activeFile.entry.path)}
+                  >
+                    {copiedPath === activeFile.entry.path ? '✓ 已复制' : '⧉ 复制路径'}
+                  </button>
+                </div>
+                {fileContentView(activeFile)}
+              </>
+            ) : <div className="hint" style={{ padding: 16 }}>无内容</div>}
           </div>
         </div>
       );
@@ -1660,13 +2134,41 @@ export default function ChatPage() {
                 <div
                   key={s.id}
                   className={`session-item ${s.id === sessionId ? 'active' : ''}`}
-                  onClick={() => switchSession(s.id)}
+                  onClick={() => { if (renamingId !== s.id) switchSession(s.id); }}
                 >
-                  <span className="title">{s.title}</span>
-                  <button
-                    className="session-del"
-                    onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
-                  >🗑</button>
+                  {renamingId === s.id ? (
+                    <input
+                      className="session-rename-input"
+                      value={renameDraft}
+                      maxLength={100}
+                      autoFocus
+                      onClick={(e) => e.stopPropagation()}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      onBlur={commitRename}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') { e.preventDefault(); commitRename(); }
+                        else if (e.key === 'Escape') { e.preventDefault(); cancelRename(); }
+                      }}
+                    />
+                  ) : (
+                    <>
+                      <span
+                        className="title"
+                        title={`${s.title}（双击重命名）`}
+                        onDoubleClick={(e) => { e.stopPropagation(); startRename(s); }}
+                      >{s.title}</span>
+                      <button
+                        className="session-rename"
+                        title="重命名"
+                        onClick={(e) => { e.stopPropagation(); startRename(s); }}
+                      >✎</button>
+                      <button
+                        className="session-del"
+                        title="删除"
+                        onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}
+                      >🗑</button>
+                    </>
+                  )}
                 </div>
               ))}
             </div>
