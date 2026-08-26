@@ -31,3 +31,18 @@ run-compile.ps1
 .agents
 .easyClaw/
 /local
+
+# 构建与调试临时产物（Maven 输出重定向、过滤脚本）
+/b[0-9]*.log
+/b[0-9]*.txt
+/t[0-9]*.log
+/t[0-9]*.txt
+/dt.log
+/adds.txt
+/staged.txt
+/sym.txt
+/flt.py
+/cls.py
+/out.txt
+/rv/
+*.tmp
