@@ -5,6 +5,7 @@ import com.xinl.easyclaw.tool.service.ToolManagementService;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
+import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.Toolkit;
@@ -33,6 +34,7 @@ public class AgentFactory {
     private final FileOperationTools fileTools;
     private final WebSearchTools searchTools;
     private final CodeGenerationTools codeTools;
+    private final SkillScriptTools skillScriptTools;
     private final McpConnectionService mcpConnectionService;
     private final ToolRegistryService toolRegistryService;
     private final ToolManagementService toolManagementService;
@@ -42,6 +44,7 @@ public class AgentFactory {
                         FileOperationTools fileTools,
                         WebSearchTools searchTools,
                         CodeGenerationTools codeTools,
+                        SkillScriptTools skillScriptTools,
                         McpConnectionService mcpConnectionService,
                         ToolRegistryService toolRegistryService,
                         ToolManagementService toolManagementService) {
@@ -50,6 +53,7 @@ public class AgentFactory {
         this.fileTools = fileTools;
         this.searchTools = searchTools;
         this.codeTools = codeTools;
+        this.skillScriptTools = skillScriptTools;
         this.mcpConnectionService = mcpConnectionService;
         this.toolRegistryService = toolRegistryService;
         this.toolManagementService = toolManagementService;
@@ -87,6 +91,7 @@ public class AgentFactory {
         registration.tool(fileTools);
         registration.tool(searchTools);
         registration.tool(codeTools);
+        registration.tool(skillScriptTools);
         // 按工具管理页的启用状态过滤（disableTools 按 @Tool 名称）
         List<String> disabled = toolRegistryService.disabledToolNames();
         if (!disabled.isEmpty()) {
@@ -126,6 +131,7 @@ public class AgentFactory {
     public Toolkit createCodeToolkit() {
         Toolkit toolkit = new Toolkit();
         toolkit.registerTool(codeTools);
+        toolkit.registerTool(skillScriptTools);
         toolkit.registerTool(fileTools);
         return toolkit;
     }

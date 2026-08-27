@@ -87,6 +87,42 @@ public class ManageController {
         return result;
     }
 
+    /** 收集 skill 的 scripts/*.py，以 "scripts/xxx.py" 作为展示名，便于与 md 子规则区分。 */
+    private void collectScripts(Path scriptsDir, List<SkillChild> out) {
+        if (!Files.isDirectory(scriptsDir)) return;
+        try (var s = Files.list(scriptsDir)) {
+            s.filter(Files::isRegularFile)
+                    .filter(sp -> sp.getFileName().toString().endsWith(".py"))
+                    .sorted(Comparator.comparing(sp -> sp.getFileName().toString()))
+                    .forEach(sp -> out.add(new SkillChild(
+                            "scripts/" + sp.getFileName(),
+                            firstDocLine(sp),
+                            sp.toAbsolutePath().toString(),
+                            readAllSafe(sp))));
+        } catch (IOException ignored) {
+            // 列举失败不应让整个 skill 列表接口失败
+        }
+    }
+
+    /** 取 Python 脚本的首行注释或 docstring 作为描述。 */
+    private String firstDocLine(Path script) {
+        try {
+            for (String line : Files.readAllLines(script)) {
+                String t = line.trim();
+                if (t.isEmpty() || t.startsWith("#!")) continue;
+                if (t.startsWith("#")) return t.substring(1).trim();
+                if (t.startsWith("\"\"\"") || t.startsWith("'''")) {
+                    String body = t.substring(3).replace("\"\"\"", "").replace("'''", "").trim();
+                    if (!body.isEmpty()) return body;
+                    continue;
+                }
+                break;
+            }
+        } catch (IOException ignored) {
+        }
+        return "Python 脚本";
+    }
+
     private void collectMd(Path dir, String scope, List<SkillFileDto> out) {
         if (!Files.isDirectory(dir)) return;
         try (var stream = Files.list(dir)) {
@@ -111,6 +147,9 @@ public class ManageController {
                                         readAllSafe(sp)
                                 )));
                     } catch (IOException ignored) {}
+                    // scripts/ 下的脚本也要列出：它们是 skill 的可执行部分（run_skill_script 的目标），
+                    // 不列出会让管理页显示的内容与 skill 实际能力不一致。
+                    collectScripts(p.resolve("scripts"), children);
                     out.add(new SkillFileDto(scope, name, desc, p.toAbsolutePath().toString(),
                             content, "dir", children));
                 } else if (name.endsWith(".md") && !"SKILL.md".equals(name)) {

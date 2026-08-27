@@ -4,6 +4,7 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 import org.graalvm.polyglot.Context;
 import org.graalvm.polyglot.PolyglotException;
@@ -47,6 +48,19 @@ public class PythonSandbox {
 
     /** 单次执行的墙钟超时。 */
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
+
+    /**
+     * 单次执行的堆内存上限。
+     *
+     * <p>看门狗只能打断"跑得久"的代码，打断不了"一次性申请几个 G"的代码
+     * （{@code bytearray(4 * 1024**3)} 会在看门狗醒来前就把 JVM 拖入 OOM，
+     * 而 OOM 是进程级故障，会连带整个应用一起死）。因此必须有独立的内存限额。
+     *
+     * <p>取值 256MB：实测限额本身不带来启动开销（见 {@code PythonSandboxTest
+     * .heapLimitDoesNotSlowDownStartup}），而 256MB 足够跑完常规数据处理，
+     * 又远低于典型 JVM 堆，不至于让沙箱把宿主拖垮。
+     */
+    private static final String MAX_HEAP = "256MB";
 
     /** 运行时是否具备 Python 能力，启动时探测一次。 */
     private final AtomicBoolean available = new AtomicBoolean(false);
@@ -113,16 +127,118 @@ public class PythonSandbox {
             ctx.eval(Source.newBuilder("python", code, "<agent>").buildLiteral());
             return finish(true, out, err, null, start);
         } catch (PolyglotException e) {
-            String reason;
-            if (e.isCancelled() || e.isInterrupted()) {
-                reason = "执行超时（超过 " + limit.toSeconds() + " 秒），已强制终止";
-            } else if (e.isGuestException()) {
-                // Python 侧异常：guest 的 traceback 比 Java 消息有用得多
-                reason = e.getMessage();
-            } else {
-                reason = "执行失败: " + e.getMessage();
+            return finish(false, out, err, describe(e, limit), start);
+        } catch (Exception e) {
+            return finish(false, out, err, "执行失败: " + e.getMessage(), start);
+        } finally {
+            watchdog.interrupt();
+            closeQuietly(ctx);
+        }
+    }
+
+    /**
+     * 把 PolyglotException 翻译成给模型看的原因说明。
+     *
+     * <p>分类必须区分清楚：超时要提示"死循环已被终止"，资源超限要提示"换算法"，
+     * guest 异常则原样给出 Python traceback——三者对模型的下一步指引完全不同。
+     */
+    private String describe(PolyglotException e, Duration limit) {
+        // 资源超限必须排在取消/中断之前判断：超出堆限额时 Polyglot 会中止执行，
+        // 该异常同时带上 cancelled 标记，若先判 cancelled 就会把 OOM 误报成"超时"，
+        // 把用户引向"加大超时时间"这个错误方向。
+        if (e.isResourceExhausted()) {
+            return "资源超限（内存上限 " + MAX_HEAP + "）：" + e.getMessage()
+                    + "\n请改用分块处理或减小数据量后重试。";
+        }
+        if (e.isCancelled() || e.isInterrupted()) {
+            return "执行超时（超过 " + limit.toSeconds() + " 秒），已强制终止";
+        }
+        if (e.isGuestException()) {
+            // Python 侧异常：guest 的 traceback 比 Java 消息有用得多
+            return e.getMessage();
+        }
+        return "执行失败: " + e.getMessage();
+    }
+
+    /**
+     * 在沙箱中执行位于 {@code scriptFile} 的 Python 脚本。
+     *
+     * <p>与 {@link #execute} 的区别在于脚本以<b>文件</b>而非字符串求值，因此
+     * {@code __name__ == "__main__"} 成立、{@code sys.argv} 可用（实测确认），
+     * 普通 Python 脚本无需改写即可运行。
+     *
+     * <p>文件访问范围锁定为 {@code allowedDir}，脚本因此能 import 同目录的模块、
+     * 读取自带的数据文件，但读不到该目录以外的任何内容。
+     *
+     * @param scriptFile 脚本路径，必须位于 {@code allowedDir} 之内
+     * @param allowedDir 允许读写的目录（非 null）
+     * @param args 传给脚本的参数，映射为 {@code sys.argv[1:]}
+     * @param timeout 超时时间；null 用默认值
+     */
+    public Result executeScript(Path scriptFile, Path allowedDir, List<String> args, Duration timeout) {
+        if (!isAvailable()) {
+            return new Result(false, "", "", "Python 运行时不可用（需 GraalVM）", 0);
+        }
+        if (allowedDir == null) {
+            // 脚本必然要读自身文件，没有 allowedDir 是调用方的逻辑错误
+            return new Result(false, "", "", "执行脚本必须指定允许访问的目录", 0);
+        }
+        Duration limit = timeout == null ? DEFAULT_TIMEOUT : timeout;
+        // 文档契约必须由代码保证：脚本内容用宿主 JVM 的 Files.readString 读取，
+        // 完全不经过 RestrictedFileSystem，所以这里是唯一的边界检查点。
+        // 少了它，调用方传入任意路径就能把沙箱外的文件当脚本执行。
+        Path script;
+        try {
+            Path realAllowed = allowedDir.toRealPath();
+            script = scriptFile.toRealPath();
+            if (!script.startsWith(realAllowed)) {
+                return new Result(false, "", "", "脚本不在允许访问的目录内: " + scriptFile, 0);
             }
-            return finish(false, out, err, reason, start);
+        } catch (java.io.IOException e) {
+            return new Result(false, "", "", "无法解析脚本路径: " + e.getMessage(), 0);
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        long start = System.currentTimeMillis();
+
+        // argv[0] 按 Python 惯例是脚本名本身
+        List<String> argv = new java.util.ArrayList<>();
+        argv.add(script.getFileName().toString());
+        if (args != null) {
+            argv.addAll(args);
+        }
+
+        Context ctx = buildContext(out, err, allowedDir, argv);
+        Thread watchdog = startWatchdog(ctx, limit);
+        try {
+            String code = java.nio.file.Files.readString(script, StandardCharsets.UTF_8);
+            // 用脚本文件名作为 Source name，traceback 里才会显示真实文件名而非 <agent>
+            ctx.eval(Source.newBuilder("python", code, script.getFileName().toString())
+                    .buildLiteral());
+            return finish(true, out, err, null, start);
+        } catch (PolyglotException e) {
+            // 资源超限必须先判：describe() 刻意把 isResourceExhausted() 排在最前，
+            // 若让 isExit() 抢先，堆超限就会被误报成"退出码 N"，丢掉真正的原因。
+            if (e.isResourceExhausted()) {
+                return finish(false, out, err, describe(e, limit), start);
+            }
+            // 脚本以 sys.exit() 结束是完全正常的写法（本项目自带脚本就这么写），
+            // Polyglot 把它表达为 isExit() 的异常。退出码 0 必须算成功，
+            // 否则所有规范写法的脚本都会被判失败。
+            if (e.isExit()) {
+                int status = e.getExitStatus();
+                if (status == 0) {
+                    return finish(true, out, err, null, start);
+                }
+                // 非零退出多数是脚本在报告业务结论（如"发现 3 处问题"、用法提示），
+                // 不是执行故障；措辞不能归因成"执行失败"，否则调用方会误判工具坏了。
+                return finish(false, out, err,
+                        "脚本以状态码 " + status + " 结束（属脚本自身的返回结论，非执行故障，详见上方输出）",
+                        start);
+            }
+            return finish(false, out, err, describe(e, limit), start);
+        } catch (java.io.IOException e) {
+            return finish(false, out, err, "无法读取脚本文件: " + e.getMessage(), start);
         } catch (Exception e) {
             return finish(false, out, err, "执行失败: " + e.getMessage(), start);
         } finally {
@@ -138,6 +254,62 @@ public class PythonSandbox {
      * 不会因为默认开启而意外可用。
      */
     private Context buildContext(ByteArrayOutputStream out, ByteArrayOutputStream err, Path allowedDir) {
+        return buildContext(out, err, allowedDir, null);
+    }
+
+    /**
+     * Python 标准库所在目录，作为沙箱的只读根放行。
+     *
+     * <p>限制文件访问后 {@code import ast} 之类会直接失败（实测
+     * {@code ModuleNotFoundError}）——标准库位于 GraalPy 的 python-home，
+     * 不在用户目录里。这里探测一次并缓存：探测需要新建 Context，约 200ms，
+     * 不该每次执行都付这个成本。
+     *
+     * <p>只读放行不削弱隔离：写操作由 {@link RestrictedFileSystem} 在这些根内一律拒绝，
+     * 脚本无法篡改标准库来影响后续执行。
+     */
+    private List<Path> stdlibRoots() {
+        List<Path> cached = stdlibRootsCache;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (this) {
+            if (stdlibRootsCache == null) {
+                // 只缓存成功结果（probeStdlibRoots 失败返回 null），失败下次重试
+                stdlibRootsCache = probeStdlibRoots();
+            }
+            return stdlibRootsCache == null ? List.of() : stdlibRootsCache;
+        }
+    }
+
+    private List<Path> probeStdlibRoots() {
+        // 探测 Context 只求值硬编码的 sys.prefix，不需要文件访问权限。
+        // 刻意不用 IOAccess.ALL：本类的设计原则是最小放权，探测口子一旦开成全权限，
+        // 后续往这里加逻辑就会默认继承它。
+        try (Context probe = Context.newBuilder("python")
+                .option("python.PosixModuleBackend", "java")
+                .allowIO(org.graalvm.polyglot.io.IOAccess.NONE)
+                .build()) {
+            String prefix = probe.eval("python", "import sys\nsys.prefix").asString();
+            if (prefix == null || prefix.isBlank()) {
+                return null;
+            }
+            // 在此处一次性归一化为真实路径：该值进程内恒定，
+            // 否则每次脚本执行都要为标准库目录重做一次 toRealPath 系统调用。
+            return List.of(Path.of(prefix).toRealPath());
+        } catch (Exception e) {
+            // 探测失败不致命：沙箱仍可运行不 import 标准库的脚本。
+            // 返回 null 而非空列表，让下次执行重试——把一次偶发失败缓存成
+            // 整个 JVM 生命周期内标准库都不可用，是极难排查的故障。
+            log.warn("探测 Python 标准库目录失败，本次脚本将无法 import 标准库: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    private volatile List<Path> stdlibRootsCache;
+
+    private Context buildContext(ByteArrayOutputStream out, ByteArrayOutputStream err,
+                                 Path allowedDir, List<String> argv) {
         Context.Builder builder = Context.newBuilder("python")
                 .out(out)
                 .err(err)
@@ -151,7 +323,16 @@ public class PythonSandbox {
                 .allowNativeAccess(false)
                 .allowEnvironmentAccess(org.graalvm.polyglot.EnvironmentAccess.NONE)
                 .allowExperimentalOptions(true)
+                // 内存限额：实测在当前运行时真实生效（超限抛 PolyglotException 而非 OOM）。
+                // 注意"选项被接受"不等于"限额被执行"——本项目靠 PythonSandboxTest
+                // .rejectsExcessiveMemoryAllocation 实际申请超额内存来验证它真的拦得住。
+                .option("sandbox.MaxHeapMemory", MAX_HEAP)
                 .option("python.PosixModuleBackend", "java");
+
+        if (argv != null && !argv.isEmpty()) {
+            // 实测确认：arguments() 后脚本内 sys.argv 可读、__name__ == "__main__" 成立
+            builder.arguments("python", argv.toArray(new String[0]));
+        }
 
         if (allowedDir == null) {
             // 完全禁止文件访问
@@ -163,7 +344,7 @@ public class PythonSandbox {
             // cwd 只影响相对路径解析，不是安全边界。
             try {
                 builder.allowIO(org.graalvm.polyglot.io.IOAccess.newBuilder()
-                        .fileSystem(new RestrictedFileSystem(allowedDir))
+                        .fileSystem(new RestrictedFileSystem(allowedDir, stdlibRoots()))
                         .build())
                         .currentWorkingDirectory(allowedDir.toAbsolutePath());
             } catch (java.io.IOException e) {
