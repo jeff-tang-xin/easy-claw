@@ -7,6 +7,7 @@ import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
+import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.Model;
 import io.agentscope.core.model.ModelRegistry;
@@ -24,6 +25,7 @@ import io.agentscope.harness.agent.filesystem.spec.LocalFilesystemSpec;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import io.agentscope.harness.agent.memory.compaction.ToolResultEvictionConfig;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
+import io.agentscope.harness.agent.transcript.ObjectStoreTranscriptStore;
 import io.agentscope.harness.agent.workspace.LocalFsMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -122,6 +124,14 @@ public class WorkspaceAgentBuilder {
         WorkspaceAsyncToolRegistry asyncRegistry =
                 new WorkspaceAsyncToolRegistry(agentFs, ".easyClaw/bus/async-tools");
 
+        // Transcript 存储：显式注入 rootPrefix，否则会散落在 workspace 根。
+        // HarnessAgent 的默认兜底走 new ObjectStoreTranscriptStore(fs) 单参构造，
+        // 其 rootPrefix 为空串，key 直接拼成 "<tenant>/<agentId>/<sessionId>/events/..."，
+        // 因 agentFs 基准是 workspacePath（项目根），会在项目根生成 default/ 目录。
+        // 同理于上面的 bus，这里把 transcript 收敛到 .easyClaw/agent/transcripts。
+        ObjectStoreTranscriptStore transcriptStore = new ObjectStoreTranscriptStore(
+                agentFs, RuntimeContext.empty(), ".easyClaw/agent/transcripts");
+
         Path globalSkillsDir = SystemHomePaths.globalSkillsDir();
         Path globalSubagentsDir = SystemHomePaths.globalSubagentsDir();
         try {
@@ -176,6 +186,7 @@ public class WorkspaceAgentBuilder {
                         .build())
                 .messageBus(messageBus)
                 .asyncToolRegistry(asyncRegistry)
+                .transcriptStore(transcriptStore)
                 .enablePlanMode(false)
                 .enableAgentTracingLog(false)
                 .maxContextTokens(16_000);

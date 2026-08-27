@@ -64,6 +64,20 @@
             <version>${sqlite.version}</version>
         </dependency>
 
+        <!-- ========================================= -->
+        <!-- GraalPy 内置 Python 解释器                -->
+        <!-- 版本由 parent 的 dependencyManagement 统管 -->
+        <!-- ========================================= -->
+        <dependency>
+            <groupId>org.graalvm.polyglot</groupId>
+            <artifactId>polyglot</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.graalvm.polyglot</groupId>
+            <artifactId>python</artifactId>
+            <type>pom</type>
+        </dependency>
+
         <dependency>
             <groupId>org.hibernate.orm</groupId>
             <artifactId>hibernate-community-dialects</artifactId>
@@ -97,6 +111,10 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-test</artifactId>
             <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-core</artifactId>
         </dependency>
     </dependencies>
 

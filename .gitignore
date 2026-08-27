@@ -46,3 +46,10 @@ run-compile.ps1
 /out.txt
 /rv/
 *.tmp
+**/pid_*.txt
+
+# transcript 兜底防线：ObjectStoreTranscriptStore 若因上游改动导致 rootPrefix 为空，
+# 会在项目根按「租户/agentId/sessionId/events」结构落盘（tenant 默认为 default）。
+# 正常情况下已由 WorkspaceAgentBuilder 显式注入 .easyClaw/agent/transcripts，此处仅防污染 git。
+/default/
+/default_old_backup/
