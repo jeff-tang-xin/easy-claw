@@ -84,6 +84,13 @@ def scan_python_structure(path, source):
 
 
 def main(argv):
+    # Windows 控制台默认 GBK，脚本输出含 emoji/中文会直接 UnicodeEncodeError 崩掉。
+    # 独立运行（非 GraalPy 内嵌）时必须自己兜底，否则这个工具在 cmd 里根本不可用。
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
     targets = argv[1:]
     if not targets:
         print("用法: smell_scan.py <文件路径> [更多文件...]")
@@ -91,9 +98,13 @@ def main(argv):
         return 1
 
     total = 0
+    unreadable = []
     for path in targets:
         if not os.path.isfile(path):
-            print(f"⚠️  跳过（不是文件）: {path}")
+            # 不能静默跳过：沙箱拦截、路径拼错、文件被删都会走到这里，
+            # 若照样 return 0，调用方会把"一个文件都没扫到"误读成"代码很干净"。
+            unreadable.append(path)
+            print(f"❌ 无法读取（不存在或不在允许访问的目录内）: {path}")
             continue
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             source = f.read()
@@ -111,7 +122,12 @@ def main(argv):
             print(f"  {level:5s} L{lineno}: {msg}")
         total += len(issues)
 
-    print(f"\n合计 {total} 处问题。ERROR 必须修，WARN 需说明理由，INFO 可批量清理。")
+    scanned = len(targets) - len(unreadable)
+    print(f"\n已扫描 {scanned}/{len(targets)} 个文件，合计 {total} 处问题。"
+          f"ERROR 必须修，WARN 需说明理由，INFO 可批量清理。")
+    if unreadable:
+        print(f"⚠️  有 {len(unreadable)} 个文件未能扫描，结果不完整。")
+        return 2
     return 0
 
 

@@ -190,7 +190,7 @@ class PythonSandboxTest {
                 if __name__ == "__main__":
                     print("ARGS=" + ",".join(sys.argv[1:]))
                 """);
-        PythonSandbox.Result r = sandbox.executeScript(script, dir, List.of("a", "b"), null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, List.of("a", "b"), null);
         assertTrue(r.ok(), "脚本执行失败: " + r.error());
         assertTrue(r.stdout().contains("ARGS=a,b"), "argv 未正确传入: " + r.stdout());
     }
@@ -202,7 +202,7 @@ class PythonSandboxTest {
         Files.writeString(dir.resolve("data.txt"), "PAYLOAD");
         Path script = dir.resolve("reader.py");
         Files.writeString(script, "print(open('data.txt').read())\n");
-        PythonSandbox.Result r = sandbox.executeScript(script, dir, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, null, null);
         assertTrue(r.ok(), "脚本执行失败: " + r.error());
         assertTrue(r.stdout().contains("PAYLOAD"), "未能读到同目录数据: " + r.stdout());
     }
@@ -218,7 +218,7 @@ class PythonSandboxTest {
                 "try:\n    print(open(r'" + outside.toAbsolutePath() + "').read())\n"
                         + "except Exception as e:\n    print('DENIED')\n");
         try {
-            PythonSandbox.Result r = sandbox.executeScript(script, dir, null, null);
+            PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, null, null);
             assertFalse(r.stdout().contains("OUTSIDE_LEAK"),
                     "脚本不应读到 allowedDir 之外的文件: " + r.stdout());
         } finally {
@@ -233,7 +233,7 @@ class PythonSandboxTest {
         Path script = dir.resolve("loop.py");
         Files.writeString(script, "while True:\n    pass\n");
         PythonSandbox.Result r =
-                sandbox.executeScript(script, dir, null, java.time.Duration.ofSeconds(2));
+                sandbox.executeScriptReadOnly(script, dir, null, java.time.Duration.ofSeconds(2));
         assertFalse(r.ok(), "死循环脚本必须被中断");
         assertTrue(r.error() != null && r.error().contains("超时"), "应报超时，实际: " + r.error());
     }
@@ -244,7 +244,7 @@ class PythonSandboxTest {
         assumeTrue(ready, "需要 GraalVM");
         Path script = dir.resolve("x.py");
         Files.writeString(script, "print(1)\n");
-        PythonSandbox.Result r = sandbox.executeScript(script, null, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, null, null, null);
         assertFalse(r.ok());
         assertTrue(r.error().contains("必须指定允许访问的目录"), "错误信息不明确: " + r.error());
     }
@@ -292,7 +292,7 @@ class PythonSandboxTest {
                     print('DENIED')
                 """);
 
-        PythonSandbox.Result r = sandbox.executeScript(script, dir, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, null, null);
 
         assertFalse(r.stdout().contains("POISONED"),
                 "脚本不该能改写自身目录的 SKILL.md: " + r.stdout());
@@ -314,7 +314,7 @@ class PythonSandboxTest {
                     print('DENIED')
                 """);
 
-        PythonSandbox.Result r = sandbox.executeScript(script, dir, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, null, null);
 
         assertFalse(r.stdout().contains("CREATED"), "只读模式下不该能新建文件: " + r.stdout());
         assertFalse(Files.exists(dir.resolve("dropped.txt")), "只读模式下文件仍被创建");
@@ -341,7 +341,8 @@ class PythonSandboxTest {
                     print('SKILL_DIR_READONLY')
                 """.formatted(workDir.toAbsolutePath().toString().replace("\\", "\\\\")));
 
-        PythonSandbox.Result r = sandbox.executeScript(script, skillDir, null, null, workDir);
+        PythonSandbox.Result r = sandbox.executeScript(
+                script, ScriptAccess.readOnly(skillDir).withWritable(workDir), null, null);
 
         assertTrue(r.stdout().contains("WROTE"),
                 "writableDir 应可写: " + r.stdout() + r.stderr() + r.error());
@@ -363,7 +364,7 @@ class PythonSandboxTest {
                 print(open('rules.txt').read())
                 """);
 
-        PythonSandbox.Result r = sandbox.executeScript(script, dir, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, dir, null, null);
 
         assertTrue(r.ok(), "只读模式不该影响读取与 import: " + r.error() + r.stderr());
         assertTrue(r.stdout().contains("RULE_X"), "未读到同目录文件: " + r.stdout());
@@ -407,7 +408,7 @@ class PythonSandboxTest {
         Path script = elsewhere.resolve("evil.py");
         Files.writeString(script, "print('should not run')\n");
 
-        PythonSandbox.Result r = sandbox.executeScript(script, allowed, null, null);
+        PythonSandbox.Result r = sandbox.executeScriptReadOnly(script, allowed, null, null);
 
         assertFalse(r.ok(), "沙箱外的脚本不应被执行");
         assertFalse(r.stdout().contains("should not run"), "脚本竟然执行了: " + r.stdout());

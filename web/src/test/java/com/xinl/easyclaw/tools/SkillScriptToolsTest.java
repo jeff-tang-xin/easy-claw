@@ -100,17 +100,57 @@ class SkillScriptToolsTest {
     }
 
     @Test
-    @DisplayName("脚本读不到 skill 目录之外的文件")
+    @DisplayName("脚本读不到工作区之外的文件")
     void scriptCannotEscapeSkillDir(@TempDir Path root) throws Exception {
         assumeTrue(ready, "需要 GraalVM");
         Path skill = makeSkill(root, "demo-skill");
-        Path secret = root.resolve("secret.txt");
+        // 放到工作区之外：工作区内的源码是脚本的正当扫描对象（见 readsWorkspaceSourceFile），
+        // 真正的边界是工作区本身
+        Path secret = Files.createTempFile("outside", ".txt");
         Files.writeString(secret, "WS_SECRET");
-        Files.writeString(skill.resolve("scripts/peek.py"),
-                "try:\n    print(open(r'" + secret.toAbsolutePath() + "').read())\n"
+        try {
+            Files.writeString(skill.resolve("scripts/peek.py"),
+                    "try:\n    print(open(r'" + secret.toAbsolutePath() + "').read())\n"
+                            + "except Exception:\n    print('DENIED')\n");
+            String out = tools.runSkillScript("demo-skill", "peek.py", null, ws(root));
+            assertFalse(out.contains("WS_SECRET"), "不应读到工作区外的文件: " + out);
+        } finally {
+            Files.deleteIfExists(secret);
+        }
+    }
+
+    @Test
+    @DisplayName("脚本能读工作区内的项目源码（run_skill_script 的核心用途）")
+    void readsWorkspaceSourceFile(@TempDir Path root) throws Exception {
+        assumeTrue(ready, "需要 GraalVM");
+        Path skill = makeSkill(root, "demo-skill");
+        Path target = root.resolve("src/App.java");
+        Files.createDirectories(target.getParent());
+        Files.writeString(target, "class App {}");
+
+        Files.writeString(skill.resolve("scripts/scan.py"),
+                "import sys\nprint(open(sys.argv[1]).read())\n");
+        String out = tools.runSkillScript(
+                "demo-skill", "scan.py", List.of(target.toAbsolutePath().toString()), ws(root));
+
+        assertTrue(out.contains("class App"), "工作区内的源码应可读: " + out);
+    }
+
+    @Test
+    @DisplayName("工作区可读不等于 .easyClaw/ 可读（会话数据仍被隔离）")
+    void agentDataDirStaysHidden(@TempDir Path root) throws Exception {
+        assumeTrue(ready, "需要 GraalVM");
+        Path skill = makeSkill(root, "demo-skill");
+        Path transcript = root.resolve(".easyClaw/agent/transcripts/s.jsonl");
+        Files.createDirectories(transcript.getParent());
+        Files.writeString(transcript, "PRIVATE_HISTORY");
+
+        Files.writeString(skill.resolve("scripts/peek2.py"),
+                "try:\n    print(open(r'" + transcript.toAbsolutePath() + "').read())\n"
                         + "except Exception:\n    print('DENIED')\n");
-        String out = tools.runSkillScript("demo-skill", "peek.py", null, ws(root));
-        assertFalse(out.contains("WS_SECRET"), "不应读到 skill 目录外的文件: " + out);
+        String out = tools.runSkillScript("demo-skill", "peek2.py", null, ws(root));
+
+        assertFalse(out.contains("PRIVATE_HISTORY"), "会话记录不应被脚本读到: " + out);
     }
 
     @Test

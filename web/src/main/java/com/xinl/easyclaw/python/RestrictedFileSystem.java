@@ -74,6 +74,9 @@ final class RestrictedFileSystem implements FileSystem {
      */
     private final List<Path> writableRoots;
 
+    /** 即使落在可读根内也一律拒绝的子树（deny 优先于 allow）。 */
+    private final List<Path> deniedRoots;
+
     /**
      * @param allowedDir 相对路径基准目录，始终可读
      * @param readOnlyRoots 额外的只读根
@@ -83,11 +86,22 @@ final class RestrictedFileSystem implements FileSystem {
      */
     RestrictedFileSystem(Path allowedDir, List<Path> readOnlyRoots, List<Path> writableRoots)
             throws IOException {
+        this(allowedDir, readOnlyRoots, writableRoots, List.of());
+    }
+
+    /**
+     * @param deniedRoots 黑名单子树，优先于所有可读/可写判断。
+     *     用途：把某个大目录整体设为可读时，仍需挖掉其中的敏感子目录
+     *     （如工作区下的 {@code .easyClaw/}，含会话记录与运行时数据）。
+     */
+    RestrictedFileSystem(Path allowedDir, List<Path> readOnlyRoots, List<Path> writableRoots,
+                         List<Path> deniedRoots) throws IOException {
         this.root = allowedDir.toRealPath();
         this.readOnlyRoots = resolveAll(readOnlyRoots, "只读根");
         this.writableRoots = writableRoots == null
                 ? List.of(this.root)
                 : resolveAll(writableRoots, "可写根");
+        this.deniedRoots = resolveAll(deniedRoots, "禁止根");
     }
 
     /**
@@ -121,14 +135,20 @@ final class RestrictedFileSystem implements FileSystem {
         return false;
     }
 
-    /** 是否可读：{@code root} 之内、只读根之内、可写根之内，三者取并集。 */
-    private boolean readable(Path path) {
-        return path.startsWith(root) || under(path, readOnlyRoots) || under(path, writableRoots);
+        /** 是否处于禁止子树内（deny 优先于 allow）。 */
+    private boolean denied(Path path) {
+        return under(path, deniedRoots);
     }
 
-    /** 是否可写：仅可写根之内。 */
+    /** 是否可读：{@code root} 之内、只读根之内、可写根之内，三者取并集，再排除禁止子树。 */
+    private boolean readable(Path path) {
+        return !denied(path)
+                && (path.startsWith(root) || under(path, readOnlyRoots) || under(path, writableRoots));
+    }
+
+    /** 是否可写：仅可写根之内，且排除禁止子树。 */
     private boolean writable(Path path) {
-        return under(path, writableRoots);
+        return !denied(path) && under(path, writableRoots);
     }
 
     /**

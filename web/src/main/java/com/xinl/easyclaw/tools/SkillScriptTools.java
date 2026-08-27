@@ -2,6 +2,7 @@ package com.xinl.easyclaw.tools;
 
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.python.PythonSandbox;
+import com.xinl.easyclaw.python.ScriptAccess;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -86,13 +87,42 @@ public class SkillScriptTools {
         log.info("执行 Skill 脚本: skill={}, script={}, args={}", skill, script,
                 args == null ? 0 : args.size());
 
-        // allowedDir 给到 skill 根目录而非 scripts/：脚本常需读取同级的数据或规则文件。
-        // writableDir 传 null（全只读）：脚本没有正当理由改写自身目录，而它一旦能写，
-        // 就能改写同目录的 SKILL.md——该文件会作为 system prompt 注入后续会话，
-        // 且安装器遵循"已存在不覆盖"，被篡改后不会自动修复，形成可自我持久化的投毒路径。
+        // 权限声明（三条都是刻意的）：
+        // 1. baseDir = skill 根目录而非 scripts/：脚本常需读取同级的数据或规则文件；
+        // 2. 追加工作区为只读：脚本的作用对象是用户的项目代码（如 smell_scan.py 扫描
+        //    传入的源文件），只放开 skill 目录会让这类脚本永远读不到目标文件；
+        // 3. 不给写权限：脚本一旦能写就能改写同目录的 SKILL.md——该文件会作为
+        //    system prompt 注入后续会话，且安装器遵循"已存在不覆盖"，被篡改后不会
+        //    自动修复，形成可自我持久化的投毒路径。
+        //
+        // 安全前提：凭据存放在 ~/.easyClaw/application.yml（SystemHomePaths.systemHome()），
+        // 位于工作区之外，因此放开工作区读权限不会暴露密钥。
+        ScriptAccess access = ScriptAccess.readOnly(skillDir.get())
+                .plusReadable(workspaceRoot(workspace))
+                .minus(agentDataDir(workspace));
+
         PythonSandbox.Result result =
-                pythonSandbox.executeScript(target, skillDir.get(), args, SCRIPT_TIMEOUT, null);
+                pythonSandbox.executeScript(target, access, args, SCRIPT_TIMEOUT);
         return render(skill, script, result);
+    }
+
+    /** 工作区根目录；无工作区上下文时返回 null，由 {@link ScriptAccess#plusReadable} 忽略。 */
+    private Path workspaceRoot(WorkspaceContext workspace) {
+        if (workspace == null || workspace.getPath() == null) {
+            return null;
+        }
+        return workspace.getPath().toAbsolutePath().normalize();
+    }
+
+    /**
+     * 工作区内的 Agent 运行时目录（{@code .easyClaw/}），须从可读范围中挖掉。
+     *
+     * <p>它与项目源码同处工作区，但内容是会话记录、transcripts、凭据性配置等运行时数据，
+     * 与「扫描项目代码」无关。放开工作区读权限时若不排除它，脚本就能把历史对话读出来。
+     */
+    private Path agentDataDir(WorkspaceContext workspace) {
+        Path root = workspaceRoot(workspace);
+        return root == null ? null : root.resolve(".easyClaw");
     }
 
     /**
