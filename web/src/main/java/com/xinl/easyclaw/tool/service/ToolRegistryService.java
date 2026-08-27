@@ -136,6 +136,7 @@ public class ToolRegistryService {
             Map.entry("analyze_code", "代码分析"),
             Map.entry("format_code", "代码格式化"),
             Map.entry("diff_code", "代码对比"),
+            Map.entry("inspect_data", "数据校验"),
             Map.entry("web_search", "网络搜索"),
             Map.entry("fetch_webpage", "网页获取")
     );
@@ -152,6 +153,7 @@ public class ToolRegistryService {
             Map.entry("analyze_code", "CODE"),
             Map.entry("format_code", "CODE"),
             Map.entry("diff_code", "CODE"),
+            Map.entry("inspect_data", "CODE"),
             Map.entry("web_search", "WEB"),
             Map.entry("fetch_webpage", "WEB"),
             Map.entry("memory_search", "MEMORY"),

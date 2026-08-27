@@ -182,4 +182,88 @@ class CodeGenerationToolsTest {
             assertFalse(out.startsWith("❌"), "不应报错: " + out);
         }
     }
+
+    @Nested
+    @DisplayName("inspect_data")
+    class InspectData {
+
+        @Test
+        @DisplayName("JSON：语法错误应给出精确行号")
+        void jsonSyntaxErrorReportsLine() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            String bad = "{\n  \"a\": 1,\n  \"b\": 2,,\n  \"c\": 3\n}";
+            String out = tools.inspectData(bad, "json", null);
+            assertAll(
+                    () -> assertTrue(out.contains("JSON 无效"), out),
+                    () -> assertTrue(out.contains("第 3 行"), "应定位到第 3 行: " + out));
+        }
+
+        @Test
+        @DisplayName("JSON：重复键被静默覆盖时必须告警（朴素解析发现不了）")
+        void jsonDuplicateKeysAreDetected() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            // json.loads 不会报错，后一个 timeout 静默覆盖前一个
+            String text = "{\"timeout\": 30, \"retries\": 3, \"timeout\": 60}";
+            String out = tools.inspectData(text, "json", null);
+            assertAll(
+                    () -> assertTrue(out.contains("JSON 有效"), out),
+                    () -> assertTrue(out.contains("重复键"), "应告警重复键: " + out),
+                    () -> assertTrue(out.contains("timeout"), "应指出是 timeout: " + out));
+        }
+
+        @Test
+        @DisplayName("JSON：数组内对象字段不一致应给出下标")
+        void jsonInconsistentObjectsAreDetected() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            String text = "[{\"id\":1,\"name\":\"a\"},{\"id\":2,\"name\":\"b\"},{\"id\":3}]";
+            String out = tools.inspectData(text, "json", null);
+            assertAll(
+                    () -> assertTrue(out.contains("字段与首个对象不一致"), out),
+                    () -> assertTrue(out.contains("2"), "应指出下标 2: " + out));
+        }
+
+        @Test
+        @DisplayName("CSV：引号内的逗号不应被误判为错列（按逗号切分的经典缺陷）")
+        void csvQuotedCommaIsNotMiscounted() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            // 第 2 行两个字段内含逗号，朴素 split(",") 会认为该行有 5 个字段
+            String csv = "id,name,address\n1,\"Smith, John\",\"Beijing, CN\"\n2,Li,Shanghai";
+            String out = tools.inspectData(csv, "csv", ",");
+            assertAll(
+                    () -> assertTrue(out.contains("结构一致"), "不应报错列: " + out),
+                    () -> assertTrue(out.contains("列数: 3"), "应为 3 列: " + out),
+                    () -> assertTrue(out.contains("数据行数: 2"), out));
+        }
+
+        @Test
+        @DisplayName("CSV：字段数真不一致时应给出行号")
+        void csvMalformedRowReportsLine() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            String csv = "a,b,c\n1,2,3\n4,5\n6,7,8";
+            String out = tools.inspectData(csv, "csv", ",");
+            assertAll(
+                    () -> assertTrue(out.contains("字段数不一致"), out),
+                    () -> assertTrue(out.contains("第 3 行"), "应定位第 3 行: " + out));
+        }
+
+        @Test
+        @DisplayName("CSV：重复表头与空值分布应被报告")
+        void csvDuplicateHeaderAndEmptyCells() {
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            String csv = "id,name,name\n1,,x\n2,,y";
+            String out = tools.inspectData(csv, "csv", ",");
+            assertAll(
+                    () -> assertTrue(out.contains("表头重复"), out),
+                    () -> assertTrue(out.contains("空值分布"), out));
+        }
+
+        @Test
+        @DisplayName("参数缺失或格式不支持应友好提示")
+        void invalidArguments() {
+            assertTrue(tools.inspectData("  ", "json", null).startsWith("❌"));
+            assertTrue(tools.inspectData("{}", null, null).startsWith("❌"));
+            assumeTrue(pythonReady, "需要 GraalVM 运行时");
+            assertTrue(tools.inspectData("{}", "yaml", null).contains("不支持"));
+        }
+    }
 }

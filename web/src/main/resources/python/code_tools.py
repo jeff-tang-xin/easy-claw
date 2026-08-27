@@ -140,3 +140,169 @@ def similarity(code1, code2):
     """只算相似度，不产出 diff 文本，用于批量比对场景。"""
     ratio = difflib.SequenceMatcher(None, code1.splitlines(), code2.splitlines()).ratio()
     return json.dumps({"ok": True, "similarity": round(ratio, 4)})
+
+
+# --------------------------------------------------------------------------
+# 结构化数据体检
+#
+# 只做「模型自己看不出来」的检查，不做单纯的格式转换或复述：
+#   - JSON 重复键会被静默覆盖，肉眼几乎不可能发现；
+#   - CSV 引号内的逗号/换行会让按逗号切分的直觉判断错列；
+#   - 字段数不一致的行需要逐行比对才能定位。
+# --------------------------------------------------------------------------
+
+
+def _duplicate_json_keys(text):
+    """找出 JSON 对象中的重复键。
+
+    标准 json.loads 遇到重复键时后者静默覆盖前者，不报错也不告警，
+    是配置文件里极隐蔽的一类缺陷。这里用 object_pairs_hook 拦下原始键序列。
+    """
+    dups = []
+
+    def hook(pairs):
+        seen = set()
+        for k, _ in pairs:
+            if k in seen:
+                dups.append(k)
+            else:
+                seen.add(k)
+        return dict(pairs)
+
+    try:
+        json.loads(text, object_pairs_hook=hook)
+    except ValueError:
+        # 语法错误由主流程统一报告，这里不重复处理
+        return []
+    # 去重但保持出现顺序
+    out = []
+    for k in dups:
+        if k not in out:
+            out.append(k)
+    return out
+
+
+def inspect_json(text):
+    """校验 JSON 并给出精确的错误位置与结构摘要。"""
+    try:
+        data = json.loads(text)
+    except ValueError as e:
+        # json 的 JSONDecodeError 带 lineno/colno，比"解析失败"有用得多
+        line = getattr(e, "lineno", None)
+        col = getattr(e, "colno", None)
+        detail = getattr(e, "msg", str(e))
+        snippet = ""
+        if line:
+            lines = text.splitlines()
+            if 0 < line <= len(lines):
+                snippet = lines[line - 1].strip()[:200]
+        return json.dumps(
+            {
+                "ok": True,
+                "format": "JSON",
+                "valid": False,
+                "error": detail,
+                "errorLine": line,
+                "errorColumn": col,
+                "errorSnippet": snippet,
+            }
+        )
+
+    def describe(node, depth=0):
+        """递归统计结构，深度设上限避免深层嵌套导致栈溢出。"""
+        if depth > 20:
+            return {"type": "...", "note": "深度超过 20 层，已停止展开"}
+        if isinstance(node, dict):
+            return {
+                "type": "object",
+                "keys": len(node),
+                "keyNames": list(node.keys())[:30],
+            }
+        if isinstance(node, list):
+            info = {"type": "array", "length": len(node)}
+            if node:
+                kinds = sorted({type(x).__name__ for x in node})
+                info["elementTypes"] = kinds
+                # 数组元素类型不一致往往是数据质量问题
+                info["homogeneous"] = len(kinds) == 1
+                if isinstance(node[0], dict):
+                    # 记录各行字段是否一致，这是表格型 JSON 最常见的坑
+                    key_sets = [frozenset(x.keys()) for x in node if isinstance(x, dict)]
+                    if key_sets:
+                        base = key_sets[0]
+                        odd = [i for i, ks in enumerate(key_sets) if ks != base]
+                        info["inconsistentRows"] = odd[:20]
+                        info["inconsistentRowCount"] = len(odd)
+            return info
+        return {"type": type(node).__name__}
+
+    dups = _duplicate_json_keys(text)
+    return json.dumps(
+        {
+            "ok": True,
+            "format": "JSON",
+            "valid": True,
+            "root": describe(data),
+            "duplicateKeys": dups,
+            "chars": len(text),
+            "lines": len(text.splitlines()),
+        }
+    )
+
+
+def inspect_csv(text, delimiter=","):
+    """校验 CSV：字段数一致性、引号处理、空值分布。
+
+    使用 csv 模块而非按分隔符切分，因此能正确处理引号内的分隔符与换行。
+    """
+    import csv
+    import io as _io
+
+    try:
+        reader = csv.reader(_io.StringIO(text), delimiter=delimiter)
+        rows = list(reader)
+    except csv.Error as e:
+        return json.dumps({"ok": True, "format": "CSV", "valid": False, "error": str(e)})
+
+    if not rows:
+        return json.dumps(
+            {"ok": True, "format": "CSV", "valid": False, "error": "内容为空或无有效行"}
+        )
+
+    header = rows[0]
+    expected = len(header)
+    bad_rows = []
+    for idx, row in enumerate(rows[1:], start=2):
+        if len(row) != expected:
+            bad_rows.append({"line": idx, "fields": len(row)})
+
+    # 逐列统计空值，定位数据缺失集中在哪一列
+    empty_by_col = {}
+    for row in rows[1:]:
+        for i, cell in enumerate(row):
+            if i < expected and not cell.strip():
+                name = header[i] if header[i] else "col%d" % (i + 1)
+                empty_by_col[name] = empty_by_col.get(name, 0) + 1
+
+    # 表头重复会让按名取列产生歧义
+    dup_headers = []
+    seen = set()
+    for h in header:
+        if h in seen and h not in dup_headers:
+            dup_headers.append(h)
+        seen.add(h)
+
+    return json.dumps(
+        {
+            "ok": True,
+            "format": "CSV",
+            "valid": len(bad_rows) == 0,
+            "columns": expected,
+            "headers": header[:50],
+            "duplicateHeaders": dup_headers,
+            "dataRows": len(rows) - 1,
+            "malformedRows": bad_rows[:20],
+            "malformedRowCount": len(bad_rows),
+            "emptyCellsByColumn": empty_by_col,
+        }
+    )

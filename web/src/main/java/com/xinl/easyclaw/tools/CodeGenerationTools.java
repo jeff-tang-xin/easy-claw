@@ -1,7 +1,8 @@
 package com.xinl.easyclaw.tools;
 
 import io.agentscope.core.tool.Tool;
-import io.agentscope.core.tool.ToolParam;import org.slf4j.Logger;
+import io.agentscope.core.tool.ToolParam;
+import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
@@ -126,6 +127,43 @@ public class CodeGenerationTools {
         } catch (Exception e) {
             log.error("代码格式化失败: {}", e.getMessage());
             return "❌ 代码格式化失败: " + e.getMessage();
+        }
+    }
+
+    @Tool(name = "inspect_data", description = "校验 JSON / CSV 文本的结构合法性与数据质量，定位精确错误位置。\n"
+            + "【何时用】拿到配置文件、接口返回、导出表格后，先体检再据此判断改哪里；解析报错但不知错在第几行时。\n"
+            + "【能发现什么】JSON：语法错误的行列号、被静默覆盖的重复键、数组内对象字段不一致的下标；"
+            + "CSV：字段数不一致的行号、重复表头、各列空值分布（正确处理引号内的分隔符，不会误判错列）。\n"
+            + "【不要用于】读取文件（先用 read_file 读入再传 text）；格式转换或美化输出；单纯想看内容（直接 read_file 即可）。\n"
+            + "【参数】text：完整的 JSON 或 CSV 文本；format：json 或 csv；delimiter：CSV 分隔符，默认逗号。")
+    public String inspectData(@ToolParam(name = "text", description = "要校验的完整 JSON 或 CSV 文本（不是文件路径）") String text,
+                             @ToolParam(name = "format", description = "数据格式：json 或 csv") String format,
+                             @ToolParam(name = "delimiter", description = "CSV 分隔符，默认逗号；format=json 时忽略") String delimiter) {
+        if (text == null || text.isBlank()) {
+            return "❌ 待校验内容为空";
+        }
+        if (format == null || format.isBlank()) {
+            return "❌ 请指定 format：json 或 csv";
+        }
+        String fmt = format.trim().toLowerCase();
+        log.info("数据体检: format={}, length={}", fmt, text.length());
+
+        // 此工具不提供 Java 兜底：手写 CSV 引号解析与 JSON 重复键检测本身就是缺陷来源，
+        // 给出不可靠结论比明确失败更危险。
+        if (!pythonAnalyzer.isAvailable()) {
+            return "❌ 数据校验依赖 Python 引擎，当前不可用（需 GraalVM 运行时）。"
+                    + "请改用 execute 调用 jq / python 等外部工具校验。";
+        }
+
+        try {
+            return switch (fmt) {
+                case "json" -> pythonAnalyzer.inspectJson(text);
+                case "csv", "tsv" -> pythonAnalyzer.inspectCsv(text, "tsv".equals(fmt) ? "\t" : delimiter);
+                default -> "❌ 不支持的 format: " + format + "（仅支持 json / csv）";
+            };
+        } catch (RuntimeException e) {
+            log.warn("数据校验失败: {}", e.getMessage());
+            return "❌ 数据校验失败: " + e.getMessage();
         }
     }
 
