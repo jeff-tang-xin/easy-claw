@@ -135,20 +135,28 @@ final class RestrictedFileSystem implements FileSystem {
         return false;
     }
 
-        /** 是否处于禁止子树内（deny 优先于 allow）。 */
+    /** 是否处于禁止子树内（deny 优先于 allow）。 */
     private boolean denied(Path path) {
         return under(path, deniedRoots);
     }
 
-    /** 是否可读：{@code root} 之内、只读根之内、可写根之内，三者取并集，再排除禁止子树。 */
+    /**
+     * 是否可读：{@code root} 与可写根始终可读；只读根需再排除禁止子树。
+     *
+     * <p>deny 只用于「整体放开一个大目录后挖掉其中敏感部分」，不能推翻显式授权：
+     * skill 自身可能就位于工作区 {@code .easyClaw/agent/skills/} 下（页面创建的工作区
+     * skill 即是），若让 deny 无条件优先，脚本连同目录的规则文件都读不到。
+     */
     private boolean readable(Path path) {
-        return !denied(path)
-                && (path.startsWith(root) || under(path, readOnlyRoots) || under(path, writableRoots));
+        if (path.startsWith(root) || under(path, writableRoots)) {
+            return true;
+        }
+        return under(path, readOnlyRoots) && !denied(path);
     }
 
-    /** 是否可写：仅可写根之内，且排除禁止子树。 */
+    /** 是否可写：仅可写根之内（可写根是显式授权，不受 deny 约束）。 */
     private boolean writable(Path path) {
-        return !denied(path) && under(path, writableRoots);
+        return under(path, writableRoots);
     }
 
     /**

@@ -154,6 +154,25 @@ class SkillScriptToolsTest {
     }
 
     @Test
+    @DisplayName("工作区 skill（.easyClaw/agent/skills 下）自身仍可读，不被 deny 规则误伤")
+    void workspaceSkillCanReadItself(@TempDir Path root) throws Exception {
+        assumeTrue(ready, "需要 GraalVM");
+        // 页面「工作区」范围创建的 skill 就落在这里，而它正好位于被 deny 的 .easyClaw/ 之内。
+        // 若 deny 无条件优先于 baseDir，脚本连自己同目录的规则文件都读不到。
+        Path skill = root.resolve(".easyClaw/agent/skills/ws-skill");
+        Files.createDirectories(skill.resolve("scripts"));
+        Files.writeString(skill.resolve("SKILL.md"), "ws skill");
+        Files.writeString(skill.resolve("rules.txt"), "RULE_OK");
+        Files.writeString(skill.resolve("scripts/readown.py"),
+                // 脚本以 eval 方式执行，没有 __file__；工作目录是 skill 根目录，用相对路径即可
+                "print(open('rules.txt').read())\n");
+
+        String out = tools.runSkillScript("ws-skill", "readown.py", null, ws(root));
+
+        assertTrue(out.contains("RULE_OK"), "skill 自身目录应始终可读: " + out);
+    }
+
+    @Test
     @DisplayName("参数缺失时不抛异常，返回可读提示")
     void handlesBlankInput(@TempDir Path root) {
         assertTrue(tools.runSkillScript(null, "x.py", null, ws(root)).contains("未指定 skill"));
