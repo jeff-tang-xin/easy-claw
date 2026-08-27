@@ -86,9 +86,12 @@ public class SkillScriptTools {
         log.info("执行 Skill 脚本: skill={}, script={}, args={}", skill, script,
                 args == null ? 0 : args.size());
 
-        // allowedDir 给到 skill 根目录而非 scripts/：脚本常需读取同级的数据或规则文件
+        // allowedDir 给到 skill 根目录而非 scripts/：脚本常需读取同级的数据或规则文件。
+        // writableDir 传 null（全只读）：脚本没有正当理由改写自身目录，而它一旦能写，
+        // 就能改写同目录的 SKILL.md——该文件会作为 system prompt 注入后续会话，
+        // 且安装器遵循"已存在不覆盖"，被篡改后不会自动修复，形成可自我持久化的投毒路径。
         PythonSandbox.Result result =
-                pythonSandbox.executeScript(target, skillDir.get(), args, SCRIPT_TIMEOUT);
+                pythonSandbox.executeScript(target, skillDir.get(), args, SCRIPT_TIMEOUT, null);
         return render(skill, script, result);
     }
 

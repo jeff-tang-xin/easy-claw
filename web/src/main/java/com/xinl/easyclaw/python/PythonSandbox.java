@@ -161,21 +161,37 @@ public class PythonSandbox {
     }
 
     /**
+     * 在沙箱中执行位于 {@code scriptFile} 的 Python 脚本（脚本目录只读）。
+     *
+     * <p>等价于 {@code executeScript(scriptFile, allowedDir, args, timeout, null)}——
+     * 即<b>不给任何写权限</b>。默认只读是刻意的：脚本能写自身目录就能改写同目录的
+     * {@code SKILL.md}，而该文件会作为 system prompt 注入后续会话。
+     * 需要写入时必须显式传 {@code writableDir}，让放权成为一个看得见的决定。
+     */
+    public Result executeScript(Path scriptFile, Path allowedDir, List<String> args, Duration timeout) {
+        return executeScript(scriptFile, allowedDir, args, timeout, null);
+    }
+
+    /**
      * 在沙箱中执行位于 {@code scriptFile} 的 Python 脚本。
      *
      * <p>与 {@link #execute} 的区别在于脚本以<b>文件</b>而非字符串求值，因此
      * {@code __name__ == "__main__"} 成立、{@code sys.argv} 可用（实测确认），
      * 普通 Python 脚本无需改写即可运行。
      *
-     * <p>文件访问范围锁定为 {@code allowedDir}，脚本因此能 import 同目录的模块、
-     * 读取自带的数据文件，但读不到该目录以外的任何内容。
+     * <p><b>读写范围分离</b>：{@code allowedDir} 只授予读权限（脚本因此能 import
+     * 同目录的模块、读取自带的数据文件），写权限仅限 {@code writableDir}。
+     * 二者都限制不住的路径一律拒绝。
      *
      * @param scriptFile 脚本路径，必须位于 {@code allowedDir} 之内
-     * @param allowedDir 允许读写的目录（非 null）
+     * @param allowedDir 允许<b>读取</b>的目录（非 null），同时作为相对路径基准
      * @param args 传给脚本的参数，映射为 {@code sys.argv[1:]}
      * @param timeout 超时时间；null 用默认值
+     * @param writableDir 允许写入的目录；{@code null} 表示脚本完全不能写文件。
+     *     该目录会自动获得读权限，无需再列入 {@code allowedDir}
      */
-    public Result executeScript(Path scriptFile, Path allowedDir, List<String> args, Duration timeout) {
+    public Result executeScript(Path scriptFile, Path allowedDir, List<String> args,
+                                Duration timeout, Path writableDir) {
         if (!isAvailable()) {
             return new Result(false, "", "", "Python 运行时不可用（需 GraalVM）", 0);
         }
@@ -197,6 +213,9 @@ public class PythonSandbox {
         } catch (java.io.IOException e) {
             return new Result(false, "", "", "无法解析脚本路径: " + e.getMessage(), 0);
         }
+        // 空列表与 null 在 RestrictedFileSystem 里语义不同：空=全只读，null=allowedDir 可写。
+        // 这里必须映射成空列表，否则"未指定 writableDir"会静默变成"脚本目录可写"。
+        List<Path> writableDirs = writableDir == null ? List.of() : List.of(writableDir);
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         ByteArrayOutputStream err = new ByteArrayOutputStream();
         long start = System.currentTimeMillis();
@@ -208,7 +227,7 @@ public class PythonSandbox {
             argv.addAll(args);
         }
 
-        Context ctx = buildContext(out, err, allowedDir, argv);
+        Context ctx = buildContext(out, err, allowedDir, argv, writableDirs);
         Thread watchdog = startWatchdog(ctx, limit);
         try {
             String code = java.nio.file.Files.readString(script, StandardCharsets.UTF_8);
@@ -252,9 +271,13 @@ public class PythonSandbox {
      *
      * <p>白名单式放权：默认全禁，只放开明确需要的。这样新增的 polyglot 能力
      * 不会因为默认开启而意外可用。
+     *
+     * <p>此重载用于 {@code run_python}：{@code allowedDir} 即工作目录，可读可写
+     * （传 {@code null} 给 writableDirs 表示沿用该语义）。模型现场生成的代码
+     * 本就以"处理附件"为目的，需要写权限。
      */
     private Context buildContext(ByteArrayOutputStream out, ByteArrayOutputStream err, Path allowedDir) {
-        return buildContext(out, err, allowedDir, null);
+        return buildContext(out, err, allowedDir, null, null);
     }
 
     /**
@@ -309,7 +332,7 @@ public class PythonSandbox {
     private volatile List<Path> stdlibRootsCache;
 
     private Context buildContext(ByteArrayOutputStream out, ByteArrayOutputStream err,
-                                 Path allowedDir, List<String> argv) {
+                                 Path allowedDir, List<String> argv, List<Path> writableDirs) {
         Context.Builder builder = Context.newBuilder("python")
                 .out(out)
                 .err(err)
@@ -344,7 +367,8 @@ public class PythonSandbox {
             // cwd 只影响相对路径解析，不是安全边界。
             try {
                 builder.allowIO(org.graalvm.polyglot.io.IOAccess.newBuilder()
-                        .fileSystem(new RestrictedFileSystem(allowedDir, stdlibRoots()))
+                        .fileSystem(new RestrictedFileSystem(
+                                allowedDir, stdlibRoots(), writableDirs))
                         .build())
                         .currentWorkingDirectory(allowedDir.toAbsolutePath());
             } catch (java.io.IOException e) {

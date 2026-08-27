@@ -29,18 +29,29 @@ import org.slf4j.LoggerFactory;
  * <p><b>实现要点</b>：所有接受 Path 的方法统一过 {@link #guard(Path)}。校验分两步：
  *
  * <ol>
- *   <li>规范化后判断是否在根目录下——挡掉 {@code ..} 与绝对路径；
+ *   <li>规范化后判断是否落在允许的根之内——挡掉 {@code ..} 与绝对路径；
  *   <li>对已存在的路径再解析真实路径（跟随符号链接）后复查——挡掉符号链接逃逸。
  * </ol>
  *
  * <p>符号链接必须单独处理：仅做字符串规范化的话，沙箱内一个指向 {@code C:\} 的链接
  * 就能绕过全部检查。
  *
- * <p><b>只读根</b>：Python 的标准库不在工作目录里（{@code sys.prefix} 指向 GraalPy 的
- * python-home），若只放开工作目录，连 {@code import ast} 都会失败——
- * 实测报 {@code ModuleNotFoundError: No module named 'ast'}。因此额外接受一组
- * <b>只读</b>根用于加载运行时自身文件：可读、可遍历，但写/删/改一律拒绝，
- * 避免脚本篡改标准库去污染后续执行。
+ * <p><b>三类根</b>：
+ *
+ * <ul>
+ *   <li>{@code root}——相对路径解析基准，始终可读；
+ *   <li>{@code readOnlyRoots}——可读可遍历、写删改一律拒绝；
+ *   <li>{@code writableRoots}——唯一允许写入的集合，可以为空（全沙箱只读）。
+ * </ul>
+ *
+ * <p>把"可读"与"可写"拆开而不是共用一个根，是为了支持执行随包发布的脚本：
+ * 脚本需要读自身目录，却不该能改写自身目录——否则脚本可以改写同目录的
+ * {@code SKILL.md}，而该文件会作为 system prompt 注入后续会话，
+ * 形成可自我持久化的提示词投毒路径。
+ *
+ * <p>Python 的标准库不在工作目录里（{@code sys.prefix} 指向 GraalPy 的 python-home），
+ * 若只放开工作目录，连 {@code import ast} 都会失败——实测报
+ * {@code ModuleNotFoundError: No module named 'ast'}，因此标准库目录也通过只读根放行。
  */
 final class RestrictedFileSystem implements FileSystem {
 
@@ -49,38 +60,75 @@ final class RestrictedFileSystem implements FileSystem {
 
     private final FileSystem delegate = FileSystem.newDefaultFileSystem();
 
-    /** 允许读写的根目录，已解析为真实绝对路径。 */
+    /** 相对路径的解析基准，同时是唯一保证可读的根，已解析为真实绝对路径。 */
     private final Path root;
 
-    /** 只读根（如 Python 标准库目录），已解析为真实绝对路径。 */
+    /** 只读根（如 Python 标准库目录、只读的 skill 目录），已解析为真实绝对路径。 */
     private final List<Path> readOnlyRoots;
 
-    RestrictedFileSystem(Path allowedDir) throws IOException {
-        this(allowedDir, List.of());
+    /**
+     * 可写根，已解析为真实绝对路径。
+     *
+     * <p>为空表示<b>整个沙箱只读</b>——这是刻意支持的状态：执行随包发布的 skill 脚本时，
+     * 脚本没有任何理由改写自身所在目录（详见 {@code PythonSandbox.executeScript}）。
+     */
+    private final List<Path> writableRoots;
+
+    /**
+     * @param allowedDir 相对路径基准目录，始终可读
+     * @param readOnlyRoots 额外的只读根
+     * @param writableRoots 可写根；传 {@code null} 表示 {@code allowedDir} 可写，
+     *     传空列表表示全沙箱只读。用 null 与空列表区分这两种意图，避免调用方
+     *     漏传参数时静默获得写权限——安全默认值必须是"更严"的那一侧。
+     */
+    RestrictedFileSystem(Path allowedDir, List<Path> readOnlyRoots, List<Path> writableRoots)
+            throws IOException {
+        this.root = allowedDir.toRealPath();
+        this.readOnlyRoots = resolveAll(readOnlyRoots, "只读根");
+        this.writableRoots = writableRoots == null
+                ? List.of(this.root)
+                : resolveAll(writableRoots, "可写根");
     }
 
-    RestrictedFileSystem(Path allowedDir, List<Path> readOnlyRoots) throws IOException {
-        this.root = allowedDir.toRealPath();
+    /**
+     * 批量解析真实路径，跳过不存在的项。
+     *
+     * <p>解析失败只跳过不抛：运行时目录缺失不该让整个沙箱不可用，
+     * 后续 import/写入时报的错比这里抛异常更贴近根因。
+     */
+    private static List<Path> resolveAll(List<Path> raw, String what) {
+        if (raw == null || raw.isEmpty()) {
+            return List.of();
+        }
         List<Path> resolved = new ArrayList<>();
-        for (Path p : readOnlyRoots) {
+        for (Path p : raw) {
             try {
                 resolved.add(p.toRealPath());
             } catch (IOException missing) {
-                // 运行时目录缺失不该让整个沙箱不可用，跳过即可（后续 import 会报错，信息更直接）
-                log.warn("只读根不存在，已忽略: {}", p);
+                log.warn("{}不存在，已忽略: {}", what, p);
             }
         }
-        this.readOnlyRoots = List.copyOf(resolved);
+        return List.copyOf(resolved);
     }
 
-    /** 判断路径是否位于任一只读根内。 */
-    private boolean inReadOnlyRoot(Path normalized) {
-        for (Path ro : readOnlyRoots) {
-            if (normalized.startsWith(ro)) {
+    /** 判断路径是否位于给定的任一根之内。 */
+    private static boolean under(Path path, List<Path> roots) {
+        for (Path r : roots) {
+            if (path.startsWith(r)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /** 是否可读：{@code root} 之内、只读根之内、可写根之内，三者取并集。 */
+    private boolean readable(Path path) {
+        return path.startsWith(root) || under(path, readOnlyRoots) || under(path, writableRoots);
+    }
+
+    /** 是否可写：仅可写根之内。 */
+    private boolean writable(Path path) {
+        return under(path, writableRoots);
     }
 
     /**
@@ -101,19 +149,24 @@ final class RestrictedFileSystem implements FileSystem {
     private Path guard(Path path, boolean write) throws IOException {
         Path abs = path.isAbsolute() ? path : root.resolve(path);
         Path normalized = abs.normalize();
-        boolean inWorkspace = normalized.startsWith(root);
-        if (!inWorkspace && !inReadOnlyRoot(normalized)) {
-            throw new AccessDeniedException("沙箱拒绝访问: " + path + "（超出允许目录 " + root + "）");
+        if (!readable(normalized)) {
+            throw new AccessDeniedException("沙箱拒绝访问: " + path + "（超出允许访问的目录范围）");
         }
-        if (write && !inWorkspace) {
-            throw new AccessDeniedException("沙箱拒绝写入: " + path + "（该目录为只读的运行时目录）");
+        if (write && !writable(normalized)) {
+            throw new AccessDeniedException("沙箱拒绝写入: " + path + "（该目录为只读）");
         }
         // 符号链接可能指向根目录之外，需按真实路径复查。
         try {
             Path real = normalized.toRealPath();
-            if (!real.startsWith(root) && !inReadOnlyRoot(real)) {
+            if (!readable(real)) {
                 throw new AccessDeniedException(
                         "沙箱拒绝访问: " + path + "（符号链接指向目录之外）");
+            }
+            // 写权限同样按真实路径复查：只读根里一个指向可写目录的链接，
+            // 反过来也可能被用来绕过只读限制。
+            if (write && !writable(real)) {
+                throw new AccessDeniedException(
+                        "沙箱拒绝写入: " + path + "（符号链接目标为只读）");
             }
             return real;
         } catch (AccessDeniedException denied) {
@@ -123,7 +176,7 @@ final class RestrictedFileSystem implements FileSystem {
             // 若父目录是指向沙箱外的符号链接（root/link -> C:\），则 root/link/new.txt
             // 的字符串形式完全合法，toRealPath 又因末段不存在而失败，
             // 写操作就会穿过链接落到 C:\new.txt。必须改为校验最近的已存在祖先。
-            guardNearestExistingAncestor(path, normalized);
+            guardNearestExistingAncestor(path, normalized, write);
             return normalized;
         }
     }
@@ -133,7 +186,8 @@ final class RestrictedFileSystem implements FileSystem {
      *
      * <p>这样即便目标文件尚未创建，也无法借助父目录上的符号链接逃出沙箱。
      */
-    private void guardNearestExistingAncestor(Path original, Path normalized) throws IOException {
+    private void guardNearestExistingAncestor(Path original, Path normalized, boolean write)
+            throws IOException {
         for (Path parent = normalized.getParent(); parent != null; parent = parent.getParent()) {
             Path realParent;
             try {
@@ -141,9 +195,13 @@ final class RestrictedFileSystem implements FileSystem {
             } catch (IOException stillMissing) {
                 continue; // 这一层也不存在，继续往上找
             }
-            if (!realParent.startsWith(root) && !inReadOnlyRoot(realParent)) {
+            if (!readable(realParent)) {
                 throw new AccessDeniedException(
                         "沙箱拒绝访问: " + original + "（父目录经符号链接指向目录之外）");
+            }
+            if (write && !writable(realParent)) {
+                throw new AccessDeniedException(
+                        "沙箱拒绝写入: " + original + "（父目录为只读）");
             }
             return;
         }
