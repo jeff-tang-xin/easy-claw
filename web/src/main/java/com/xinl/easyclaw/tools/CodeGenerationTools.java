@@ -32,8 +32,71 @@ public class CodeGenerationTools {
 
     private final PythonCodeAnalyzer pythonAnalyzer;
 
-    public CodeGenerationTools(PythonCodeAnalyzer pythonAnalyzer) {
+    private final com.xinl.easyclaw.python.PythonSandbox pythonSandbox;
+
+    public CodeGenerationTools(PythonCodeAnalyzer pythonAnalyzer,
+                               com.xinl.easyclaw.python.PythonSandbox pythonSandbox) {
         this.pythonAnalyzer = pythonAnalyzer;
+        this.pythonSandbox = pythonSandbox;
+    }
+
+    @Tool(name = "run_python", description = """
+            执行一段 Python 3 代码并返回其输出。用于把"需要精确计算"的活交给解释器，而不是靠推理硬算。
+            【何时用】数学与统计计算、日期时间换算、进制/编码转换、哈希校验、正则批量抽取与替换、\
+            JSON/CSV 结构变换、排序去重聚合、组合枚举与模拟验证——凡是自己算容易出错、\
+            但写几行代码就能算准的场景，都应该用本工具而不是直接给答案。
+            【怎么用】必须用 print() 输出结果，否则返回为空（表达式的值不会自动显示）。\
+            代码在每次调用时于全新解释器中执行，不保留上一次的变量、导入或函数定义，\
+            需要延续的内容请在同一段代码里写完。
+            【可用能力】Python 标准库（math、statistics、json、csv、re、datetime、decimal、\
+            fractions、itertools、collections、hashlib、base64、textwrap、difflib、unicodedata 等）。\
+            不支持 numpy/pandas 等第三方库，也没有网络访问。
+            【文件】默认无法读写磁盘。要处理文件内容，请先用 read_file 读出来，\
+            以字符串字面量的形式写进代码里。
+            【限制】执行超时 30 秒（死循环会被强制终止）；输出过长会被截断。
+            【报错】语法或运行时错误会原样返回 Python traceback，可据此修正后重试。""")
+    public String runPython(@ToolParam(name = "code",
+            description = "要执行的 Python 3 代码。记得用 print() 输出你想看到的结果。") String code) {
+        if (code == null || code.isBlank()) {
+            return "❌ 代码内容为空";
+        }
+        log.info("执行 Python 代码: length={}", code.length());
+        if (!pythonSandbox.isAvailable()) {
+            // 明确告知不可用并给出替代路径，避免模型反复重试同一工具
+            return "❌ Python 执行环境不可用（当前 JVM 非 GraalVM）。请改用 execute 工具调用系统 python 命令。";
+        }
+
+        com.xinl.easyclaw.python.PythonSandbox.Result result = pythonSandbox.execute(code, null, null);
+        return renderResult(result);
+    }
+
+    /**
+     * 把执行结果拼成模型易读的文本。
+     *
+     * <p>要点：失败时必须同时给出已产生的 stdout——部分输出往往正是定位问题的线索；
+     * 成功但无输出时要明确提示 print()，否则模型容易反复空跑。
+     */
+    private String renderResult(com.xinl.easyclaw.python.PythonSandbox.Result result) {
+        StringBuilder sb = new StringBuilder();
+        if (result.ok()) {
+            sb.append("✅ 执行成功（").append(result.millis()).append("ms）\n");
+        } else {
+            sb.append("❌ 执行失败（").append(result.millis()).append("ms）\n");
+        }
+        if (!result.stdout().isBlank()) {
+            sb.append("\n--- 输出 ---\n").append(result.stdout().stripTrailing()).append('\n');
+        }
+        if (!result.stderr().isBlank()) {
+            sb.append("\n--- stderr ---\n").append(result.stderr().stripTrailing()).append('\n');
+        }
+        if (result.error() != null) {
+            sb.append("\n--- 错误 ---\n").append(result.error().stripTrailing()).append('\n');
+        }
+        if (result.ok() && !result.hasOutput()) {
+            sb.append("\n⚠️ 代码执行完毕但没有任何输出。Python 不会自动显示表达式的值，"
+                    + "请用 print() 包裹你想查看的结果后重试。");
+        }
+        return sb.toString();
     }
 
     @Tool(name = "analyze_code", description = "统计代码结构指标：行数（区分代码/注释/空行）、函数数、类数、嵌套深度、导入模块。\n"

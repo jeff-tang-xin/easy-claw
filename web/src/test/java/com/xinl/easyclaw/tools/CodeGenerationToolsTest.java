@@ -32,7 +32,8 @@ class CodeGenerationToolsTest {
         engine = new GraalPyEngine();
         engine.init();
         pythonReady = engine.isAvailable();
-        tools = new CodeGenerationTools(new PythonCodeAnalyzer(engine));
+        tools = new CodeGenerationTools(new PythonCodeAnalyzer(engine),
+                new com.xinl.easyclaw.python.PythonSandbox());
     }
 
     @Nested
