@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.scenario.ScenarioBinding;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.scenario.repository.ScenarioRepository;
 import com.xinl.easyclaw.workspace.repository.WorkspaceScenarioRepository;
@@ -44,6 +45,14 @@ public class ScenarioResolver {
             log.warn("查询激活场景失败（忽略，按无场景构建）: workspace={}, {}", workspaceId, e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * 当前激活场景的能力绑定（未激活时返回 {@link ScenarioBinding#EMPTY} = 不限制）。
+     * <p>供 Agent 装配时决定 toolkit 白名单、子 Agent 隔离与提示词推荐。
+     */
+    public ScenarioBinding activeBinding(String workspaceId) {
+        return ScenarioBinding.from(activeScenario(workspaceId));
     }
 
     /**

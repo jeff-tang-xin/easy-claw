@@ -26,7 +26,7 @@ public class SchemaMigration {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaMigration.class);
 
-    private static final int CURRENT_VERSION = 2;
+    private static final int CURRENT_VERSION = 3;
 
     public SchemaMigration(DataSource dataSource) {
         try (Connection conn = dataSource.getConnection()) {
@@ -45,6 +45,12 @@ public class SchemaMigration {
             if (applied < 2) {
                 migrateV2(conn);
                 setVersion(conn, 2);
+            }
+
+            // v3: scenarios 表补 skill/subagent/MCP 绑定四列
+            if (applied < 3) {
+                migrateV3(conn);
+                setVersion(conn, 3);
             }
 
         } catch (Exception e) {
@@ -91,6 +97,33 @@ public class SchemaMigration {
             }
             log.info("[SchemaMigration.v2] 已添加 mcp_services.enabled_tools 列。");
         }
+    }
+
+    /**
+     * v3: scenarios 表补场景能力绑定列 —— skills / subagents / mcp_services / capability_tier。
+     * <p>全部可空，不设默认值：NULL = 未绑定 = 不限制（向后兼容既有场景）。
+     */
+    private void migrateV3(Connection conn) throws Exception {
+        if (!tableExists(conn, "scenarios")) {
+            log.info("[SchemaMigration.v3] scenarios 不存在，跳过（Hibernate 会按实体建）。");
+            return;
+        }
+        addColumnIfAbsent(conn, "scenarios", "skills", "TEXT");
+        addColumnIfAbsent(conn, "scenarios", "subagents", "TEXT");
+        addColumnIfAbsent(conn, "scenarios", "mcp_services", "TEXT");
+        addColumnIfAbsent(conn, "scenarios", "capability_tier", "TEXT");
+    }
+
+    /** 幂等加列：已存在则跳过，避免重复迁移报错 */
+    private void addColumnIfAbsent(Connection conn, String table, String column, String type)
+            throws Exception {
+        if (columnExists(conn, table, column)) {
+            return;
+        }
+        try (Statement stmt = conn.createStatement()) {
+            stmt.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
+        }
+        log.info("[SchemaMigration.v3] 已添加 {}.{} 列。", table, column);
     }
 
     // ======================== 工具方法 ========================

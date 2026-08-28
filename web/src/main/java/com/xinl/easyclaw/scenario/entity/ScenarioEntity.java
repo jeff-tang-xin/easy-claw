@@ -65,6 +65,37 @@ public class ScenarioEntity {
     @Column(columnDefinition = "TEXT")
     private String workflow;
 
+    /**
+     * 场景绑定的 skill 名（JSON 数组，如 {@code ["clean-code","code-refactor"]}）。
+     * <p><b>软约束</b>：仅作为提示词推荐注入主智能体，不做硬裁剪 ——
+     * 主智能体仍可使用其他 skill。空 = 不限制。
+     */
+    @Column(columnDefinition = "TEXT")
+    private String skills;
+
+    /**
+     * 场景绑定的子智能体名（JSON 数组）。
+     * <p><b>软约束</b>：提示词层面推荐优先调度这些子 Agent。空 = 不限制。
+     */
+    @Column(columnDefinition = "TEXT")
+    private String subagents;
+
+    /**
+     * 场景绑定的 MCP 服务名（JSON 数组，如 {@code ["filesystem","github"]}）。
+     * <p><b>硬约束</b>：非空时展开为工具名白名单，未绑定的 MCP 工具不会注册进
+     * toolkit。空 = 不限制（继承全部已连接的 MCP，向后兼容）。
+     */
+    @Column(name = "mcp_services", columnDefinition = "TEXT")
+    private String mcpServices;
+
+    /**
+     * 主智能体基础能力档位：none / readonly / standard / full。
+     * <p>仅在存在硬约束绑定（mcpServices 非空）时参与白名单计算；
+     * 为空时取默认档位。见 {@code CapabilityTier}。
+     */
+    @Column(name = "capability_tier", length = 20)
+    private String capabilityTier;
+
     @Column(name = "is_active")
     @Builder.Default
     private Boolean active = true;

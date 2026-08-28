@@ -14,8 +14,10 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Agent 工厂
@@ -85,6 +87,19 @@ public class AgentFactory {
      * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 用户定义的 HTTP 工具 + 已连接的 MCP 服务工具
      */
     public Toolkit createWorkspaceToolkit() {
+        return createWorkspaceToolkit(null);
+    }
+
+    /**
+     * 创建 Workspace Toolkit，并按场景绑定的 MCP 服务做<b>硬隔离</b>。
+     * <p>
+     * 与无参版本的唯一区别：{@code allowedMcpServices} 非空时，只注册这些服务的
+     * MCP 工具；其余已连接服务被跳过。内置工具（文件/代码/搜索）不受影响 ——
+     * 它们由 {@code CapabilityTier} 在子智能体层面裁剪，主智能体始终保留。
+     *
+     * @param allowedMcpServices 允许的 MCP 服务名；<b>null/空 = 不限制</b>（注册全部，向后兼容）
+     */
+    public Toolkit createWorkspaceToolkit(List<String> allowedMcpServices) {
         Toolkit toolkit = new Toolkit();
 
         Toolkit.ToolRegistration registration = toolkit.registration();
@@ -108,9 +123,14 @@ public class AgentFactory {
         }
 
         // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
+        Set<String> mcpAllowlist = normalizedServiceNames(allowedMcpServices);
         Map<Long, McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
         mcpClients.forEach((serviceId, client) -> {
             try {
+                if (!mcpAllowlist.isEmpty() && !isMcpServiceAllowed(serviceId, mcpAllowlist)) {
+                    log.info("场景未绑定该 MCP 服务，跳过注册 (serviceId={})", serviceId);
+                    return;
+                }
                 List<String> enableTools = mcpConnectionService.getEnabledTools(serviceId);
                 registerMcpWithFilters(toolkit, client, enableTools);
                 if (enableTools.isEmpty()) {
@@ -123,6 +143,39 @@ public class AgentFactory {
             }
         });
         return toolkit;
+    }
+
+    /** 规范化场景绑定的 MCP 服务名（去空、trim、小写），空集表示不限制 */
+    private Set<String> normalizedServiceNames(List<String> serviceNames) {
+        Set<String> result = new HashSet<>();
+        if (serviceNames == null) {
+            return result;
+        }
+        for (String name : serviceNames) {
+            if (name != null && !name.isBlank()) {
+                result.add(name.trim().toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 判断某个 MCP 服务是否在场景白名单内。
+     * <p><b>fail-closed</b>：查不到服务记录时返回 false —— 硬隔离场景下
+     * 「无法确认身份」必须按拒绝处理，不能放行。
+     */
+    private boolean isMcpServiceAllowed(Long serviceId, Set<String> allowlist) {
+        try {
+            return mcpConnectionService.findAll().stream()
+                    .filter(e -> serviceId.equals(e.getId()))
+                    .findFirst()
+                    .map(e -> e.getName() != null
+                            && allowlist.contains(e.getName().trim().toLowerCase(java.util.Locale.ROOT)))
+                    .orElse(false);
+        } catch (Exception e) {
+            log.warn("校验 MCP 服务白名单失败 (serviceId={})，按拒绝处理: {}", serviceId, e.getMessage());
+            return false;
+        }
     }
 
     /**

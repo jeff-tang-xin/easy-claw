@@ -7,6 +7,7 @@ import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
+import com.xinl.easyclaw.scenario.ScenarioBinding;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.Model;
@@ -141,18 +142,25 @@ public class WorkspaceAgentBuilder {
             log.warn("创建全局能力目录失败: {}", e.getMessage());
         }
 
+        // 场景能力绑定：一次解析，三处使用（toolkit 硬隔离 / 子 Agent skill 隔离 / 提示词推荐）
+        ScenarioBinding binding = scenarioResolver.activeBinding(workspaceId);
+        if (!binding.isEmpty()) {
+            log.info("场景能力绑定已生效: workspace={}, {}", workspaceId, binding);
+        }
+
         // 多 Agent 编排：全局 + Workspace 两级子 Agent（同名时 workspace 覆盖 global）
         List<SubagentDeclaration> subagents = subagentLoader.loadMerged(
-                globalSubagentsDir, agentRoot.resolve("subagents"));
+                globalSubagentsDir, agentRoot.resolve("subagents"), binding);
 
-        String sysPrompt = composeSystemPrompt(workspaceId, subagents, sysPromptAugment);
+        String sysPrompt = composeSystemPrompt(workspaceId, subagents, sysPromptAugment, binding);
 
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(workspaceId)
                 .description(name)
                 .sysPrompt(sysPrompt)
                 .model(resolveMainModel())
-                .toolkit(agentFactory.createWorkspaceToolkit())
+                .toolkit(agentFactory.createWorkspaceToolkit(
+                        binding.hasMcpBinding() ? binding.mcpServices() : null))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
                 .workspace(agentRoot)
                 .filesystem(fsSpec)
@@ -258,7 +266,7 @@ public class WorkspaceAgentBuilder {
      * 顺序有意义：越靠后的片段越具体，模型对靠后的指令更敏感。
      */
     private String composeSystemPrompt(String workspaceId, List<SubagentDeclaration> subagents,
-                                       String sysPromptAugment) {
+                                       String sysPromptAugment, ScenarioBinding binding) {
         String sysPrompt = agentFactory.defaultSystemPrompt();
 
         if (!subagents.isEmpty()) {
@@ -284,7 +292,70 @@ public class WorkspaceAgentBuilder {
                     workspaceId, scenarioAugment.length());
         }
 
+        String recommendation = capabilityRecommendation(binding, subagents);
+        if (recommendation != null) {
+            sysPrompt = sysPrompt + recommendation;
+            log.info("场景能力推荐已注入 system prompt: workspace={}", workspaceId);
+        }
+
         return sysPrompt;
+    }
+
+    /**
+     * 场景能力的<b>软提示</b>：把绑定的 skill / 子 Agent 作为「优先使用」建议告知主智能体。
+     * <p>
+     * 为什么是软的：主智能体承担兜底职责，一旦硬禁掉未绑定能力，遇到场景没预料到的
+     * 请求就会直接失能。硬隔离只施加在子 Agent（见 {@code SubagentLoader}）与
+     * MCP 工具注册（见 {@code AgentFactory}）两处。
+     *
+     * @return 待追加的提示词片段；无可推荐内容时返回 {@code null}
+     */
+    private String capabilityRecommendation(ScenarioBinding binding,
+                                            List<SubagentDeclaration> subagents) {
+        if (binding == null || binding.isEmpty()) {
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        if (binding.hasSkillBinding()) {
+            sb.append("\n- 本场景推荐优先使用的 Skill：")
+                    .append(String.join("、", binding.skills()))
+                    .append("。遇到匹配的任务先加载它们；确有需要时也可使用其他 Skill。");
+        }
+        List<String> boundAgents = availableBoundAgents(binding, subagents);
+        if (!boundAgents.isEmpty()) {
+            sb.append("\n- 本场景推荐优先调度的子 Agent：")
+                    .append(String.join("、", boundAgents))
+                    .append("。拆解任务时优先考虑它们。");
+        }
+        if (binding.hasMcpBinding()) {
+            sb.append("\n- 本场景已限定可用的 MCP 服务：")
+                    .append(String.join("、", binding.mcpServices()))
+                    .append("。未列出的 MCP 工具已不在工具集中，不要尝试调用。");
+        }
+        if (sb.isEmpty()) {
+            return null;
+        }
+        return "\n\n## 🎯 本场景能力配置\n" + sb;
+    }
+
+    /**
+     * 过滤出「绑定了且确实加载成功」的子 Agent 名。
+     * <p>绑定里可能写着已删除或改名的子 Agent，推荐一个不存在的名字会诱导模型
+     * 反复调用失败的工具，因此以实际加载结果为准。
+     */
+    private List<String> availableBoundAgents(ScenarioBinding binding,
+                                              List<SubagentDeclaration> subagents) {
+        List<String> result = new java.util.ArrayList<>();
+        for (String bound : binding.subagents()) {
+            boolean loaded = subagents.stream()
+                    .anyMatch(d -> d.getName() != null && d.getName().equalsIgnoreCase(bound));
+            if (loaded) {
+                result.add(bound);
+            } else {
+                log.warn("场景绑定的子 Agent [{}] 未在工作区加载，已从推荐名单剔除", bound);
+            }
+        }
+        return result;
     }
 
     /** 子 Agent 团队名册与调度规则 */
