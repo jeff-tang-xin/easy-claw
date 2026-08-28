@@ -7,6 +7,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -32,19 +33,31 @@ public final class ScenarioBinding {
 
     /** 无绑定单例：任何 isEmpty() 判断都为真，调用方走原有不限制路径 */
     public static final ScenarioBinding EMPTY =
-            new ScenarioBinding(List.of(), List.of(), List.of(), CapabilityTier.STANDARD);
+            new ScenarioBinding(List.of(), List.of(), List.of(),
+                    CapabilityTier.STANDARD, false, List.of());
 
     private final List<String> skills;
     private final List<String> subagents;
     private final List<String> mcpServices;
     private final CapabilityTier tier;
+    /**
+     * 场景是否<b>显式</b>配置了档位。
+     * <p>必须与「解析结果恰好等于默认值 STANDARD」区分开：未配置时不能裁剪工具，
+     * 否则既有场景的子 Agent 会静默失去 execute / 子 Agent 调度等能力。
+     */
+    private final boolean tierExplicit;
+    /** 场景绑定 MCP 服务展开后的工具名（由上层注入，本类不访问数据库） */
+    private final List<String> mcpTools;
 
     private ScenarioBinding(List<String> skills, List<String> subagents,
-                            List<String> mcpServices, CapabilityTier tier) {
+                            List<String> mcpServices, CapabilityTier tier,
+                            boolean tierExplicit, List<String> mcpTools) {
         this.skills = Collections.unmodifiableList(skills);
         this.subagents = Collections.unmodifiableList(subagents);
         this.mcpServices = Collections.unmodifiableList(mcpServices);
         this.tier = tier;
+        this.tierExplicit = tierExplicit;
+        this.mcpTools = Collections.unmodifiableList(mcpTools);
     }
 
     /**
@@ -56,11 +69,15 @@ public final class ScenarioBinding {
         if (scenario == null) {
             return EMPTY;
         }
+        String rawTier = scenario.getCapabilityTier();
+        boolean explicit = rawTier != null && !rawTier.isBlank();
         return new ScenarioBinding(
                 parseNameArray(scenario.getSkills()),
                 parseNameArray(scenario.getSubagents()),
                 parseNameArray(scenario.getMcpServices()),
-                CapabilityTier.parse(scenario.getCapabilityTier(), CapabilityTier.STANDARD));
+                CapabilityTier.parse(rawTier, CapabilityTier.STANDARD),
+                explicit,
+                List.of());
     }
 
     /**
@@ -127,9 +144,38 @@ public final class ScenarioBinding {
         return tier;
     }
 
+    /** 场景绑定 MCP 服务展开后的工具名 */
+    public List<String> mcpTools() {
+        return mcpTools;
+    }
+
+    /**
+     * 返回一个附带 MCP 展开工具名的副本（值对象保持不可变）。
+     * <p>展开需要查库，由 {@code McpToolExpander} 在上层完成后注入，
+     * 避免本类依赖持久层。
+     */
+    public ScenarioBinding withMcpTools(Collection<String> expanded) {
+        List<String> safe = (expanded == null) ? List.of() : List.copyOf(expanded);        return new ScenarioBinding(
+                new ArrayList<>(skills), new ArrayList<>(subagents),
+                new ArrayList<>(mcpServices), tier, tierExplicit, new ArrayList<>(safe));
+    }
+
     /** 是否存在 MCP 硬约束（决定 toolkit 是否走白名单路径） */
     public boolean hasMcpBinding() {
         return !mcpServices.isEmpty();
+    }
+
+    /** 档位是否由场景显式配置 */
+    public boolean hasExplicitTier() {
+        return tierExplicit;
+    }
+
+    /**
+     * 是否需要对子 Agent 施加工具白名单。
+     * <p>仅在<b>显式</b>配置档位或绑定了 MCP 时成立 —— 未配置即不裁剪，保持向后兼容。
+     */
+    public boolean hasToolBinding() {
+        return tierExplicit || hasMcpBinding();
     }
 
     /** 是否存在 skill 硬隔离（决定子 Agent 是否施加 SkillFilter） */
@@ -139,12 +185,13 @@ public final class ScenarioBinding {
 
     /** 完全无绑定：调用方可直接短路到原有「不限制」逻辑 */
     public boolean isEmpty() {
-        return skills.isEmpty() && subagents.isEmpty() && mcpServices.isEmpty();
+        return skills.isEmpty() && subagents.isEmpty() && mcpServices.isEmpty() && !tierExplicit;
     }
 
     @Override
     public String toString() {
         return "ScenarioBinding{skills=" + skills + ", subagents=" + subagents
-                + ", mcpServices=" + mcpServices + ", tier=" + tier + '}';
+                + ", mcpServices=" + mcpServices + ", tier=" + tier
+                + (tierExplicit ? "(explicit)" : "(default)") + '}';
     }
 }

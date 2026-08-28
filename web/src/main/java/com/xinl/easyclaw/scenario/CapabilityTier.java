@@ -32,9 +32,22 @@ public enum CapabilityTier {
     private static final List<String> READ_TOOLS = List.of(
             "read_file", "grep_files", "glob_files", "list_files",
             "memory_search", "memory_get",
-            "session_search", "session_list", "session_history");
+            "session_search", "session_list", "session_history",
+            // 自定义只读工具：与框架 read_file/grep_files 同性质，
+            // 漏掉会让 READONLY 档位的子 Agent 连目录都列不全
+            "list_directory", "search_files",
+            "analyze_code", "diff_code", "inspect_data",
+            // 联网检索：harness 注册名为 web_fetch，本项目另有 @Tool fetch_webpage，两者都要放
+            "web_search", "web_fetch", "fetch_webpage");
 
-    private static final List<String> WRITE_TOOLS = List.of("write_file", "edit_file");
+    /**
+     * 写入类工具。{@code memory_save} 归此档而非只读档：它会真正落盘改写 MEMORY.md。
+     * <p>注意本项目 {@code ToolRegistryService.FRAMEWORK_MEMORY_TOOLS} 遗漏了 memory_save，
+     * 但 harness 的 {@code MemorySaveTool} 确实注册了它 —— 白名单以 harness 实际注册名为准，
+     * 否则 STANDARD 档位的子 Agent 会静默失去记忆写入能力。
+     */
+    private static final List<String> WRITE_TOOLS =
+            List.of("write_file", "edit_file", "format_code", "memory_save");
 
     /**
      * 自定义 @Tool（不属于框架分组）。归入 STANDARD 的理由：
@@ -47,7 +60,7 @@ public enum CapabilityTier {
 
     private static final List<String> SUBAGENT_TOOLS = List.of(
             "agent_spawn", "agent_send", "agent_list",
-            "task_output", "task_cancel", "task_list");
+            "task_output", "task_cancel", "task_list", "wait_async_results");
 
     /** 该档位包含的工具名集合（保持声明顺序，便于日志与前端展示） */
     public Set<String> toolNames() {

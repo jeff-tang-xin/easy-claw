@@ -7,6 +7,7 @@ import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
+import com.xinl.easyclaw.scenario.McpToolExpander;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
@@ -65,6 +66,7 @@ public class WorkspaceAgentBuilder {
     private final RoleManagementService roleService;
     private final AgentScopeProperties agentScopeProperties;
     private final ScenarioResolver scenarioResolver;
+    private final McpToolExpander mcpToolExpander;
 
     /**
      * workspaceId → 刷新后的 PATH 环境变量。
@@ -80,7 +82,9 @@ public class WorkspaceAgentBuilder {
                                  PermissionRuleService permissionRuleService,
                                  RoleManagementService roleService,
                                  AgentScopeProperties agentScopeProperties,
-                                 ScenarioResolver scenarioResolver) {
+                                 ScenarioResolver scenarioResolver,
+                                 McpToolExpander mcpToolExpander) {
+        this.mcpToolExpander = mcpToolExpander;
         this.agentFactory = agentFactory;
         this.subagentLoader = subagentLoader;
         this.permissionRuleService = permissionRuleService;
@@ -144,6 +148,11 @@ public class WorkspaceAgentBuilder {
 
         // 场景能力绑定：一次解析，三处使用（toolkit 硬隔离 / 子 Agent skill 隔离 / 提示词推荐）
         ScenarioBinding binding = scenarioResolver.activeBinding(workspaceId);
+        // 把绑定的 MCP 服务名展开成工具名，供子 Agent 工具白名单使用。
+        // 必须在 loadMerged 之前完成：白名单一刀切，只有档位工具 ∪ MCP 工具并起来才完整。
+        if (binding.hasToolBinding()) {
+            binding = binding.withMcpTools(mcpToolExpander.expand(binding.mcpServices()));
+        }
         if (!binding.isEmpty()) {
             log.info("场景能力绑定已生效: workspace={}, {}", workspaceId, binding);
         }

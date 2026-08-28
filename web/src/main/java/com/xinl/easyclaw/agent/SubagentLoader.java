@@ -13,9 +13,12 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 /**
@@ -205,14 +208,65 @@ public class SubagentLoader {
         if (model != null && !model.isBlank()) {
             builder.model(model);
         }
-        if (tools != null) {
-            builder.tools(tools);
+        List<String> effectiveTools = restrictTools(agentId, tools, binding);
+        if (effectiveTools != null) {
+            builder.tools(effectiveTools);
         }
         List<String> effectiveSkills = restrictSkills(agentId, skills, binding);
         if (effectiveSkills != null) {
             builder.skills(effectiveSkills);
         }
         return builder.build();
+    }
+
+    /**
+     * 计算子 Agent 的<b>有效工具白名单</b>：档位基础工具 ∪ 场景绑定的 MCP 工具，
+     * 再与声明自身的 tools 取交集。
+     * <p>
+     * <b>为什么必须并上档位工具</b>：harness 的 {@code allowlistedInheritedToolkit} 一刀切裁剪，
+     * 不区分工具来源。若只把 MCP 工具名写进白名单，子 Agent 会连 {@code read_file} 都失去。
+     * <p>
+     * <b>为什么要求档位显式配置</b>：档位默认值是 STANDARD，若「无 tier 配置」也走裁剪，
+     * 那么所有既有场景的子 Agent 都会突然失去 {@code execute} 与子 Agent 调度能力 ——
+     * 这是静默的能力回退。因此仅当场景<b>显式</b>写了 capabilityTier 或绑定了 MCP 时才裁剪。
+     *
+     * @return 有效工具列表；{@code null} 表示不限制（继承父 toolkit 全部工具）
+     */
+    private List<String> restrictTools(String agentId, List<String> declared,
+                                       ScenarioBinding binding) {
+        if (binding == null || !binding.hasToolBinding()) {
+            return declared;
+        }
+        Set<String> allowed = new LinkedHashSet<>(binding.tier().toolNames());
+        allowed.addAll(binding.mcpTools());
+        if (allowed.isEmpty()) {
+            // NONE 档位且无 MCP 绑定：给空名单会被 harness 当作「不限制」原样放行，
+            // 与用户意图相反。此处保留声明值并告警，避免产生「配了却没生效」的错觉。
+            log.warn("子 Agent [{}] 场景档位为 NONE 且未绑定 MCP，工具白名单为空，"
+                    + "已按不裁剪处理（如需真正禁用请改用 tools 声明）", agentId);
+            return declared;
+        }
+        if (declared == null || declared.isEmpty()) {
+            log.info("子 Agent [{}] 未声明 tools，采用场景档位 {} 白名单（{} 个工具）",
+                    agentId, binding.tier(), allowed.size());
+            return List.copyOf(allowed);
+        }
+        List<String> intersection = new ArrayList<>();
+        for (String name : declared) {
+            if (containsIgnoreCase(allowed, name)) {
+                intersection.add(name);
+            }
+        }
+        if (intersection.isEmpty()) {
+            log.warn("子 Agent [{}] 声明的 tools {} 全部超出场景档位 {} 范围，"
+                    + "按档位白名单处理（避免该子 Agent 完全无工具可用）",
+                    agentId, declared, binding.tier());
+            return List.copyOf(allowed);
+        }
+        if (intersection.size() < declared.size()) {
+            log.info("子 Agent [{}] tools 被场景档位收窄: {} -> {}", agentId, declared, intersection);
+        }
+        return intersection;
     }
 
     /**
@@ -259,7 +313,7 @@ public class SubagentLoader {
         return intersection;
     }
 
-    private boolean containsIgnoreCase(List<String> pool, String target) {
+    private boolean containsIgnoreCase(Collection<String> pool, String target) {
         for (String candidate : pool) {
             if (candidate.equalsIgnoreCase(target.trim())) {
                 return true;

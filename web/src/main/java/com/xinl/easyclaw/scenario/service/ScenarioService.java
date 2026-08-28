@@ -71,6 +71,11 @@ public class ScenarioService {
         scenario.setId(null);
         scenario.setName(name);
         scenario.setBuiltin(false);
+        // 与 update 保持同一套归一规则，避免新建走出 "" / null 两种「未绑定」表示
+        scenario.setSkills(blankToNull(scenario.getSkills()));
+        scenario.setSubagents(blankToNull(scenario.getSubagents()));
+        scenario.setMcpServices(blankToNull(scenario.getMcpServices()));
+        scenario.setCapabilityTier(blankToNull(scenario.getCapabilityTier()));
         ScenarioEntity saved = scenarioRepo.save(scenario);
         log.info("创建场景: name={}, mode={}", name, saved.getMode());
         return saved;
@@ -87,6 +92,14 @@ public class ScenarioService {
                     if (patch.getSystemPrompt() != null) existing.setSystemPrompt(patch.getSystemPrompt());
                     if (patch.getWorkflow() != null) existing.setWorkflow(patch.getWorkflow());
                     if (patch.getActive() != null) existing.setActive(patch.getActive());
+                    // 能力绑定四列：与上面字段不同，这里用 "" 表示「清空绑定」。
+                    // 若沿用 null 跳过的写法，用户在界面上取消全部勾选后将无法解绑。
+                    if (patch.getSkills() != null) existing.setSkills(blankToNull(patch.getSkills()));
+                    if (patch.getSubagents() != null) existing.setSubagents(blankToNull(patch.getSubagents()));
+                    if (patch.getMcpServices() != null) existing.setMcpServices(blankToNull(patch.getMcpServices()));
+                    if (patch.getCapabilityTier() != null) {
+                        existing.setCapabilityTier(blankToNull(patch.getCapabilityTier()));
+                    }
                     validateWorkflow(existing);
                     ScenarioEntity updated = scenarioRepo.save(existing);
                     log.info("更新场景: id={}, name={}", id, updated.getName());
@@ -187,6 +200,11 @@ public class ScenarioService {
         } catch (IOException e) {
             log.warn("读取子 Agent 目录失败: dir={}, {}", dir, e.getMessage());
         }
+    }
+
+    /** 空白字符串归一为 null：让「未绑定」在库里只有一种表示，避免 "" 与 null 两套判断 */
+    private static String blankToNull(String raw) {
+        return (raw == null || raw.isBlank()) ? null : raw;
     }
 
     /**

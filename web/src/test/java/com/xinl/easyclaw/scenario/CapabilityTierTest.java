@@ -3,6 +3,7 @@ package com.xinl.easyclaw.scenario;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
 import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -58,17 +59,41 @@ class CapabilityTierTest {
     @Test
     void 档位中的框架工具名必须真实存在于ToolRegistry() {
         // 反向校验：凡属于框架分组范畴的名字，必须能被 isFrameworkTool 认出。
-        // 自定义 @Tool（run_skill_script/run_python）不在框架分组内，单独排除。
-        Set<String> customTools = Set.of("run_skill_script", "run_python");
+        // 自定义 @Tool 名单由反射真实扫描得出，不手工维护 —— 手工列表会随新增工具腐烂，
+        // 让本该报警的拼写错误被"顺手加进排除名单"掩盖过去。
+        Set<String> customTools = scanCustomToolNames();
+        assertThat(customTools)
+                .as("反射未扫到任何自定义 @Tool，排除逻辑失效，本用例将退化为假绿")
+                .isNotEmpty();
 
         for (String name : CapabilityTier.FULL.toolNames()) {
             if (customTools.contains(name)) {
                 continue;
             }
             assertThat(ToolRegistryService.isFrameworkTool(name))
-                    .as("档位工具名 [%s] 不是框架内置工具，白名单将永不匹配", name)
+                    .as("档位工具名 [%s] 既不是框架内置工具也不是自定义 @Tool，白名单将永不匹配", name)
                     .isTrue();
         }
+    }
+
+    /** 反射扫描本项目所有 @Tool 注解的工具名（与 Toolkit 实际注册来源保持一致） */
+    private static Set<String> scanCustomToolNames() {
+        Set<String> names = new java.util.LinkedHashSet<>();
+        List<Class<?>> holders = List.of(
+                com.xinl.easyclaw.tools.FileOperationTools.class,
+                com.xinl.easyclaw.tools.WebSearchTools.class,
+                com.xinl.easyclaw.tools.CodeGenerationTools.class,
+                com.xinl.easyclaw.tools.SkillScriptTools.class);
+        for (Class<?> holder : holders) {
+            for (java.lang.reflect.Method m : holder.getMethods()) {
+                io.agentscope.core.tool.Tool tool =
+                        m.getAnnotation(io.agentscope.core.tool.Tool.class);
+                if (tool != null && !tool.name().isBlank()) {
+                    names.add(tool.name());
+                }
+            }
+        }
+        return names;
     }
 
     @Test

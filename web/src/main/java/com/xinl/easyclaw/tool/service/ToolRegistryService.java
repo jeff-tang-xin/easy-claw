@@ -58,6 +58,9 @@ public class ToolRegistryService {
             Map.entry("list_files", "列出目录下的文件和子目录。用于快速了解目录结构。"),
             Map.entry("memory_search", "搜索 Agent 长期记忆库。用于回忆过往交互或用户偏好。"),
             Map.entry("memory_get", "按 ID 获取单条记忆。用于精确读取特定记忆条目。"),
+            Map.entry("memory_save", "把事实写入长期记忆（同时更新 MEMORY.md 与当日流水）。"
+                    + "用户要求记住某事、或出现值得跨会话保留的偏好与决策时使用。\n"
+                    + "【不要用于】直接用 write_file/edit_file 改 MEMORY.md（会绕过原子更新）。"),
             Map.entry("session_search", "搜索历史会话记录。用于查找过去某次对话。"),
             Map.entry("session_list", "列出历史会话列表。用于查看有哪些会话。"),
             Map.entry("session_history", "获取指定会话的完整消息历史。用于回顾某次对话的全部内容。"),
@@ -67,7 +70,14 @@ public class ToolRegistryService {
             Map.entry("task_output", "获取异步任务输出。用于读取子 Agent 的执行结果。"),
             Map.entry("task_cancel", "取消正在运行的异步任务。用于中止子 Agent 执行。"),
             Map.entry("task_list", "列出所有异步任务。用于查看任务执行状态。"),
-            Map.entry("execute", "在沙箱内执行 Shell 命令。用于运行构建、测试、git 等命令行操作。")
+            Map.entry("agent_generate", "根据自然语言描述生成新的子 Agent 声明，校验后写入 "
+                    + "subagents/<name>.md，下一轮推理即可使用。支持 dry_run 预览不落盘。"),
+            Map.entry("wait_async_results", "等待后台异步任务/子 Agent 结果。"
+                    + "推荐屏障模式：传 task_ids 等待指定任务全部结束，或 wait_all=true 等待当前所有在跑任务；"
+                    + "两者都会把结果直接返回。不传参数时退化为「收到任意一条消息即返回」，不是等待全部。"),
+            Map.entry("execute", "在沙箱内执行 Shell 命令。用于运行构建、测试、git 等命令行操作。"),
+            Map.entry("web_fetch", "抓取 HTTP(S) URL 内容并返回截断后的文本预览。"
+                    + "用于读取已知网址页面，可用 max_chars 控制返回长度（默认 20000）。")
     );
 
     /** 框架 FilesystemTool 内置工具名（HarnessAgent 自动注册，不可禁用） */
@@ -77,7 +87,7 @@ public class ToolRegistryService {
 
     /** 框架 Memory 内置工具名 */
     static final Set<String> FRAMEWORK_MEMORY_TOOLS = Set.of(
-            "memory_search", "memory_get"
+            "memory_search", "memory_get", "memory_save"
     );
 
     /** 框架 Session 内置工具名 */
@@ -87,8 +97,12 @@ public class ToolRegistryService {
 
     /** 框架 Subagent 内置工具名（非叶子 Agent 自动注册） */
     static final Set<String> FRAMEWORK_SUBAGENT_TOOLS = Set.of(
-            "agent_spawn", "agent_send", "agent_list", "task_output", "task_cancel", "task_list"
+            "agent_spawn", "agent_send", "agent_list", "task_output", "task_cancel", "task_list",
+            "agent_generate", "wait_async_results"
     );
+
+    /** 框架 Web 内置工具名（harness WebTools 注册） */
+    static final Set<String> FRAMEWORK_WEB_TOOLS = Set.of("web_fetch");
 
     /** 框架 Shell 内置工具名（后端是 AbstractSandboxFilesystem 时自动注册） */
     static final Set<String> FRAMEWORK_SHELL_TOOLS = Set.of("execute");
@@ -103,6 +117,7 @@ public class ToolRegistryService {
         all.addAll(FRAMEWORK_SESSION_TOOLS);
         all.addAll(FRAMEWORK_SUBAGENT_TOOLS);
         all.addAll(FRAMEWORK_SHELL_TOOLS);
+        all.addAll(FRAMEWORK_WEB_TOOLS);
         ALL_FRAMEWORK_TOOLS = Set.copyOf(all);
     }
 
@@ -128,8 +143,12 @@ public class ToolRegistryService {
             Map.entry("task_output", "任务输出（框架）"),
             Map.entry("task_cancel", "任务取消（框架）"),
             Map.entry("task_list", "任务列表（框架）"),
+            Map.entry("agent_generate", "子Agent生成（框架）"),
+            Map.entry("wait_async_results", "异步结果等待（框架）"),
             // 框架 Shell 内置工具
             Map.entry("execute", "Shell执行（框架）"),
+            // 框架 Web 内置工具
+            Map.entry("web_fetch", "网页抓取（框架）"),
             // 自定义补充工具
             Map.entry("list_directory", "目录列表（增强）"),
             Map.entry("search_files", "文件搜索（按名称）"),
@@ -171,6 +190,10 @@ public class ToolRegistryService {
             Map.entry("task_output", "AGENT"),
             Map.entry("task_cancel", "AGENT"),
             Map.entry("task_list", "AGENT"),
+            Map.entry("agent_generate", "AGENT"),
+            Map.entry("wait_async_results", "AGENT"),
+            Map.entry("memory_save", "MEMORY"),
+            Map.entry("web_fetch", "WEB"),
             Map.entry("execute", "SHELL")
     );
 
