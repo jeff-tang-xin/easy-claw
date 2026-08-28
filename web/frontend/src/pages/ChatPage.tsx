@@ -45,7 +45,7 @@ function resolveMimeType(f: File, dataUrl: string): string {
 
 // 工具目录（/api/tools/builtin 返回的结构）
 interface ToolParamDef { name: string; required: boolean; description: string; }
-interface ToolDef { name: string; displayName: string; description: string; group: string; params: ToolParamDef[]; }
+interface ToolDef { name: string; displayName: string; description: string; group: string; requiresConfirm: boolean; params: ToolParamDef[]; }
 
 /** 工具名称 → 可读描述（loadTools 时填充，ToolCallCard 自解释用） */
 const toolDescCache = new Map<string, string>();
@@ -779,7 +779,7 @@ export default function ChatPage() {
   const [tab, setTab] = useState<'sessions' | 'auth' | 'files' | 'tools'>('sessions');
   const [statusHint, setStatusHint] = useState('');
   const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
-  const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string }[]>([]);
+  const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string; requiresConfirm: boolean }[]>([]);
   const [toolCatalog, setToolCatalog] = useState<ToolDef[]>([]);
   const [files, setFiles] = useState<FileEntry[]>([]);
   const [filePath, setFilePath] = useState('');
@@ -1207,10 +1207,13 @@ export default function ChatPage() {
     try {
       const [rules, tools] = await Promise.all([
         getJson<{ id: number; toolName: string; createdAt: string }[]>(`/api/workspaces/${wid}/permissions`),
-        getJson<{ name: string; displayName: string }[]>('/api/tools/builtin'),
+        getJson<{ name: string; displayName: string; requiresConfirm: boolean }[]>('/api/tools/builtin'),
       ]);
       setAuthList(rules);
-      setAuthOptions(tools);
+      // 只保留「调用时会弹确认」的工具：静默放行的只读工具（read_file/grep_files 等）
+      // 摆在白名单里是噪声 —— 它们本就不询问，点开关不会改变任何行为。
+      // requiresConfirm 由后端 ToolPermissionPolicy 判定，与权限上下文同源，不会漂移。
+      setAuthOptions(tools.filter((t) => t.requiresConfirm));
     } catch {
       // 忽略
     }
@@ -1682,7 +1685,8 @@ export default function ChatPage() {
         })
       )}
       <div className="hint" style={{ marginTop: 8, fontSize: 11 }}>
-        ✅ 白名单内的工具调用时不再询问确认
+        ✅ 白名单内的工具调用时不再询问确认<br />
+        仅列出需要授权的工具；只读工具（读文件、搜索、分析等）本就静默放行，无需配置
       </div>
     </div>
   );

@@ -9,6 +9,7 @@ import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.scenario.McpToolExpander;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
+import com.xinl.easyclaw.tool.service.ToolPermissionPolicy;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.Model;
@@ -427,19 +428,6 @@ public class WorkspaceAgentBuilder {
         return fallback;
     }
 
-    /** 只读工具：直接放行，不询问用户 */
-    private static final List<String> READ_TOOLS = List.of(
-            "read_file", "list_files", "list_directory", "glob_files", "grep_files",
-            "search_files", "analyze_code", "format_code", "diff_code",
-            "web_search", "fetch_webpage",
-            "memory_search", "memory_get"
-    );
-
-    /** 写/执行工具：每次执行前需用户确认 */
-    private static final List<String> WRITE_TOOLS = List.of(
-            "write_file", "edit_file", "execute"
-    );
-
     /**
      * 权限上下文：读工具直接放行；写/执行工具每次征求用户确认；
      * 并注入用户"永久允许"的规则（不再询问）。
@@ -447,8 +435,9 @@ public class WorkspaceAgentBuilder {
     private PermissionContextState buildPermissionContext(String workspaceId) {
         PermissionContextState.Builder pb = PermissionContextState.builder()
                 .mode(PermissionMode.DEFAULT);
-        // 只读工具：直接放行，不打断工作流
-        for (String tool : READ_TOOLS) {
+        // 只读工具：直接放行，不打断工作流。清单来自 ToolPermissionPolicy（唯一权威来源，
+        // 前端授权页面也读它 —— 避免两边各写一份后漂移）
+        for (String tool : ToolPermissionPolicy.silentlyAllowed()) {
             pb.addAllowRule(tool, new PermissionRule(tool, null, PermissionBehavior.ALLOW, "system"));
         }
         // 用户"永久允许"的工具：直接放行（按 workspace 隔离的持久化规则）
@@ -456,7 +445,7 @@ public class WorkspaceAgentBuilder {
         // 注意：PermissionEngine.checkPermission 的判定顺序是 deny → ask → allow，
         // ASK 规则优先于 ALLOW 命中 —— 已授权工具必须【不加】system ASK 规则，
         // 否则 ALLOW 永远轮不到判断，出现"已授权仍反复弹窗"
-        for (String tool : WRITE_TOOLS) {
+        for (String tool : ToolPermissionPolicy.explicitAsk()) {
             if (alwaysAllowed.contains(tool)) {
                 continue;
             }

@@ -13,7 +13,7 @@ interface WorkspaceSummary {
 }
 
 interface PermRule { id: number; toolName: string; createdAt: string; }
-interface ToolDef { name: string; displayName: string; }
+interface ToolDef { name: string; displayName: string; requiresConfirm: boolean; }
 
 export default function WorkspacesPage() {
   const [items, setItems] = useState<WorkspaceSummary[]>([]);
@@ -113,7 +113,9 @@ export default function WorkspacesPage() {
         getJson<ToolDef[]>('/api/tools/builtin'),
       ]);
       setPermRules(rules);
-      setPermTools(tools);
+      // 只保留「调用时会弹确认」的工具：静默放行的只读工具本就不询问，
+      // 列在授权面板里是噪声。requiresConfirm 由后端 ToolPermissionPolicy 判定。
+      setPermTools(tools.filter((t) => t.requiresConfirm));
     } catch (e) {
       setError(String(e));
     }
@@ -198,7 +200,8 @@ export default function WorkspacesPage() {
           subtitle={items.find((w) => w.workspaceId === permWsId)?.name || ''}
         >
           <div style={{ marginBottom: 8 }} className="hint">
-            已永久授权 {permRules.length} / 共 {permTools.length} 个工具；开启后调用时不再询问确认
+            已永久授权 {permRules.length} / 共 {permTools.length} 个需授权工具；开启后调用时不再询问确认<br />
+            只读工具（读文件、搜索、代码分析等）默认静默放行，不在此列出
           </div>
           <div style={{ maxHeight: 400, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8 }}>
             {permTools.map((t) => {

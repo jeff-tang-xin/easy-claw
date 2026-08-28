@@ -39,9 +39,17 @@ public class ToolRegistryService {
     public record ToolParamDef(String name, boolean required, String description) {
     }
 
-    /** 工具定义 */
+    /**
+     * 工具定义。
+     * <p>
+     * {@code requiresConfirm}：该工具调用时是否会向用户征求确认。
+     * 由 {@link ToolPermissionPolicy#requiresConfirm(String)} 判定，
+     * 供前端「工具白名单」页面**只列出需要授权的工具** —— 静默放行的只读工具
+     * 摆在授权页面上是噪声（点开关不产生任何行为变化）。
+     * 注意：工具目录（🧰）仍需展示全部工具，故此处只加标记、不在接口层过滤。
+     */
     public record ToolDef(String name, String displayName, String description,
-                          String group, List<ToolParamDef> params) {
+                          String group, boolean requiresConfirm, List<ToolParamDef> params) {
     }
 
     /** 框架工具可读描述（供前端工具目录展示） */
@@ -246,6 +254,7 @@ public class ToolRegistryService {
                     DISPLAY.getOrDefault(name, name),
                     FRAMEWORK_DESC.getOrDefault(name, "框架内置工具"),
                     GROUPS.getOrDefault(name, "FRAMEWORK"),
+                    ToolPermissionPolicy.requiresConfirm(name),
                     List.of()));
         }
 
@@ -272,6 +281,7 @@ public class ToolRegistryService {
                         DISPLAY.getOrDefault(name, name),
                         tool.description(),
                         GROUPS.getOrDefault(name, "GENERAL"),
+                        ToolPermissionPolicy.requiresConfirm(name),
                         params));
             }
         }
