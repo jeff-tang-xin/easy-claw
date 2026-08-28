@@ -605,12 +605,14 @@ public class AgentService {
                 }
                 try {
                     saveAttachment(workspace, sessionId, att);
-                    if (att.mimeType() != null && att.mimeType().startsWith("image/")) {
+                    byte[] raw = Base64.getDecoder().decode(att.base64Data());
+                    String mime = resolveImageMime(att.mimeType(), att.name(), raw);
+                    if (mime != null) {
                         blocks.add(ImageBlock.builder()
-                                .source(new Base64Source(att.mimeType(), att.base64Data()))
+                                .source(new Base64Source(mime, att.base64Data()))
                                 .build());
                     } else {
-                        String text = new String(Base64.getDecoder().decode(att.base64Data()), StandardCharsets.UTF_8);
+                        String text = new String(raw, StandardCharsets.UTF_8);
                         if (!text.isBlank()) {
                             blocks.add(TextBlock.builder()
                                     .text("【附件 " + att.name() + "】\n" + text + "\n")
@@ -626,6 +628,57 @@ public class AgentService {
             return new UserMessage(message == null ? "" : message);
         }
         return new UserMessage(blocks);
+    }
+
+    /**
+     * 判定附件是否为图片并返回规范化 MIME；非图片返回 {@code null}。
+     * <p>
+     * 三级判定：声明的 mimeType → 文件魔数 → 扩展名。之所以不只信 mimeType，
+     * 是因为浏览器在 Windows 缺少注册表项时 {@code File.type} 会是空串，
+     * 空 mimeType 会让图片落入文本分支被 UTF-8 强解成乱码（「图片传输损坏」）。
+     * 魔数是唯一不依赖客户端诚信的判据，故优先级高于扩展名。
+     */
+    static String resolveImageMime(String declared, String name, byte[] data) {
+        if (declared != null && declared.startsWith("image/")) {
+            return declared;
+        }
+        String sniffed = sniffImageMime(data);
+        if (sniffed != null) {
+            return sniffed;
+        }
+        String ext = name == null ? "" : name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        return switch (ext) {
+            case "png" -> "image/png";
+            case "jpg", "jpeg" -> "image/jpeg";
+            case "gif" -> "image/gif";
+            case "webp" -> "image/webp";
+            case "bmp" -> "image/bmp";
+            default -> null;
+        };
+    }
+
+    /** 按魔数嗅探图片类型；无法识别返回 {@code null}。 */
+    private static String sniffImageMime(byte[] d) {
+        if (d == null || d.length < 12) {
+            return null;
+        }
+        if ((d[0] & 0xFF) == 0x89 && d[1] == 'P' && d[2] == 'N' && d[3] == 'G') {
+            return "image/png";
+        }
+        if ((d[0] & 0xFF) == 0xFF && (d[1] & 0xFF) == 0xD8) {
+            return "image/jpeg";
+        }
+        if (d[0] == 'G' && d[1] == 'I' && d[2] == 'F' && d[3] == '8') {
+            return "image/gif";
+        }
+        if (d[0] == 'R' && d[1] == 'I' && d[2] == 'F' && d[3] == 'F'
+                && d[8] == 'W' && d[9] == 'E' && d[10] == 'B' && d[11] == 'P') {
+            return "image/webp";
+        }
+        if (d[0] == 'B' && d[1] == 'M') {
+            return "image/bmp";
+        }
+        return null;
     }
 
     /**

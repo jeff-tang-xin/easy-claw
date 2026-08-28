@@ -23,6 +23,26 @@ interface BoxMessage {
 }
 interface Attachment { name: string; mimeType: string; base64Data: string; }
 
+/** 扩展名 → MIME，兜底 File.type 为空的情况（Windows 缺注册表项时 type 常为 ''） */
+const EXT_MIME: Record<string, string> = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+  webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif',
+};
+
+/**
+ * 解析附件 MIME：优先 File.type，其次 FileReader 生成的 data URL 前缀，最后按扩展名兜底。
+ *
+ * 必须有兜底：mimeType 为空会让后端 buildUserMessage 走文本分支，
+ * 把图片二进制按 UTF-8 强解成乱码，表现为「图片传输损坏」。
+ */
+function resolveMimeType(f: File, dataUrl: string): string {
+  if (f.type && f.type !== 'application/octet-stream') return f.type;
+  const m = /^data:([^;,]+)[;,]/.exec(dataUrl || '');
+  if (m && m[1] && m[1] !== 'application/octet-stream') return m[1];
+  const ext = (f.name.split('.').pop() || '').toLowerCase();
+  return EXT_MIME[ext] || 'application/octet-stream';
+}
+
 // 工具目录（/api/tools/builtin 返回的结构）
 interface ToolParamDef { name: string; required: boolean; description: string; }
 interface ToolDef { name: string; displayName: string; description: string; group: string; params: ToolParamDef[]; }
@@ -1485,8 +1505,9 @@ export default function ChatPage() {
       }
       const reader = new FileReader();
       reader.onload = () => {
-        const b64 = String(reader.result).split(',')[1];
-        setAttachments((prev) => [...prev, { name: f.name, mimeType: f.type || 'application/octet-stream', base64Data: b64 }]);
+        const raw = String(reader.result);
+        const b64 = raw.split(',')[1];
+        setAttachments((prev) => [...prev, { name: f.name, mimeType: resolveMimeType(f, raw), base64Data: b64 }]);
       };
       reader.readAsDataURL(f);
     });
