@@ -150,6 +150,19 @@ agentscope:
       max-tokens: 8192
 
 # ============================
+# 内置工具配置
+# ----------------------------
+# web_search 走 Google Custom Search（需自备凭据）：
+#   1. 在 Google Cloud 控制台启用 "Custom Search API" 并创建 API Key
+#   2. 在 https://programmablesearchengine.google.com/ 创建搜索引擎，取其「搜索引擎 ID」填入 cx
+# 留空则回退环境变量 GOOGLE_API_KEY / GOOGLE_SEARCH_CX；两者都缺则 web_search 返回未配置提示。
+# ============================
+tools:
+  web-search:
+    api-key: ${GOOGLE_API_KEY:}
+    cx: ${GOOGLE_SEARCH_CX:}
+
+# ============================
 # Workspace 安全配置
 # ============================
 ai:

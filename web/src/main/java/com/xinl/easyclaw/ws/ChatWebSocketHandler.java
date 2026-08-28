@@ -144,6 +144,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     handleConfirm(root, sessionId);
                 }
                 case "stop" -> handleStop(root);
+                case "intervene" -> {
+                    bindSession(sessionId, session.getId());
+                    handleIntervene(root, sessionId);
+                }
                 case "pending" -> {
                     bindSession(sessionId, session.getId());
                     handlePending(root, sessionId);
@@ -389,6 +393,32 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // 用 stopped 而非 end：end 会触发前端 messageQueue 自动发送下一条，与「停止」语义相反。
         sendJson(sessionId, StreamEvent.stopped());
         log.info("WS stop 完成: workspaceId={}, sessionId={}", workspaceId, sessionId);
+    }
+
+    /**
+     * 用户主动介入当前轮次：不中断执行，把插话作为 hint 注入正在进行的回合。
+     * <p>
+     * 与 {@code stop} 的区别：stop 会中断 Agent 并复位前端；intervene 让本轮继续跑，
+     * 仅在下一个推理步之前把用户的新指示塞进上下文。
+     */
+    private void handleIntervene(JsonNode root, String sessionId) {
+        String workspaceId = root.path("workspaceId").asText("");
+        String text = root.path("content").asText("");
+        if (text.isBlank()) {
+            // 兼容前端可能使用的 message/text 字段名
+            text = root.path("message").asText("");
+        }
+        if (text.isBlank()) {
+            text = root.path("text").asText("");
+        }
+        if (!workspaceId.isBlank() && !sessionId.isBlank()) {
+            sessionWorkspaceIds.put(sessionId, workspaceId);
+        }
+        if (!guardOk(workspaceId, sessionId)) {
+            return;
+        }
+        boolean ok = agentService.interveneTurn(workspaceId, sessionId, text);
+        log.info("WS intervene 结果: workspaceId={}, sessionId={}, ok={}", workspaceId, sessionId, ok);
     }
 
     private void sendJson(String sessionId, StreamEvent evt) {

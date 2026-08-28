@@ -14,7 +14,9 @@ import java.util.function.Consumer;
  * <ul>
  *   <li>text / reasoning 增量分别累积，遇工具/子代理/回合结束时成条落盘</li>
  *   <li>tool → tool_args → tool_result → tool_end 组成 TOOL_CALL + TOOL_RESULT 一对</li>
- *   <li>subagent / subagent_text（name\u0001delta 编码）/ subagent_end 组成 SUBAGENT 一条</li>
+ *   <li>subagent / subagent_text（name\u0001delta 编码）/ subagent_end 组成 SUBAGENT 一条；
+ *       其中 subagent_tool_args（工具入参原始 JSON 分片）只参与归属跟踪、不写入正文，
+ *       否则历史回放会把截断的 JSON 当作子 Agent 话术渲染出来</li>
  *   <li>confirm（人工确认暂停）：先把未完成的工具调用落盘——原事件流会被释放，
  *       结果由恢复流的新记录器补写 TOOL_RESULT（前端历史加载支持孤立结果配对）</li>
  * </ul>
@@ -36,6 +38,8 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
     private final StringBuilder toolResult = new StringBuilder();
     private String subagentName;
     private final StringBuilder subBuf = new StringBuilder();
+    /** 当前子 Agent 段落的类型（text/reasoning/tool/toolResult），用于只在切换时插入一次可读标记 */
+    private String subSegKind;
 
     TranscriptRecorder(Path sessionDir, Consumer<StreamEvent> delegate) {
         this.sessionDir = sessionDir;
@@ -81,12 +85,18 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 flushSubagent();
                 subagentName = evt.content();
                 subBuf.setLength(0);
+                subSegKind = null;
             }
-            case "subagent_text" -> appendSubagent(evt.content(), "");
-            // 结构化子 Agent 事件：转录里退化为带标记的纯文本，保证历史回放仍可读
-            case "subagent_reasoning" -> appendSubagent(evt.content(), "🧠 ");
-            case "subagent_tool" -> appendSubagent(evt.content(), "\n🔧 调用: ");
-            case "subagent_tool_args" -> appendSubagent(evt.content(), "");
+            case "subagent_text" -> appendSubagent(evt.content(), "text", "");
+            // 结构化子 Agent 事件：转录里退化为带标记的纯文本，保证历史回放仍可读。
+            // 标记只在「切换到该类型」时插入一次 —— 早期实现按分片插入，
+            // 流式下会得到「🧠 我🧠 需要🧠 先…」这种被标记割裂的正文。
+            case "subagent_reasoning" -> appendSubagent(evt.content(), "reasoning", "🧠 ");
+            case "subagent_tool" -> appendSubagent(evt.content(), "tool", "\n🔧 调用: ");
+            // 工具入参属于「工具步」的附属数据，不是子 Agent 的话术：
+            // 早期实现把入参增量原样追加进正文缓冲，历史回放时会把截断的原始 JSON
+            // （形如 rs": 4000, "url":）当正文渲染出来。此处只做归属跟踪，不写正文。
+            case "subagent_tool_args" -> trackSubagent(evt.content());
             case "subagent_tool_result" -> {
                 // 编码为 name \u0001 state \u0001 result，转录只保留状态摘要
                 String c = evt.content();
@@ -95,7 +105,8 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                     String rest = c.substring(i + 1);
                     int j = rest.indexOf(SEP);
                     String state = j >= 0 ? rest.substring(0, j) : rest;
-                    appendSubagent(c.substring(0, i) + SEP + "\n📤 结果(" + state + ")", "");
+                    appendSubagent(c.substring(0, i) + SEP + "\n📤 结果(" + state + ")\n",
+                            "toolResult", "");
                 }
             }
             case "subagent_end" -> flushSubagent();
@@ -112,22 +123,51 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
     }
 
     /**
-     * 追加一段子 Agent 增量。content 编码为 {@code name \u0001 delta}；
-     * prefix 用于把结构化事件（思考/工具）在纯文本转录里标记出来。
-     * 切换子 Agent 时先固化上一段，避免两个子 Agent 的输出串到一条记录里。
+     * 只跟踪子 Agent 归属、不写入正文缓冲。
+     * <p>
+     * 用于「工具入参」这类附属数据事件：它们必须参与切换检测（否则跨子 Agent 的
+     * 边界会错位），但其内容是原始 JSON 分片，写进纯文本正文就会变成界面上的乱码。
+     *
+     * @return 解析出的子 Agent 名；编码非法时返回 null
      */
-    private void appendSubagent(String content, String prefix) {
+    private String trackSubagent(String content) {
         int i = content == null ? -1 : content.indexOf(SEP);
         if (i < 0) {
-            return;
+            return null;
         }
         String name = content.substring(0, i);
-        String delta = content.substring(i + 1);
         if (subagentName == null || !subagentName.equals(name)) {
             flushSubagent();
             subagentName = name;
         }
-        subBuf.append(prefix).append(delta);
+        return name;
+    }
+
+    /**
+     * 追加一段子 Agent 增量。content 编码为 {@code name \u0001 delta}。
+     * <p>
+     * prefix 是该类型段落的可读标记（如思考的 🧠），只在「段落类型发生切换」时插入一次：
+     * 流式增量按 token 到达，若每个分片都插入标记，正文会被割裂成
+     * 「🧠 我🧠 需要🧠 先…」。切换子 Agent 时先固化上一段，避免两个子 Agent 的输出串条。
+     *
+     * @param kind   段落类型标识（text/reasoning/tool/toolResult），用于检测类型切换
+     * @param prefix 段落起始标记
+     */
+    private void appendSubagent(String content, String kind, String prefix) {
+        int i = content == null ? -1 : content.indexOf(SEP);
+        if (i < 0) {
+            return;
+        }
+        String delta = content.substring(i + 1);
+        String name = trackSubagent(content);
+        if (name == null) {
+            return;
+        }
+        if (!kind.equals(subSegKind)) {
+            subSegKind = kind;
+            subBuf.append(prefix);
+        }
+        subBuf.append(delta);
     }
 
     private void flushText() {        if (thinkBuf.length() > 0) {
@@ -175,6 +215,7 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
         }
         subagentName = null;
         subBuf.setLength(0);
+        subSegKind = null;
     }
 
     private static String nullSafe(String s) {

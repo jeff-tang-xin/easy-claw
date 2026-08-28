@@ -25,6 +25,7 @@ import io.agentscope.core.permission.PermissionRule;
 import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.PlanModeContextState;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.bus.MessageBus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -35,6 +36,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.*;
 import java.util.function.Consumer;
 
@@ -63,6 +65,30 @@ public class AgentService {
     /** 空闲会话 TTL：超过此时长无活动且无挂起确认的会话，其内存状态被清扫 */
     private static final long IDLE_TTL_MS = 2 * 60 * 60 * 1000L;
 
+    /**
+     * 用户停止后、强制 dispose 订阅前的宽限窗口。
+     * <p>
+     * 【为什么必须留这个窗口】AgentScope 中断路径上**唯一**把会话记忆写盘的地方是
+     * {@code ReActAgent.handleInterrupt}（ReActAgent.java:4046 的 saveStateToSession），
+     * 而它只在 {@code AgentBase.createErrorHandler}（AgentBase.java:497-499）捕获到
+     * {@code InterruptedException} 时才会被调用。Reactor 的 cancel **不是 error**，
+     * 提前 dispose 只会静默掐断订阅，异常永远不产生 → handleInterrupt 从不执行 →
+     * 本轮的用户提问、工具结果、已输出文本全部烂在内存里，下一轮 activateSlotForContext
+     * 又从 store 强制重载覆盖，于是「停止前做过的事彻底失忆」。
+     * <p>
+     * 因此这里先 interrupt 设标志，留一小段时间让 Agent 循环走到下一个
+     * {@code checkInterrupted()} 检查点抛出中断异常并完成落盘，再兜底 dispose。
+     */
+    private static final long STOP_GRACE_MS = 2_000L;
+
+    /** 停止宽限窗口的兜底 dispose 调度器（单线程即可，仅承载极短延时任务） */
+    private final java.util.concurrent.ScheduledExecutorService stopGraceScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "stop-grace-dispose");
+                t.setDaemon(true);
+                return t;
+            });
+
     public AgentService(WorkspaceManager workspaceManager,
                         AgentFactory agentFactory,
                         PermissionRuleService permissionRuleService,
@@ -75,6 +101,12 @@ public class AgentService {
         this.agentScopeProperties = agentScopeProperties;
         this.sessions = sessions;
         this.scenarioResolver = scenarioResolver;
+    }
+
+    /** 应用停机时关闭宽限调度器，避免守护线程与未决任务泄漏 */
+    @jakarta.annotation.PreDestroy
+    public void shutdownStopGraceScheduler() {
+        stopGraceScheduler.shutdownNow();
     }
 
     /**
@@ -234,11 +266,17 @@ public class AgentService {
     /**
      * 强制停止指定会话的流输出：
      * <ol>
-     *   <li>dispose Flux 订阅（立即取消 HTTP 流接收，不再推事件）</li>
+     *   <li>中止本会话的 HTTP 重试退避</li>
+     *   <li>摘除订阅句柄并清理本轮状态（**此时先不 dispose**）</li>
      *   <li>调用 agent.interrupt(userId, sessionId)（按会话槽精确设置中断标志，
      *       让 Agent 循环提前退出并释放 AgentBase 的 callGates 串行化闸门）</li>
-     *   <li>清理挂起确认（防止残留 ASKING 状态导致下轮对话异常）</li>
+     *   <li>{@link #STOP_GRACE_MS} 宽限期后兜底 dispose 订阅</li>
      * </ol>
+     * <p>
+     * 【顺序不可调换】必须 interrupt 先于 dispose：中断路径上唯一的记忆落盘点
+     * {@code handleInterrupt} 依赖 {@code InterruptedException} 被抛出，而 Reactor 的
+     * cancel 不产生异常。先 dispose 会导致停止前的用户提问与已执行内容不进记忆。
+     * 详见 {@link #STOP_GRACE_MS}。
      */
     public void stopChat(String workspaceId, String sessionId) {
         log.info("停止会话流: workspaceId={}, sessionId={}", workspaceId, sessionId);
@@ -247,16 +285,11 @@ public class AgentService {
         //    进程级 abortAll 会误伤其他会话，见 RetryScope 注释
         RetryScope.abort(sessionId);
 
-        // 2. 取消 Flux 订阅并清理本轮状态（保留 abort 标记，见方法末注释）
+        // 2. 摘除订阅句柄并清理本轮状态（保留 abort 标记，见方法末注释）
+        //    【注意】此处**只摘不 dispose**：dispose 必须晚于下面的 interrupt，
+        //    否则 Reactor 的 cancel 会静默掐断订阅、InterruptedException 永不产生，
+        //    导致唯一的记忆落盘点 handleInterrupt 被跳过（见 STOP_GRACE_MS 注释）。
         Disposable disp = sessions.abortTurn(sessionId);
-        if (disp != null && !disp.isDisposed()) {
-            try {
-                disp.dispose();
-                log.info("已 dispose Flux 订阅: sessionId={}", sessionId);
-            } catch (Exception e) {
-                log.warn("dispose 订阅异常: sessionId={}, err={}", sessionId, e.getMessage());
-            }
-        }
 
         // 3. 中断 AgentScope 执行
         //
@@ -286,10 +319,99 @@ public class AgentService {
             }
         }
 
+        // 4. 宽限窗口后兜底 dispose：给 Agent 循环留出走到下一个 checkInterrupted()
+        //    检查点、抛出 InterruptedException 并在 handleInterrupt 里完成
+        //    saveStateToSession 的时间。正常情况下中断异常会让流自行终止
+        //    （doFinally 里已 clearDisposable），此时这里的 dispose 是幂等空操作。
+        scheduleGraceDispose(disp, sessionId);
+
         // 本轮状态已由上面的 sessions.abortTurn 一次性清理（待确认工具、回合授权、
         // 恢复标记、工具失败计数、确认超时倒计时与挂起回调）
         // 注意：此处**不能** RetryScope.clear(sessionId)——上面刚设置的 abort 标记需要保留，
         // 供正在退避等待的重试读取；标记由下一次 streamChat 或 releaseSession 清除
+    }
+
+    /**
+     * 在 {@link #STOP_GRACE_MS} 宽限期后兜底 dispose 订阅。
+     * <p>
+     * 中断能正常传播时，流会自行 error 终止并走完 handleInterrupt 的落盘；
+     * 只有中断没被 Agent 循环读到（例如卡在不可中断的阻塞调用里）时，
+     * 才靠这里的延时 dispose 保证订阅不泄漏。
+     */
+    private void scheduleGraceDispose(Disposable disp, String sessionId) {
+        if (disp == null || disp.isDisposed()) {
+            return;
+        }
+        try {
+            stopGraceScheduler.schedule(() -> {
+                if (disp.isDisposed()) {
+                    log.debug("宽限期内流已自行终止（中断落盘已完成）: sessionId={}", sessionId);
+                    return;
+                }
+                try {
+                    disp.dispose();
+                    log.info("宽限期到，兜底 dispose Flux 订阅: sessionId={}", sessionId);
+                } catch (Exception e) {
+                    log.warn("兜底 dispose 订阅异常: sessionId={}, err={}", sessionId, e.getMessage());
+                }
+            }, STOP_GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
+        } catch (Exception e) {
+            // 调度器已关闭（应用停机）：退回同步 dispose，避免订阅泄漏
+            log.warn("宽限 dispose 调度失败，改为立即 dispose: sessionId={}, err={}", sessionId, e.getMessage());
+            try {
+                disp.dispose();
+            } catch (Exception ignore) {
+                log.warn("立即 dispose 也失败: {}", ignore.getMessage());
+            }
+        }
+    }
+
+    /**
+     * 用户主动介入当前轮次：把用户的插话作为 HintBlock 投进会话收件箱。
+     * <p>
+     * 与 {@link #stopChat} 的区别：**不中断**当前回合。消息进入
+     * {@code agentscope:inbox:<sessionId>} 队列后，由 Harness 自动装配的
+     * {@code InboxMiddleware}（HarnessAgent.java:2480）在**下一个推理步之前**排空，
+     * 转成 HintBlock 注入当前上下文——模型因此能在本轮内立刻看到并响应用户的新指示，
+     * 而不必等本轮结束、也不丢失已完成的工具结果。
+     * <p>
+     * payload 的键必须是 {@code id}/{@code hint}/{@code source}：
+     * {@code InboxMiddleware.deserializeHintBlock}（:211-221）只认这三个键，
+     * 且 {@code hint} 为空时整条消息会被**静默丢弃**。
+     *
+     * @return true 表示已成功投递；false 表示参数非法或该工作区尚无 Agent（无从注入）
+     */
+    public boolean interveneTurn(String workspaceId, String sessionId, String text) {
+        if (workspaceId == null || workspaceId.isBlank()
+                || sessionId == null || sessionId.isBlank()
+                || text == null || text.isBlank()) {
+            log.warn("介入参数非法: workspaceId={}, sessionId={}, textBlank={}",
+                    workspaceId, sessionId, text == null || text.isBlank());
+            return false;
+        }
+
+        MessageBus bus = workspaceManager.getMessageBus(workspaceId);
+        if (bus == null) {
+            log.warn("介入失败：工作区尚无 MessageBus（Agent 未构建）: workspaceId={}", workspaceId);
+            return false;
+        }
+
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("id", UUID.randomUUID().toString().replace("-", ""));
+        // 包裹标签让模型明确这是运行中用户的插话，优先级高于原指令
+        payload.put("hint", "<user-intervention>" + text.trim() + "</user-intervention>");
+        payload.put("source", "user");
+
+        try {
+            // block：介入是低频交互动作，需在返回前确认已落入队列，
+            // 否则前端提示「已介入」但消息其实丢了，用户无从察觉
+            bus.inboxPush(sessionId, payload).block(Duration.ofSeconds(5));
+            log.info("介入消息已投递收件箱: sessionId={}, textLen={}", sessionId, text.trim().length());
+            return true;
+        } catch (Exception e) {
+            log.warn("介入消息投递失败: sessionId={}, err={}", sessionId, e.getMessage());
+            return false;
+        }
     }
 
     /**

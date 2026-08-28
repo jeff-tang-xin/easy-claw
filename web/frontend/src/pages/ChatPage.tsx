@@ -1578,22 +1578,28 @@ export default function ChatPage() {
     sendNow(next.text, next.attachments);
   }, [key, sendNow]);
 
-  // 介入当前输入：插队到队首，等 LLM 自然 end 后优先发送
+  // 介入当前轮次：把插话实时注入正在执行的回合（不中断 Agent）
+  //
+  // 【为什么必须发后端】此前这里只把消息重排到本地队列队首，后端全然不知，
+  // 表现为「点了介入什么都没发生」——真正的介入需要走 WS intervene，
+  // 由后端 inboxPush 投进会话收件箱，InboxMiddleware 在下一个推理步前
+  // 排空成 HintBlock 注入当前上下文，模型才会在本轮内看到并响应。
   const interveneNow = useCallback(() => {
     if (!workspaceId || !sessionId || !running) return;
     const text = input.trim();
-    if (!text && attachments.length === 0) return;
-    const item: QueueItem = {
-      id: `q-intervene-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      text,
-      attachments: [...attachments],
-      guides: [],
-    };
+    if (!text) return;
+    getChatSocket().send({ type: 'intervene', workspaceId, sessionId, content: text });
     setInput('');
     setAttachments([]);
-    updateChatSession(key, (c) => ({ ...c, messageQueue: [item, ...c.messageQueue] }));
-    console.log('[intervene] 介入已入队首:', { textLen: text.length, queueAfter: 1 + getChatSession(key).messageQueue.length });
-  }, [workspaceId, sessionId, running, input, attachments, key, updateChatSession]);
+    // 本地即时回显，让用户看到自己的插话已生效（后端不回推用户消息）
+    updateChatSession(key, (c) => ({
+      ...c,
+      messages: [
+        ...c.messages,
+        { role: 'user' as const, segments: [{ type: 'text' as const, content: text }] },
+      ],
+    }));
+  }, [workspaceId, sessionId, running, input, key, updateChatSession]);
 
   // 将指定队列项提到队首（等 LLM 自然 end 后优先发送）
   const interveneQueueItem = useCallback((index: number) => {

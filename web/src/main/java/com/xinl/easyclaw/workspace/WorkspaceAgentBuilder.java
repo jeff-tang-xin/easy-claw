@@ -21,6 +21,7 @@ import io.agentscope.core.permission.PermissionRule;
 import io.agentscope.core.state.JsonFileAgentStateStore;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.IsolationScope;
+import io.agentscope.harness.agent.bus.MessageBus;
 import io.agentscope.harness.agent.bus.WorkspaceAsyncToolRegistry;
 import io.agentscope.harness.agent.bus.WorkspaceMessageBus;
 import io.agentscope.harness.agent.filesystem.AbstractFilesystem;
@@ -78,6 +79,18 @@ public class WorkspaceAgentBuilder {
      */
     private final Map<String, String> refreshedPaths = new ConcurrentHashMap<>();
 
+    /**
+     * workspaceId → 该工作区 Agent 使用的 MessageBus。
+     * <p>
+     * 用于「用户主动介入轮次」：介入消息经 {@code MessageBus.inboxPush} 投进会话收件箱，
+     * 由 Harness 已装配的 {@code InboxMiddleware} 在**下一个推理步之前**排空并作为
+     * HintBlock 注入上下文——这样既不中断当前回合，又能让模型立刻看到用户的新指示。
+     * <p>
+     * bus 原本只是 {@link #build} 内的局部变量，Agent 重建时会换新实例，
+     * 故与 refreshedPaths 同样按 workspaceId 存放，由 build 覆盖刷新。
+     */
+    private final Map<String, MessageBus> messageBuses = new ConcurrentHashMap<>();
+
     public WorkspaceAgentBuilder(AgentFactory agentFactory,
                                  SubagentLoader subagentLoader,
                                  PermissionRuleService permissionRuleService,
@@ -108,6 +121,17 @@ public class WorkspaceAgentBuilder {
         return refreshedPaths.get(workspaceId);
     }
 
+    // ==================== 介入通道 ====================
+
+    /**
+     * 取该工作区 Agent 当前使用的 MessageBus，供「用户主动介入轮次」投递消息。
+     *
+     * @return 尚未构建过 Agent 时返回 null
+     */
+    public MessageBus getMessageBus(String workspaceId) {
+        return workspaceId == null ? null : messageBuses.get(workspaceId);
+    }
+
     // ==================== Agent 装配 ====================
 
     /**
@@ -127,6 +151,8 @@ public class WorkspaceAgentBuilder {
         // 避免在 workspace 根散落 .agentscope 目录
         AbstractFilesystem agentFs = fsSpec.toFilesystem(workspacePath, null);
         WorkspaceMessageBus messageBus = new WorkspaceMessageBus(agentFs, ".easyClaw/bus");
+        // 暴露给介入功能使用（Agent 重建时以新实例覆盖）
+        messageBuses.put(workspaceId, messageBus);
         WorkspaceAsyncToolRegistry asyncRegistry =
                 new WorkspaceAsyncToolRegistry(agentFs, ".easyClaw/bus/async-tools");
 

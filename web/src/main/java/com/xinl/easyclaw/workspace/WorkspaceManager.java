@@ -12,6 +12,7 @@ import com.xinl.easyclaw.workspace.entity.WorkspaceEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
 import com.xinl.easyclaw.workspace.repository.WorkspaceRepository;
 import io.agentscope.harness.agent.HarnessAgent;
+import io.agentscope.harness.agent.bus.MessageBus;
 import jakarta.annotation.PostConstruct;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -92,6 +93,17 @@ public class WorkspaceManager {
         } catch (Exception e) {
             log.warn("用户 ID 迁移失败（可忽略）: {}", e.getMessage());
         }
+    }
+
+    // ==================== 介入通道 ====================
+
+    /**
+     * 取工作区 Agent 当前的 MessageBus，供「用户主动介入轮次」向会话收件箱投递消息。
+     *
+     * @return Agent 尚未构建时返回 null
+     */
+    public MessageBus getMessageBus(String workspaceId) {
+        return agentBuilder.getMessageBus(workspaceId);
     }
 
     // ==================== Workspace 管理 ====================
