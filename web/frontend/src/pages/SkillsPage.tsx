@@ -28,6 +28,8 @@ export default function SkillsPage() {
   const [skillType, setSkillType] = useState<'file' | 'dir'>('file');
   const [children, setChildren] = useState<{name: string; content: string}[]>([]);
   const [viewing, setViewing] = useState<SkillFile | null>(null);
+  const [running, setRunning] = useState('');
+  const [runOut, setRunOut] = useState<Record<string, string>>({});
 
   const load = async () => {
     try {
@@ -75,10 +77,33 @@ export default function SkillsPage() {
   };
 
   const addChild = () => setChildren([...children, { name: '', content: '' }]);
+  const addScript = () => setChildren([...children, {
+    name: 'check.py',
+    content: '"""脚本用途说明（首行会作为描述显示）。"""\nimport sys\n\n\ndef main(argv):\n    print("hello from skill script", argv[1:])\n    return 0\n\n\nsys.exit(main(sys.argv))\n',
+  }]);
   const updateChild = (idx: number, field: 'name' | 'content', val: string) => {
     setChildren(children.map((c, i) => i === idx ? { ...c, [field]: val } : c));
   };
   const removeChild = (idx: number) => setChildren(children.filter((_, i) => i !== idx));
+
+  const runScript = async (skill: SkillFile, childName: string) => {
+    const script = childName.replace(/^scripts\//, '');
+    const key = `${skill.name}/${script}`;
+    setRunning(key);
+    try {
+      const r = await postJson<{ output: string }>('/api/skills/run-script', {
+        skill: skill.name,
+        script,
+        args: [],
+        workspaceId: skill.scope === 'workspace' ? workspaceId : undefined,
+      });
+      setRunOut({ ...runOut, [key]: r.output });
+    } catch (e) {
+      setRunOut({ ...runOut, [key]: `请求失败: ${String(e)}` });
+    } finally {
+      setRunning('');
+    }
+  };
 
   const remove = async (path: string) => {
     if (!confirm('删除该项？')) return;
@@ -205,22 +230,28 @@ export default function SkillsPage() {
           {skillType === 'dir' && (
             <div style={{ background: '#fafafa', border: '1px solid #e8e8e8', borderRadius: 8, padding: 12, marginTop: 8 }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <span style={{ fontWeight: 600, fontSize: 13 }}>📎 子规则（{children.length}）</span>
-                <button className="btn small" onClick={addChild}>＋ 添加子规则</button>
+                <span style={{ fontWeight: 600, fontSize: 13 }}>📎 子文件（{children.length}）</span>
+                <div style={{ display: 'flex', gap: 6 }}>
+                  <button className="btn small" onClick={addChild}>＋ 子规则(.md)</button>
+                  <button className="btn small" onClick={addScript}>＋ 脚本(.py)</button>
+                </div>
               </div>
               {children.length === 0 && (
                 <div className="hint" style={{ fontSize: 12, textAlign: 'center', padding: '12px 0' }}>
-                  暂无子规则，子规则会按字母序追加到 SKILL.md 后一起注入
+                  暂无子文件。.md 子规则按字母序追加到 SKILL.md 后注入；.py 脚本落在 scripts/ 下，供 run_skill_script 调用
                 </div>
               )}
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {children.map((child, idx) => (
                   <div key={idx} style={{ background: '#fff', border: '1px solid #e0e0e0', borderRadius: 6, padding: 10 }}>
                     <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+                      <span style={{ fontSize: 12, alignSelf: 'center' }}>
+                        {child.name.endsWith('.py') ? '🐍' : '📄'}
+                      </span>
                       <input
                         value={child.name}
                         onChange={(e) => updateChild(idx, 'name', e.target.value)}
-                        placeholder="规则文件名（如 components.md）"
+                        placeholder="文件名（如 components.md 或 check.py）"
                         style={{ flex: 1 }}
                       />
                       <button className="btn danger small" onClick={() => removeChild(idx)}>删除</button>
@@ -229,8 +260,10 @@ export default function SkillsPage() {
                       value={child.content}
                       onChange={(e) => updateChild(idx, 'content', e.target.value)}
                       rows={4}
-                      placeholder="子规则内容（Markdown）..."
-                      style={{ width: '100%', fontSize: 12 }}
+                      placeholder={child.name.endsWith('.py')
+                        ? "Python 脚本内容；沙箱内运行，可读 skill 目录与工作区源码，不可写"
+                        : "子规则内容（Markdown）..."}
+                      style={{ width: '100%', fontSize: 12, fontFamily: child.name.endsWith('.py') ? 'monospace' : undefined }}
                     />
                   </div>
                 ))}
@@ -291,10 +324,13 @@ export default function SkillsPage() {
           {viewing.type === 'dir' && viewing.children && viewing.children.length > 0 && (
             <div>
               <div className="hint" style={{ fontSize: 11, marginBottom: 6 }}>
-                📎 子规则（{viewing.children.length}）——注入时按字母序追加到主入口后
+                📎 子文件（{viewing.children.length}）——.md 按字母序注入；🐍 .py 位于 scripts/，可直接试跑
               </div>
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {viewing.children.map((child, idx) => (
+                {viewing.children.map((child, idx) => {
+                  const isPy = child.name.endsWith('.py');
+                  const key = `${viewing.name}/${child.name.replace(/^scripts\//, '')}`;
+                  return (
                   <details key={idx} style={{
                     background: '#fafafa',
                     border: '1px solid #e8e8e8',
@@ -307,9 +343,21 @@ export default function SkillsPage() {
                       padding: '6px 0',
                       fontSize: 13,
                     }}>
-                      📄 {child.name}
+                      {isPy ? '🐍' : '📄'} {child.name}
                       {child.description && <span className="hint" style={{ fontWeight: 400, marginLeft: 8 }}>— {child.description}</span>}
                     </summary>
+                    {isPy && (
+                      <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '4px 0' }}>
+                        <button className="btn small primary"
+                          disabled={running === key}
+                          onClick={() => runScript(viewing, child.name)}>
+                          {running === key ? '运行中…' : '▶ 试跑'}
+                        </button>
+                        <span className="hint" style={{ fontSize: 11 }}>
+                          无参运行，权限与 Agent 调用完全一致
+                        </span>
+                      </div>
+                    )}
                     <pre style={{
                       background: '#fff',
                       border: '1px solid #eee',
@@ -323,8 +371,23 @@ export default function SkillsPage() {
                       wordBreak: 'break-word',
                       margin: '4px 0 8px 0',
                     }}>{child.content || '（空）'}</pre>
+                    {isPy && runOut[key] !== undefined && (
+                      <pre style={{
+                        background: '#1e1e1e',
+                        color: '#d4d4d4',
+                        borderRadius: 4,
+                        padding: 10,
+                        maxHeight: 240,
+                        overflow: 'auto',
+                        fontSize: 12,
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        margin: '0 0 8px 0',
+                      }}>{runOut[key]}</pre>
+                    )}
                   </details>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}

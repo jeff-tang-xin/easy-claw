@@ -106,7 +106,7 @@ public class ToolRegistryService {
         ALL_FRAMEWORK_TOOLS = Set.copyOf(all);
     }
 
-    private static final Map<String, String> DISPLAY = Map.ofEntries(
+    static final Map<String, String> DISPLAY = Map.ofEntries(
             // 框架 FilesystemTool 内置工具
             Map.entry("read_file", "文件读取（框架）"),
             Map.entry("write_file", "文件写入（框架）"),
@@ -298,6 +298,13 @@ public class ToolRegistryService {
             return false;
         }
         if (ALL_FRAMEWORK_TOOLS.contains(toolName)) {
+            return true;
+        }
+        // DISPLAY 覆盖本项目用 @Tool 注解注册的工具（run_python / run_skill_script /
+        // analyze_code 等）。它们不属于 ALL_FRAMEWORK_TOOLS，且只有被用户在工具管理页
+        // 改过配置才会有 DB 行——仅凭 DB 判断会把它们误判为「未知工具」，导致确认弹窗
+        // 选「始终允许」直接失败。
+        if (DISPLAY.containsKey(toolName)) {
             return true;
         }
         return toolService.findByName(toolName).isPresent();

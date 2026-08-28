@@ -11,6 +11,7 @@ import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tool.service.ToolManagementService;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
+import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.springframework.http.HttpStatus;
@@ -41,6 +42,7 @@ public class ManageController {
     private final MemoryService memoryService;
     private final WorkspaceManager workspaceManager;
     private final SettingsService settingsService;
+    private final SkillScriptTools skillScriptTools;
 
     public ManageController(RoleManagementService roleService,
                             ToolManagementService toolService,
@@ -48,7 +50,8 @@ public class ManageController {
                             McpConnectionService mcpService,
                             MemoryService memoryService,
                             WorkspaceManager workspaceManager,
-                            SettingsService settingsService) {
+                            SettingsService settingsService,
+                            SkillScriptTools skillScriptTools) {
         this.roleService = roleService;
         this.toolService = toolService;
         this.toolRegistryService = toolRegistryService;
@@ -56,6 +59,7 @@ public class ManageController {
         this.memoryService = memoryService;
         this.workspaceManager = workspaceManager;
         this.settingsService = settingsService;
+        this.skillScriptTools = skillScriptTools;
     }
 
     // ================= Skills & 子 Agent =================
@@ -187,6 +191,39 @@ public class ManageController {
         return "";
     }
 
+    /**
+     * 解析子文件落点：{@code .py} 归入 {@code scripts/}，其余按 md 子规则放在 skill 根。
+     *
+     * <p>名字来自用户输入，必须校验归属：{@code ../} 或绝对路径会写到 skill 目录之外。
+     */
+    static Path resolveChildPath(Path skillDir, String rawName) {
+        String cn = rawName == null ? "" : rawName.trim().replace('\\', '/');
+        if (cn.startsWith("scripts/")) {
+            cn = cn.substring("scripts/".length());
+        }
+        if (cn.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "子文件名不能为空");
+        }
+        Path base = skillDir.toAbsolutePath().normalize();
+        Path target = cn.endsWith(".py")
+                ? base.resolve("scripts").resolve(cn)
+                : base.resolve(cn.endsWith(".md") ? cn : cn + ".md");
+        target = target.normalize();
+        if (!target.startsWith(base)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "子文件名越界: " + rawName);
+        }
+        return target;
+    }
+
+    /** 展示名与 {@link #collectScripts} 保持一致：脚本带 scripts/ 前缀，md 去掉扩展名。 */
+    static String displayChildName(String rawName) {
+        String cn = rawName == null ? "" : rawName.trim().replace('\\', '/');
+        if (cn.startsWith("scripts/")) {
+            cn = cn.substring("scripts/".length());
+        }
+        return cn.endsWith(".py") ? "scripts/" + cn : cn.replace(".md", "");
+    }
+
     @PostMapping("/skills")
     public SkillFileDto createSkill(@RequestBody SkillWriteRequest req) {
         try {
@@ -224,11 +261,14 @@ public class ManageController {
                     int idx = 0;
                     for (Map<String, String> child : req.children()) {
                         String cn = child.getOrDefault("name", "rule-" + (++idx));
-                        if (!cn.endsWith(".md")) cn = cn + ".md";
                         String cc = child.getOrDefault("content", "");
-                        Files.writeString(skillDir.resolve(cn), cc, StandardCharsets.UTF_8);
-                        children.add(new SkillChild(cn.replace(".md", ""), "",
-                                skillDir.resolve(cn).toAbsolutePath().toString(), cc));
+                        // 脚本子文件（scripts/xxx.py）与 md 子规则走不同落点：
+                        // 前者是 run_skill_script 的执行目标，必须落在 scripts/ 下才能被找到。
+                        Path childPath = resolveChildPath(skillDir, cn);
+                        Files.createDirectories(childPath.getParent());
+                        Files.writeString(childPath, cc, StandardCharsets.UTF_8);
+                        children.add(new SkillChild(displayChildName(cn), "",
+                                childPath.toAbsolutePath().toString(), cc));
                     }
                 }
                 created = new SkillFileDto(req.scope(), safeName,
@@ -250,6 +290,33 @@ public class ManageController {
         } catch (IOException e) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "创建失败: " + e.getMessage());
         }
+    }
+
+    public record RunScriptRequest(String workspaceId, String skill, String script, List<String> args) {}
+
+    public record RunScriptResult(String output) {}
+
+    /**
+     * 在管理页试跑 skill 脚本。
+     *
+     * <p>直接委托 {@code run_skill_script} 工具，不另写执行路径——沙箱权限（skill 目录可读、
+     * 工作区只读、{@code .easyClaw/} 拒绝、无写权限）必须与 Agent 调用时完全一致，
+     * 否则页面「测试通过」不代表 Agent 真跑得起来。
+     */
+    @PostMapping("/skills/run-script")
+    public RunScriptResult runSkillScript(@RequestBody RunScriptRequest req) {
+        WorkspaceContext ws = null;
+        if (req.workspaceId() != null && !req.workspaceId().isBlank()) {
+            ws = workspaceManager.getWorkspace(req.workspaceId());
+            if (ws == null) {
+                // 不静默退化为全局查找：否则工作区 skill 会报「未找到 Skill」，
+                // 用户无从判断是脚本问题还是工作区 id 问题。
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "工作区不存在: " + req.workspaceId());
+            }
+        }
+        return new RunScriptResult(
+                skillScriptTools.runSkillScript(req.skill(), req.script(), req.args(), ws));
     }
 
     @DeleteMapping("/skills")
