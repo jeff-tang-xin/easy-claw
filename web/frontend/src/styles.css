@@ -177,7 +177,10 @@ button { font-family: inherit; }
 .btn.small { padding: 4px 10px; font-size: 12px; border-radius: 6px; }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
-input, textarea, select {
+/* 文本类输入控件的统一外观。
+   用 :not([type=checkbox]):not([type=radio]) 排除勾选类控件——它们是原生小方框/圆点，
+   套上 width:100% + padding 会被撑满整行，把同排的文字标签挤出容器（表现为「只见勾选框、不见名称」）。 */
+input:not([type="checkbox"]):not([type="radio"]), textarea, select {
   font: inherit;
   color: var(--text);
   border: 1px solid var(--border);
@@ -188,7 +191,17 @@ input, textarea, select {
   transition: border-color 0.15s, box-shadow 0.15s;
   width: 100%;
 }
-input:focus, textarea:focus, select:focus {
+
+/* 勾选类控件：保持原生尺寸，不参与 flex 收缩，避免被文字标签压扁 */
+input[type="checkbox"], input[type="radio"] {
+  width: auto;
+  flex: none;
+  margin: 0;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+
+input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
@@ -1412,10 +1425,6 @@ details.fold.loading summary::before {
 }
 .mcp-tool-item:hover {
   background: var(--bg-hover, #f5f5f5);
-}
-.mcp-tool-item input[type="checkbox"] {
-  margin: 0;
-  cursor: pointer;
 }
 .mcp-card-actions {
   display: flex;
