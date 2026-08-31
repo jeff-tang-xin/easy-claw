@@ -270,7 +270,8 @@ public class AgentService {
      *   <li>摘除订阅句柄并清理本轮状态（**此时先不 dispose**）</li>
      *   <li>调用 agent.interrupt(userId, sessionId)（按会话槽精确设置中断标志，
      *       让 Agent 循环提前退出并释放 AgentBase 的 callGates 串行化闸门）</li>
-     *   <li>{@link #STOP_GRACE_MS} 宽限期后兜底 dispose 订阅</li>
+     *   <li>{@link #STOP_GRACE_MS} 宽限期后兜底 dispose 订阅；若此时流仍未终止
+     *       （工具阻塞在不可中断调用中），重建 Agent 释放被占死的 callGates</li>
      * </ol>
      * <p>
      * 【顺序不可调换】必须 interrupt 先于 dispose：中断路径上唯一的记忆落盘点
@@ -323,7 +324,9 @@ public class AgentService {
         //    检查点、抛出 InterruptedException 并在 handleInterrupt 里完成
         //    saveStateToSession 的时间。正常情况下中断异常会让流自行终止
         //    （doFinally 里已 clearDisposable），此时这里的 dispose 是幂等空操作。
-        scheduleGraceDispose(disp, sessionId);
+        //    若 dispose 后流**仍未**终止，说明工具卡在不可中断的阻塞调用里，
+        //    会顺带触发 recoverStuckAgent 重建 Agent，避免 callGates 被永久占用。
+        scheduleGraceDispose(disp, sessionId, workspaceId);
 
         // 本轮状态已由上面的 sessions.abortTurn 一次性清理（待确认工具、回合授权、
         // 恢复标记、工具失败计数、确认超时倒计时与挂起回调）
@@ -338,7 +341,7 @@ public class AgentService {
      * 只有中断没被 Agent 循环读到（例如卡在不可中断的阻塞调用里）时，
      * 才靠这里的延时 dispose 保证订阅不泄漏。
      */
-    private void scheduleGraceDispose(Disposable disp, String sessionId) {
+    private void scheduleGraceDispose(Disposable disp, String sessionId, String workspaceId) {
         if (disp == null || disp.isDisposed()) {
             return;
         }
@@ -354,6 +357,12 @@ public class AgentService {
                 } catch (Exception e) {
                     log.warn("兜底 dispose 订阅异常: sessionId={}, err={}", sessionId, e.getMessage());
                 }
+                // 卡死判定与恢复：dispose 之后流仍未终止，说明取消没能传播到上游
+                // ——工具正阻塞在不可打断的调用里（见 recoverStuckAgent 的完整说明）。
+                // 此时 callGates 已被占死，必须重建 Agent，否则后续消息永久排队。
+                if (!disp.isDisposed()) {
+                    recoverStuckAgent(sessionId, workspaceId);
+                }
             }, STOP_GRACE_MS, java.util.concurrent.TimeUnit.MILLISECONDS);
         } catch (Exception e) {
             // 调度器已关闭（应用停机）：退回同步 dispose，避免订阅泄漏
@@ -363,6 +372,45 @@ public class AgentService {
             } catch (Exception ignore) {
                 log.warn("立即 dispose 也失败: {}", ignore.getMessage());
             }
+        }
+    }
+
+    /**
+     * 从「工具卡死」状态恢复：重建 Agent，丢弃被占死的 callGates。
+     * <p>
+     * 【为什么需要这一步】工具执行在上游被
+     * {@code Mono.fromCallable(...).subscribeOn(boundedElastic)} 包裹
+     * （ToolExecutor.java:409-415），一旦进入 {@code call()} 就是不可打断的黑盒：
+     * {@code Process.waitFor}、管道 {@code InputStream.read}、GraalPy 原生执行
+     * 都对 {@code Thread.interrupt()} 免疫。而工具超时用的是 {@code Mono.timeout}
+     * （ToolExecutor.java:426-429），只向下游发 error、向上游发 cancel，
+     * **不会真正放弃已阻塞的工作线程**（且默认 30 分钟，对用户等同永久假死）。
+     * <p>
+     * 更关键的是 {@code ReActAgent} 全文只有一个中断检查点（ReActAgent.java:1729），
+     * 调用点位于 {@code checkInterrupted().then(acting(iter))}（:2482，工具执行**之前**）
+     * 和模型 chunk 上（:2549、:3601）——**工具执行内部没有任何检查点**。
+     * 所以中断标志最早也要等「本轮所有工具都返回」才会被读到；工具不返回，
+     * 中断就永远是死信。此时 {@code AgentBase} 按 slotKey 串行化的 callGates
+     * 一直被占用，同一会话的下一条消息在 gate 上无声排队 ——
+     * 用户看到的就是「已经点了停止，但后端毫无反应、也不往下进行」。
+     * <p>
+     * 重建 Agent 会替换掉持有这些 gate 的实例，新消息从 state 文件干净加载
+     * （与流式错误后的自愈路径一致）。被卡住的旧工具线程仍会在后台空跑到自己结束，
+     * 这是当前上游实现下无法避免的代价，但它不再阻塞用户。
+     */
+    private void recoverStuckAgent(String sessionId, String workspaceId) {
+        String wid = workspaceId != null ? workspaceId : sessions.workspaceOf(sessionId);
+        if (wid == null) {
+            log.warn("检测到卡死流但无法定位 workspaceId，跳过 Agent 重建: sessionId={}", sessionId);
+            return;
+        }
+        log.warn("停止后流仍未终止（工具阻塞在不可中断调用中），重建 Agent 以释放被占死的 callGates: "
+                + "workspaceId={}, sessionId={}", wid, sessionId);
+        try {
+            workspaceManager.rebuildAgent(wid);
+            log.info("卡死恢复完成，Agent 已重建: workspaceId={}", wid);
+        } catch (Exception e) {
+            log.error("卡死恢复失败，该会话后续消息可能仍无响应: workspaceId={}, err={}", wid, e.getMessage());
         }
     }
 
