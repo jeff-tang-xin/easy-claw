@@ -17,6 +17,7 @@ declare global {
     __CHAT_SOCKET__?: ChatSocket;
     __CHAT_SOCKET_CONN_ID__?: number;
     __CHAT_SOCKET_DEAD__?: WebSocket[];
+    __CHAT_SOCKET_WAKE_BOUND__?: boolean;
   }
 }
 
@@ -24,6 +25,14 @@ const listeners: ChatListener[] = [];
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let isCreating = false;
 let nextConnId = window.__CHAT_SOCKET_CONN_ID__ || 1;
+
+// 重连退避：连续失败时逐步拉长间隔，避免服务端未起来时每 2s 无脑重试。
+// 首次只等 1s（比原来的固定 2s 更快恢复瞬时抖动），随后 2/4/8/15s 封顶。
+const RECONNECT_DELAYS_MS = [1000, 2000, 4000, 8000, 15000];
+// 连接存活超过这个时长才认为「真正连上过」，据此清零退避计数。
+// 若服务端接受连接后立刻断开（崩溃重启循环），不清零，否则会退化成 1s 死循环。
+const STABLE_CONNECTION_MS = 5000;
+let reconnectAttempts = 0;
 
 const queue: unknown[] = [];
 const QUEUE_MAX = 200;
@@ -53,6 +62,48 @@ function flushQueue(ws: WebSocket) {
   }
 }
 
+/**
+ * 按退避档位安排一次重连。已有定时器时直接返回，保证同一时刻只有一个待重连任务。
+ */
+function scheduleReconnect() {
+  if (listeners.length === 0 || reconnectTimer) return;
+  const delay = RECONNECT_DELAYS_MS[Math.min(reconnectAttempts, RECONNECT_DELAYS_MS.length - 1)];
+  reconnectAttempts++;
+  console.log(`[ws] 计划第 ${reconnectAttempts} 次重连，延迟 ${delay}ms`);
+  reconnectTimer = setTimeout(() => {
+    reconnectTimer = null;
+    reapDeadSockets();
+    if (listeners.length > 0 && !isCreating && !window.__CHAT_SOCKET__) {
+      getChatSocket();
+    }
+  }, delay);
+}
+
+/**
+ * 立即重连（不等退避）：用于「用户回到页面」「网络恢复」这类明确的复活信号。
+ * 这是体验上最关键的一环 —— 笔记本合盖再打开后，用户不该盯着「正在重连」等十几秒。
+ */
+function reconnectNow() {
+  if (window.__CHAT_SOCKET__ || isCreating || listeners.length === 0) return;
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+  reconnectAttempts = 0;
+  console.log('[ws] 收到复活信号（页面可见/网络恢复），立即重连');
+  reapDeadSockets();
+  getChatSocket();
+}
+
+// 浏览器给出的两个明确复活信号。addEventListener 而非赋值，避免覆盖他处监听。
+if (typeof window !== 'undefined' && !window.__CHAT_SOCKET_WAKE_BOUND__) {
+  window.__CHAT_SOCKET_WAKE_BOUND__ = true;
+  window.addEventListener('online', reconnectNow);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') reconnectNow();
+  });
+}
+
 function createSocket(): ChatSocket {
   isCreating = true;
   reapDeadSockets();
@@ -65,11 +116,13 @@ function createSocket(): ChatSocket {
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let notifiedClose = false;
   let socketRef: ChatSocket | null = null;
+  let openedAt = 0;
 
   console.log(`[ws#${connId}] 创建连接 url=${proto}://${location.host}/ws/chat`);
 
   ws.onopen = () => {
     isCreating = false;
+    openedAt = Date.now();
     flushQueue(ws);
     heartbeat = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
@@ -111,15 +164,12 @@ function createSocket(): ChatSocket {
       window.__CHAT_SOCKET_DEAD__ = dead;
       console.warn(`[ws#${connId}] 断开（dead=${dead.length}）`);
       listeners.forEach((l) => l('', '', { type: 'disconnected', content: '' } as StreamEvent));
-      if (listeners.length > 0 && !reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          reapDeadSockets();
-          if (listeners.length > 0 && !isCreating && !window.__CHAT_SOCKET__) {
-            getChatSocket();
-          }
-        }, 2000);
+      // 稳定连接过后才断开 → 视为新一轮故障，退避从头开始；
+      // 连上就秒断则保留当前退避档位，避免服务端重启循环时 1s 无脑重试
+      if (openedAt > 0 && Date.now() - openedAt >= STABLE_CONNECTION_MS) {
+        reconnectAttempts = 0;
       }
+      scheduleReconnect();
     }
   };
 
