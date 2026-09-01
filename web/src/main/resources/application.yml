@@ -47,9 +47,12 @@ agentscope:
   agent:
     max-iters: 50
     model-timeout-minutes: 10
-    # 必须 > shell-timeout-seconds（当前 300s=5min），否则外层工具超时会先于
-    # shell 自身超时触发，shell-timeout-seconds 永远不生效
-    tool-timeout-minutes: 10
+    # 下界受两个硬约束钳制，调低前务必确认：
+    #  1) agent_spawn 同步等待上限 600s（AgentSpawnTool.MAX_TIMEOUT_SECONDS），到点自行
+    #     「提升为后台任务」返回。本值必须 > 600s，否则外层工具超时先掐断 spawn，
+    #     多智能体编排的异步降级路径失效。原值 10min 与 600s 恰好相等 = 竞态，已修正。
+    #  2) 必须 > shell-timeout-seconds（当前 300s），否则 shell 自身超时永远不生效。
+    tool-timeout-minutes: 12
     # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放 SSE 与会话状态
     confirm-timeout-minutes: ${AGENTSCOPE_CONFIRM_TIMEOUT_MINUTES:10}
     # SSE 连接超时（分钟），需大于「单回合最长耗时 + confirm-timeout-minutes」

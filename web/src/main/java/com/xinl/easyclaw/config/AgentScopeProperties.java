@@ -303,8 +303,22 @@ public class AgentScopeProperties {
         /** 单次模型调用超时（分钟）。复杂推理/长输出可能需要更久 */
         private int modelTimeoutMinutes = 10;
 
-        /** 单次工具调用超时（分钟）。子 Agent 通过 agent_spawn 同步调用，必须大于子 Agent 任务耗时 */
-        private int toolTimeoutMinutes = 30;
+        /**
+         * 单次工具调用超时（分钟）。
+         *
+         * <p>下界由两个硬约束决定，调低前务必确认：
+         * <ul>
+         *   <li>agent_spawn 同步等待被框架钳制在 600s（AgentSpawnTool.MAX_TIMEOUT_SECONDS），
+         *       到点自行「提升为后台任务」返回；本超时若小于 600s，会在提升前就掐断 spawn，
+         *       多智能体编排的异步降级路径直接失效。</li>
+         *   <li>shellTimeoutSeconds 默认 300s，execute 工具可合法跑满。</li>
+         * </ul>
+         *
+         * <p>取 12 分钟 = 600s 上界 + 120s 余量。原值 30 分钟并无依据，且工具链目前
+         * 缺少可中断点（见 AgentService#recoverStuckAgent），卡死工具会占住 boundedElastic
+         * 线程直到超时；在并发子 Agent 场景下该占用按并发度放大，故收紧至满足约束的最小值。
+         */
+        private int toolTimeoutMinutes = 12;
 
         /**
          * 工具确认等待超时（分钟）。用户迟迟不点确认/拒绝（关页面、切走、误触）时，
