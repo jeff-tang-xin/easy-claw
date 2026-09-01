@@ -339,20 +339,15 @@ public class WorkspaceAgentBuilder {
                             : sysPromptAugment);
         }
 
-        // 场景（Scenario）：工作区激活的场景提示词 / 多智能体编排工作流注入 system prompt。
+        // 场景（Scenario）：环境 + 能力边界 + 方法论，三段合成一块注入。
         // 激活关系持久化在 workspace_scenarios 表，重启后端后恢复工作区时依然生效
         String scenarioAugment = com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder
-                .build(scenarioResolver.activeScenario(workspaceId), subagents);
+                .build(scenarioResolver.activeScenario(workspaceId), subagents,
+                        capabilityRecommendation(binding, subagents));
         if (scenarioAugment != null) {
             sysPrompt = sysPrompt + "\n\n" + scenarioAugment;
             log.info("场景已注入 system prompt: workspace={}, augment={} chars",
                     workspaceId, scenarioAugment.length());
-        }
-
-        String recommendation = capabilityRecommendation(binding, subagents);
-        if (recommendation != null) {
-            sysPrompt = sysPrompt + recommendation;
-            log.info("场景能力推荐已注入 system prompt: workspace={}", workspaceId);
         }
 
         return sysPrompt;
@@ -374,25 +369,27 @@ public class WorkspaceAgentBuilder {
         }
         StringBuilder sb = new StringBuilder();
         if (binding.hasSkillBinding()) {
-            sb.append("\n- 本场景推荐优先使用的 Skill：")
+            sb.append("\n- **本场景的 Skill**：")
                     .append(String.join("、", binding.skills()))
-                    .append("。遇到匹配的任务先加载它们；确有需要时也可使用其他 Skill。");
+                    .append("。这是本环境为你配备的方法资产，遇到匹配任务应先加载；")
+                    .append("确有场景未覆盖的需求时才使用其他 Skill，并说明理由。");
         }
         List<String> boundAgents = availableBoundAgents(binding, subagents);
         if (!boundAgents.isEmpty()) {
-            sb.append("\n- 本场景推荐优先调度的子 Agent：")
+            sb.append("\n- **本场景的协作成员**：")
                     .append(String.join("、", boundAgents))
-                    .append("。拆解任务时优先考虑它们。");
+                    .append("。拆解任务时优先在这些成员中分工；")
+                    .append("确需成员外能力时由你自己承担，并说明理由。");
         }
         if (binding.hasMcpBinding()) {
-            sb.append("\n- 本场景已限定可用的 MCP 服务：")
+            sb.append("\n- **本场景可用的 MCP 服务（硬性）**：")
                     .append(String.join("、", binding.mcpServices()))
-                    .append("。未列出的 MCP 工具已不在工具集中，不要尝试调用。");
+                    .append("。未列出的 MCP 工具已从工具集中移除，调用必然失败，不要尝试。");
         }
         if (sb.isEmpty()) {
             return null;
         }
-        return "\n\n## 🎯 本场景能力配置\n" + sb;
+        return sb.toString().trim();
     }
 
     /**

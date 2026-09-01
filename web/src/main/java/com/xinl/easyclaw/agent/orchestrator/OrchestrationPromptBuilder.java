@@ -33,22 +33,37 @@ public final class OrchestrationPromptBuilder {
 
     /**
      * 构建场景 augment（场景未激活或内容为空时返回 null）
+     * <p>
+     * 输出固定三段式，对应「场景决定你处在什么环境里、什么能做什么不能做、该怎么做」：
+     * <ol>
+     *   <li><b>环境</b>——场景描述</li>
+     *   <li><b>能力边界</b>——绑定的 skill / 子 Agent / MCP（软边界，见 {@code capabilityBoundary}）</li>
+     *   <li><b>方法论</b>——场景提示词 + 协作方式（single 单智能体 / team 多智能体协作）</li>
+     * </ol>
+     * 能力边界原先由 {@code WorkspaceAgentBuilder} 单独拼在场景块之外，模型看到的是
+     * 两段不相干的话；并入这里后「环境-边界-方法」在同一标题下形成完整语义。
      *
      * @param scenario   激活的场景（可为 null）
      * @param subagents  当前 Agent 已注册的子 Agent 声明（用于成员校验）
+     * @param boundary   场景能力边界文本，可为 null；由调用方按绑定关系渲染
      */
-    public static String build(ScenarioEntity scenario, List<SubagentDeclaration> subagents) {
+    public static String build(ScenarioEntity scenario, List<SubagentDeclaration> subagents,
+                               String boundary) {
         if (scenario == null) {
             return null;
         }
         StringBuilder sb = new StringBuilder();
         sb.append("## 🎬 当前场景：").append(displayName(scenario)).append("\n");
         if (notBlank(scenario.getDescription())) {
-            sb.append(scenario.getDescription().trim()).append("\n");
+            sb.append("\n### 你所处的环境\n").append(scenario.getDescription().trim()).append("\n");
         }
+        if (notBlank(boundary)) {
+            sb.append("\n### 能力边界\n").append(boundary.trim()).append("\n");
+        }
+        sb.append("\n### 工作方法论（").append(methodologyLabel(scenario)).append("）\n");
+        int beforeMethod = sb.length();
         if (notBlank(scenario.getSystemPrompt())) {
-            sb.append("\n### 场景行为规范（必须遵守）\n")
-                    .append(scenario.getSystemPrompt().trim()).append("\n");
+            sb.append(scenario.getSystemPrompt().trim()).append("\n");
         }
         if ("team".equals(scenario.getMode())) {
             String orchestration = buildTeamOrchestration(scenario, subagents);
@@ -56,8 +71,17 @@ public final class OrchestrationPromptBuilder {
                 sb.append("\n").append(orchestration);
             }
         }
+        if (sb.length() == beforeMethod) {
+            // 方法论段无内容：留一个空标题反而是噪声，回退为「按通用工作方式执行」
+            sb.append("本场景未定义专属方法论，按基座的任务闭环协议执行。\n");
+        }
         String result = sb.toString().trim();
         return result.isEmpty() ? null : result;
+    }
+
+    /** 方法论标签：把 mode 翻译成模型能理解的协作方式，而不是内部枚举值 */
+    private static String methodologyLabel(ScenarioEntity scenario) {
+        return "team".equals(scenario.getMode()) ? "多智能体协作" : "单智能体";
     }
 
     /**

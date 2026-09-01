@@ -12,10 +12,14 @@ import com.xinl.easyclaw.role.entity.AgentRoleEntity;
  * <p>
  * 设计取舍：
  * <ul>
- *   <li><b>为什么是"片段"而不是"整段 system prompt"</b>：主智能体的基础能力说明
- *       （工具协议、任务闭环等）与角色人格是正交的两件事。角色只描述"你是谁、
- *       你要达成什么"，不该覆盖掉工具使用规范，否则每建一个角色都得把那套协议
- *       重抄一遍。因此这里只产出人格片段，由调用方拼到基础提示词之后。</li>
+ *   <li><b>角色 = 角色定义 + LLM</b>：本类只负责前半段（人格三要素渲染）；后半段
+ *       （该角色专属的 model / baseUrl / apiKey）由
+ *       {@code AgentFactory.resolveRoleModel} 处理。两者共同构成"你是什么"。</li>
+ *   <li><b>为什么是"片段"而不是"整段 system prompt"</b>：工具协议与安全规范属于
+ *       基座层，与角色人格正交。角色只描述"你是谁"，不该重抄那套协议。</li>
+ *   <li><b>为什么不再声明"本设定不豁免工具规范"</b>：层级效力由基座的「分层约定」
+ *       统一裁决（安全规范 &gt; 场景边界 &gt; 角色倾向 &gt; 用户偏好）。角色层替基座
+ *       立法既越权，又会在每个角色片段里重复一遍同样的话。</li>
  *   <li><b>为什么允许字段全空</b>：角色可以只用来指定 model（现有 main 角色的
  *       典型用法），此时返回 null 表示"无人格覆盖"，调用方原样使用基础提示词。</li>
  * </ul>
@@ -53,8 +57,7 @@ public final class RolePromptComposer {
         if (notBlank(role.getBackstory())) {
             sb.append("**背景设定**：\n").append(role.getBackstory().trim()).append("\n");
         }
-        sb.append("\n以上角色设定决定你的专业视角、判断标准与说话方式，"
-                + "在整个会话中保持一致；但它不豁免你对工具使用规范和任务闭环要求的遵守。");
+        sb.append("\n以上角色设定决定你的专业视角、判断标准与说话方式，在整个会话中保持一致。");
         return sb.toString();
     }
 

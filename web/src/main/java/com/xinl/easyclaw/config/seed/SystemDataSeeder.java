@@ -264,24 +264,41 @@ public class SystemDataSeeder {
     }
 
     /**
-     * 播种内置场景（已存在同名场景则跳过，不覆盖用户修改）
+     * 播种内置场景。
+     * <p>
+     * <b>回写语义</b>：内置场景（{@code builtin=true}）每次启动都按最新定义回写，
+     * 等同于"第一次播种"。原因是场景语义已重新定义为「环境 + 能力边界 + 方法论」，
+     * 老库里按旧定义写的内容（把基座的任务闭环重抄一遍）留着会与基座打架。
+     * <p>
+     * <b>不回写的情况</b>：用户把内置场景改成了自定义（{@code builtin=false}），
+     * 视为用户资产，只跳过不覆盖。用户新建的场景本就不在此列。
+     * <p>
+     * 代价：用户直接改过内置场景正文的修改会在下次启动被覆盖。选择接受，因为
+     * 内置场景定位是"平台提供的标准方法论"，需要随平台演进；用户要定制应另存为
+     * 新场景。
      */
     private void seedScenarios() {
         ensureColumn("scenarios", "mode", "TEXT NOT NULL DEFAULT 'single'");
         upsertScenario("general-coding", "通用编程", "💻",
-                "默认编程助手模式：需求分析 → 方案设计 → 实现 → 自测验证的闭环工作流。",
+                "你在一个真实的软件工程项目里工作，面对的是已有代码、已有约定和已有历史包袱，"
+                        + "而不是从零起步的玩具工程。改动会直接落到用户的代码库上。",
                 "single", """
-                        工作方式：
-                        1. 先理解需求与现有代码结构，必要时阅读相关文件，不要凭猜测动手。
-                        2. 方案有取舍时简要说明选项与理由，再按最优方案实现。
-                        3. 实现完成后主动自测（编译/运行/检查关键路径），确认可用再汇报。
-                        4. 汇报格式：做了什么 / 关键改动 / 如何验证 / 遗留风险。""", null);
+                        方法论：单智能体闭环——由你独立完成从理解到验证的全过程，不做任务分发。
+                        1. 先建立事实：读相关代码、确认现有结构与约定，不凭猜测动手。
+                        2. 遵循既有风格：命名、分层、错误处理沿用项目现状，不引入个人偏好的新范式。
+                        3. 外科手术式修改：只改必要的地方，不顺手重构无关代码。
+                        4. 方案有取舍时先说明选项与理由，再按最优方案实现。
+                        5. 改完必须自测（编译/运行/关键路径检查），确认可用再汇报。
+                        6. 汇报格式：做了什么 / 关键改动 / 如何验证 / 遗留风险。""", null);
 
         upsertScenario("team-dev", "团队协作开发", "🤝",
-                "多智能体编排：planner 拆解 → coder 实现 ∥ reviewer 评审（并行）→ 主控汇总交付。",
+                "你在一个有分工的开发团队里担任编排者，手下有可调度的专项成员。"
+                        + "任务规模超出单人一次性完成的范围，需要拆解、并行与汇总。",
                 "team", """
-                        你本场景中的角色是编排者（Orchestrator）：负责任务分发、进度把控与最终汇总，
-                        具体专项工作交给子 Agent 完成，不要亲自重复子 Agent 的工作。""", """
+                        方法论：多智能体协作——你是编排者（Orchestrator），负责任务分发、进度把控与最终汇总。
+                        - 专项工作交给子 Agent，不要亲自重复成员已做的事。
+                        - 你对最终交付负责：成员产出不合格时就地修正或自己补做，不原样转发。
+                        - 汇总时交叉验证成员结论，冲突之处必须查证后给出唯一答案。""", """
                         {"steps":[
                           {"subagent":"planner","instruction":"分析需求并输出子任务清单（含验收标准与依赖关系）","parallel":false},
                           {"subagent":"coder","instruction":"按规划清单完成代码实现，自测通过后汇报改动","parallel":false},
@@ -289,10 +306,13 @@ public class SystemDataSeeder {
                         ]}""");
 
         upsertScenario("code-review", "代码评审会", "🔍",
-                "多智能体编排：reviewer 全面评审 ∥ coder 复核可运行性（并行）→ 主控汇总裁决。",
+                "你在主持一场代码评审会，评审对象是已提交或待合入的改动。"
+                        + "产出是评审结论，默认不直接改代码。",
                 "team", """
-                        你本场景中的角色是评审会主持人：组织评审、汇总意见、给出最终裁决结论。
-                        评审意见要具体到文件/行为位置，可执行可验证。""", """
+                        方法论：多智能体协作——你是评审会主持人，组织评审、汇总意见、给出最终裁决。
+                        - 评审意见必须落到具体文件与位置，可执行可验证，不停留在"建议优化"。
+                        - 按严重程度分级（阻断 / 应改 / 建议），让用户能据此决定是否合入。
+                        - 成员意见分歧时由你查证裁决，不把分歧原样抛给用户。""", """
                         {"steps":[
                           {"subagent":"reviewer","instruction":"全面评审指定代码：正确性、可读性、缺陷、安全、性能，按严重程度输出问题清单","parallel":false},
                           {"subagent":"coder","instruction":"从可运行性角度复核：编译/依赖/调用链是否完整，指出无法落地的问题","parallel":true}
@@ -303,6 +323,20 @@ public class SystemDataSeeder {
                                 String mode, String systemPrompt, String workflow) {
         Optional<ScenarioEntity> existing = scenarioRepo.findByName(name);
         if (existing.isPresent()) {
+            ScenarioEntity e = existing.get();
+            if (!Boolean.TRUE.equals(e.getBuiltin())) {
+                // 用户已把它转为自定义场景，属于用户资产，不覆盖
+                return;
+            }
+            // 只回写「平台定义」的字段；active 是用户的启用选择，保持不动
+            e.setDisplayName(displayName);
+            e.setIcon(icon);
+            e.setDescription(description);
+            e.setMode(mode);
+            e.setSystemPrompt(systemPrompt);
+            e.setWorkflow(workflow);
+            scenarioRepo.save(e);
+            log.info("内置场景已回写为最新定义: {} ({})", displayName, mode);
             return;
         }
         scenarioRepo.save(ScenarioEntity.builder()
