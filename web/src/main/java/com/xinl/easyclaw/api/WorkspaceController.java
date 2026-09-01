@@ -18,29 +18,41 @@ import java.util.*;
 @RequestMapping("/api/workspaces")
 public class WorkspaceController {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(WorkspaceController.class);
+
+    /** 内置「通用编程」场景标识（见 SystemDataSeeder），新建工作区的默认场景 */
+    private static final String DEFAULT_SCENARIO_NAME = "general-coding";
+
     private final WorkspaceManager workspaceManager;
     private final SessionHistoryService sessionHistoryService;
     private final AgentService agentService;
     private final WorkspaceSandbox sandbox;
     /** PATH 刷新态由 Agent 装配器持有（Agent 重建时需重新注入 env） */
     private final WorkspaceAgentBuilder agentBuilder;
+    private final com.xinl.easyclaw.scenario.service.ScenarioService scenarioService;
 
     public WorkspaceController(WorkspaceManager workspaceManager,
                                SessionHistoryService sessionHistoryService,
                                AgentService agentService,
                                WorkspaceSandbox sandbox,
-                               WorkspaceAgentBuilder agentBuilder) {
+                               WorkspaceAgentBuilder agentBuilder,
+                               com.xinl.easyclaw.scenario.service.ScenarioService scenarioService) {
         this.workspaceManager = workspaceManager;
         this.sessionHistoryService = sessionHistoryService;
         this.agentService = agentService;
         this.sandbox = sandbox;
         this.agentBuilder = agentBuilder;
+        this.scenarioService = scenarioService;
     }
 
-    public record CreateWorkspaceRequest(String name, String description, String path) {
+    /**
+     * @param scenarioName 场景标识名；前端为必填项，缺省时回退内置「通用编程」，
+     *                     保证任何工作区创建后都处于明确的场景约束下
+     */
+    public record CreateWorkspaceRequest(String name, String description, String path, String scenarioName) {
     }
 
-    public record UpdateWorkspaceRequest(String name, String description) {
+    public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
     }
 
     public record CreateSessionRequest(String title) {
@@ -86,14 +98,43 @@ public class WorkspaceController {
 
     @PostMapping
     public WorkspaceContext create(@RequestBody CreateWorkspaceRequest req) {
-        return workspaceManager.createWorkspace(
+        WorkspaceContext ctx = workspaceManager.createWorkspace(
                 com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID,
                 req.name(), req.description(), req.path());
+        bindScenario(ctx.getWorkspaceId(), req.scenarioName());
+        return ctx;
     }
 
     @PutMapping("/{id}")
     public WorkspaceSummary update(@PathVariable String id, @RequestBody UpdateWorkspaceRequest req) {
-        return workspaceManager.updateWorkspace(id, req.name(), req.description());
+        WorkspaceSummary summary = workspaceManager.updateWorkspace(id, req.name(), req.description());
+        // 编辑时未传场景 = 该表单没带这个字段（老客户端），保持原绑定不动
+        if (req.scenarioName() != null && !req.scenarioName().isBlank()) {
+            bindScenario(id, req.scenarioName());
+        }
+        return summary;
+    }
+
+    /**
+     * 绑定工作区场景。场景是「能做什么、怎么做」的约束来源，缺省一律回退
+     * 内置「通用编程」，避免出现无场景的裸工作区。
+     * <p>
+     * 绑定失败不影响工作区本身 —— 工作区已创建成功，此时抛错会让前端以为
+     * 整体失败并重试，反而产生重复工作区。
+     */
+    private void bindScenario(String workspaceId, String scenarioName) {
+        String target = (scenarioName == null || scenarioName.isBlank())
+                ? DEFAULT_SCENARIO_NAME : scenarioName.trim();
+        try {
+            if (scenarioService.activateByName(workspaceId, target).isEmpty()
+                    && !DEFAULT_SCENARIO_NAME.equals(target)) {
+                log.warn("场景[{}] 不存在或已停用，回退默认场景: workspace={}", target, workspaceId);
+                scenarioService.activateByName(workspaceId, DEFAULT_SCENARIO_NAME);
+            }
+        } catch (Exception e) {
+            log.warn("绑定场景失败（工作区已创建，可稍后手动切换）: workspace={}, scenario={}, {}",
+                    workspaceId, target, e.getMessage());
+        }
     }
 
     @DeleteMapping("/{id}")

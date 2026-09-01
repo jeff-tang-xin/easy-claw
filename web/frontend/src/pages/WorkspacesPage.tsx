@@ -14,6 +14,10 @@ interface WorkspaceSummary {
 
 interface PermRule { id: number; toolName: string; createdAt: string; }
 interface ToolDef { name: string; displayName: string; requiresConfirm: boolean; }
+interface ScenarioOption { id: number; name: string; displayName: string; icon?: string; active: boolean; }
+
+/** 内置「通用编程」场景标识，与后端 SystemDataSeeder / WorkspaceController 保持一致 */
+const DEFAULT_SCENARIO = 'general-coding';
 
 export default function WorkspacesPage() {
   const [items, setItems] = useState<WorkspaceSummary[]>([]);
@@ -23,6 +27,8 @@ export default function WorkspacesPage() {
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [description, setDescription] = useState('');
+  const [scenarioName, setScenarioName] = useState(DEFAULT_SCENARIO);
+  const [scenarios, setScenarios] = useState<ScenarioOption[]>([]);
   const navigate = useNavigate();
 
   // 白名单管理弹窗状态
@@ -34,6 +40,7 @@ export default function WorkspacesPage() {
   const [editing, setEditing] = useState<WorkspaceSummary | null>(null);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
+  const [editScenario, setEditScenario] = useState(DEFAULT_SCENARIO);
   const [saving, setSaving] = useState(false);
 
   // 删除确认弹窗状态
@@ -53,14 +60,19 @@ export default function WorkspacesPage() {
 
   useEffect(() => {
     load();
+    // 场景列表只在挂载时拉一次：新建/编辑弹窗都要用，且变动频率极低
+    getJson<ScenarioOption[]>('/api/scenarios')
+      .then((list) => setScenarios(list.filter((s) => s.active)))
+      .catch(() => setScenarios([]));
   }, []);
 
   const create = async () => {
     try {
-      await postJson('/api/workspaces', { name, description, path });
+      await postJson('/api/workspaces', { name, description, path, scenarioName });
       setName('');
       setPath('');
       setDescription('');
+      setScenarioName(DEFAULT_SCENARIO);
       setShowCreate(false);
       await load();
     } catch (e) {
@@ -72,6 +84,11 @@ export default function WorkspacesPage() {
     setEditing(ws);
     setEditName(ws.name);
     setEditDesc(ws.description || '');
+    // 回显当前绑定：查不到（未绑定/接口异常）时落到默认场景，不阻塞编辑
+    setEditScenario(DEFAULT_SCENARIO);
+    getJson<ScenarioOption | null>(`/api/scenarios/active/${ws.workspaceId}`)
+      .then((s) => { if (s && s.name) setEditScenario(s.name); })
+      .catch(() => undefined);
   };
 
   const saveEdit = async () => {
@@ -81,6 +98,7 @@ export default function WorkspacesPage() {
       await putJson(`/api/workspaces/${editing.workspaceId}`, {
         name: editName.trim(),
         description: editDesc,
+        scenarioName: editScenario,
       });
       setEditing(null);
       await load();
@@ -182,6 +200,18 @@ export default function WorkspacesPage() {
             </div>
           </div>
           <div className="field">
+            <label>场景（决定 AI 在此工作区能做什么、怎么做）</label>
+            <select value={scenarioName} onChange={(e) => setScenarioName(e.target.value)}>
+              {scenarios.length === 0 && <option value={DEFAULT_SCENARIO}>💻 通用编程</option>}
+              {scenarios.map((s) => (
+                <option key={s.id} value={s.name}>
+                  {s.icon ? `${s.icon} ` : ''}{s.displayName}
+                </option>
+              ))}
+            </select>
+            <div className="hint">创建后可随时在此页编辑切换</div>
+          </div>
+          <div className="field">
             <label>描述（可选）</label>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
           </div>
@@ -246,6 +276,18 @@ export default function WorkspacesPage() {
           <div className="field">
             <label>项目目录（只读）</label>
             <input value={editing.path} disabled readOnly />
+          </div>
+          <div className="field">
+            <label>场景（决定 AI 在此工作区能做什么、怎么做）</label>
+            <select value={editScenario} onChange={(e) => setEditScenario(e.target.value)}>
+              {scenarios.length === 0 && <option value={DEFAULT_SCENARIO}>💻 通用编程</option>}
+              {scenarios.map((s) => (
+                <option key={s.id} value={s.name}>
+                  {s.icon ? `${s.icon} ` : ''}{s.displayName}
+                </option>
+              ))}
+            </select>
+            <div className="hint">切换后立即重建该工作区的 AI，正在进行的对话建议先结束</div>
           </div>
           <div className="field">
             <label>描述（可选）</label>

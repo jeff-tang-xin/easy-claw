@@ -146,6 +146,25 @@ public class ScenarioService {
     }
 
     /**
+     * 按场景标识名激活（供「创建工作区时绑定默认场景」等场景使用）。
+     * <p>
+     * 与 {@link #activate(String, Long)} 的区别：调用方只知道稳定的业务标识
+     * （如内置的 {@code general-coding}），不依赖自增主键 —— 主键在不同环境
+     * 的种子顺序下并不稳定。
+     *
+     * @return 实际激活的场景；场景不存在或已停用时返回 {@link Optional#empty()}
+     */
+    @Transactional
+    public Optional<ScenarioEntity> activateByName(String workspaceId, String scenarioName) {
+        if (scenarioName == null || scenarioName.isBlank()) {
+            return Optional.empty();
+        }
+        return scenarioRepo.findByName(scenarioName.trim())
+                .filter(s -> Boolean.TRUE.equals(s.getActive()))
+                .map(s -> activate(workspaceId, s.getId()));
+    }
+
+    /**
      * 停用工作区场景（回到默认主智能体），立即重建 Agent
      */
     @Transactional
