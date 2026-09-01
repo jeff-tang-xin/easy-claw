@@ -1256,6 +1256,20 @@ public class AgentService {
                              Consumer<StreamEvent> onEvent,
                              Consumer<Throwable> onError,
                              Runnable onFinish) {
+        startStream(agent, context, msg, sessionId, mainTurn, isResumeStream, false,
+                onEvent, onError, onFinish);
+    }
+
+    /**
+     * @param forceFinish 本流必须收尾：绕过 {@link #finishTurn} 的 {@code isResuming} 抑制闸门。
+     *                    仅由 NO_REPLY 续问流传 true —— 父流已放弃发 end（把责任交给续问流），
+     *                    若续问流又被闸门静默吞掉，则两边都不发 end，前端永久停留「正在输出」。
+     */
+    private void startStream(HarnessAgent agent, RuntimeContext context, Msg msg, String sessionId,
+                             boolean mainTurn, boolean isResumeStream, boolean forceFinish,
+                             Consumer<StreamEvent> onEvent,
+                             Consumer<Throwable> onError,
+                             Runnable onFinish) {
         debugLogContext(agent, sessionId);
         final boolean[] ended = {false};
         final boolean[] retried = {false};
@@ -1304,16 +1318,17 @@ public class AgentService {
                         if (mainTurn) {
                             emitOrchestrationAudit(sessionId, trace, eventSink);
                         }
-                        // NO_REPLY 兜底：主回合调用了工具但无任何文本输出（模型输出 NO_REPLY 被
-                        // MemoryFlush 压缩询问吞掉等场景）→ 标记待续问，由 doFinally 统一发起
-                        if (mainTurn && trace.toolCalled && !trace.hasText && !retried[0]) {
+                        // NO_REPLY 兜底：主回合调用了工具但**完全没有产出**（正文与思考皆空，
+                        // 例如模型输出 NO_REPLY 被 MemoryFlush 压缩询问吞掉）→ 标记待续问。
+                        // 判据用 hasOutput 而非 hasText：thinking-only 回合 UI 已有内容，不算无回复。
+                        if (mainTurn && trace.toolCalled && !trace.hasOutput && !retried[0]) {
                             retried[0] = true;
                             needFollowUp[0] = true;
                             log.info("主回合调用了工具但无文本回复（NO_REPLY?），待流终止后自动续问总结: session={}", sessionId);
                             // 本回合不收尾：end 由续问流负责发送
                             return;
                         }
-                        finishTurn(sessionId, isResumeStream, onFinish);
+                        finishTurn(sessionId, isResumeStream, forceFinish, onFinish);
                     }
                 })
                 .doOnError(err -> {
@@ -1376,8 +1391,9 @@ public class AgentService {
                                         + "不要输出 NO_REPLY，不要重复工具调用，直接总结。")
                                 .build();
                         log.info("发起 NO_REPLY 续问流: sessionId={}", sessionId);
-                        // 续问流继承 isResumeStream，保证 end 抑制语义与父流一致
-                        startStream(agent, context, followUp, sessionId, false, isResumeStream,
+                        // 续问流继承 isResumeStream，保证 end 抑制语义与父流一致；
+                        // forceFinish=true：父流已放弃收尾，续问流必须发出 end（见方法注释）
+                        startStream(agent, context, followUp, sessionId, false, isResumeStream, true,
                                 onEvent, onError, onFinish);
                         return;
                     }
@@ -1387,7 +1403,7 @@ public class AgentService {
                         } catch (Exception ignored) {
                             // 状态读取失败不影响复位
                         }
-                        finishTurn(sessionId, isResumeStream, onFinish);
+                        finishTurn(sessionId, isResumeStream, forceFinish, onFinish);
                     }
                 })
                 // 向下游 transport 传递 sessionId：RetryableHttpTransport 据此判断是否放弃重试
@@ -1398,19 +1414,33 @@ public class AgentService {
     }
 
     /**
-     * 流终止时为在途工具（TOOL_CALL_START 后未收到 TOOL_RESULT_END）补发收尾事件，
-     * 避免 UI 工具卡片永久停留在"执行中"。幂等：关闭后 toolInFlight 置 false，重复调用无副作用。
+     * 流终止时为所有在途工具（TOOL_CALL_START 后未收到 TOOL_RESULT_END）补发收尾事件，
+     * 避免 UI 工具卡片永久停留在"执行中"。
+     * <p>
+     * 并发调用下可能同时有多个在途条目，必须逐个收尾：早期实现只收尾「最后一次」调用，
+     * 其余卡片仍会永久转圈。幂等：收尾后清空集合，重复调用无副作用。
      */
     private void closeInFlightTool(ToolTrace trace, Consumer<StreamEvent> sink, String note) {
-        if (trace == null || !trace.toolInFlight || trace.toolName == null || trace.toolName.isEmpty()) {
+        if (trace == null || trace.calls.isEmpty()) {
             return;
         }
-        trace.toolInFlight = false;
-        try {
-            sink.accept(StreamEvent.toolResult("(" + note + ")"));
-            sink.accept(StreamEvent.toolEnd(trace.toolName));
-        } catch (Exception ignored) {
-            // 收尾失败不影响主流程
+        // 先取快照再清空：收尾过程中若 sink 回调再次触发本方法，不会重复发送
+        List<Map.Entry<String, ToolCallSlot>> pending = new ArrayList<>(trace.calls.entrySet());
+        trace.calls.clear();
+        for (Map.Entry<String, ToolCallSlot> entry : pending) {
+            ToolCallSlot st = entry.getValue();
+            if (st == null || !st.inFlight || st.toolName == null || st.toolName.isEmpty()) {
+                continue;
+            }
+            st.inFlight = false;
+            // 兜底 key 是内部占位符，不能当作真实 toolCallId 下发
+            String callId = "__no_id__".equals(entry.getKey()) ? null : entry.getKey();
+            try {
+                sink.accept(StreamEvent.toolResult("(" + note + ")", callId));
+                sink.accept(StreamEvent.toolEnd(st.toolName, callId));
+            } catch (Exception ignored) {
+                // 收尾失败不影响主流程
+            }
         }
     }
 
@@ -1423,8 +1453,16 @@ public class AgentService {
      * </ul>
      */
     private void finishTurn(String sessionId, boolean isResumeStream, Runnable onFinish) {
+        finishTurn(sessionId, isResumeStream, false, onFinish);
+    }
+
+    /**
+     * @param forceFinish 绕过 resuming 抑制闸门，保证 end 一定送达（见 NO_REPLY 续问流）。
+     */
+    private void finishTurn(String sessionId, boolean isResumeStream, boolean forceFinish,
+                            Runnable onFinish) {
         boolean isResuming = sessions.isResuming(sessionId);
-        if (!isResumeStream && isResuming) {
+        if (!forceFinish && !isResumeStream && isResuming) {
             log.debug("抑制旧流(end)：确认恢复流将统一发送, sessionId={}", sessionId);
             return;
         }
@@ -1434,20 +1472,76 @@ public class AgentService {
         }
     }
 
-    /** 工具调用追溯状态（名称 / 参数 / 结果，按会话隔离） */
-    private static final class ToolTrace {
-        String toolName = "";
-        boolean toolCalled = false;
-        boolean hasText = false;
-        /** 在途标记：TOOL_CALL_START 后、TOOL_RESULT_END 前为 true，用于流终止时补发收尾 */
-        boolean toolInFlight = false;
+    /** 单次工具调用的追溯状态（名称 / 参数 / 结果 / 在途标记） */
+    private static final class ToolCallSlot {
+        final String toolName;
         final StringBuilder args = new StringBuilder();
         final StringBuilder result = new StringBuilder();
+        /** 在途标记：TOOL_CALL_START 后、TOOL_RESULT_END 前为 true，用于流终止时补发收尾 */
+        boolean inFlight = true;
+
+        ToolCallSlot(String toolName) {
+            this.toolName = toolName == null ? "" : toolName;
+        }
+    }
+
+    /**
+     * 工具调用追溯状态（按会话隔离）。
+     * <p>
+     * 早期实现是「单槽」的（只保存最后一次调用的名称/入参/结果）。并发工具调用下，
+     * 后发起的 TOOL_CALL_START 会直接覆盖前一次的槽位，于是先发起的那次调用永远等不到
+     * 属于它的 tool_end —— UI 卡片永久停留在「执行中」。这里改为按 toolCallId 索引的多槽，
+     * 每次调用各自独立累积；TOOL_RESULT_END 后移除条目，因此残留条目恰好就是「在途」集合。
+     */
+    private static final class ToolTrace {
+        boolean toolCalled = false;
+        boolean hasText = false;
+        /**
+         * 本回合是否有任何面向用户的产出（正文 或 思考）。
+         * <p>
+         * 与 {@link #hasText} 分开：某些模型（或被冗长工具结果带偏时）会把整段正文写进
+         * thinking 通道，正文通道全空。此时 UI 其实已有内容展示，绝不能判为「无回复」。
+         * NO_REPLY 兜底分支是不发 end 的 —— 误判会导致前端永久停留「正在输出」。
+         */
+        boolean hasOutput = false;
+        /** toolCallId → 该次调用的状态；LinkedHashMap 保证补发收尾时按发起顺序 */
+        final Map<String, ToolCallSlot> calls = new LinkedHashMap<>();
         /**
          * 主智能体最终回复文本（仅用于编排审计比对，容量上限见 {@link #appendReply}）。
          * team 模式下需要从回复中提取 &lt;orchestration-audit&gt; 标记。
          */
         final StringBuilder reply = new StringBuilder();
+
+        /**
+         * 事件携带的 toolCallId 为空时的兜底 key。
+         * <p>
+         * 退化为「最后一次在途调用」，等价于旧的单槽行为：并发场景可能配错，
+         * 但不带 id 的事件源本来也无法区分，至少保证卡片能被关闭而不是永久转圈。
+         */
+        String resolveKey(String toolCallId) {
+            if (toolCallId != null && !toolCallId.isEmpty()) {
+                return toolCallId;
+            }
+            String fallback = null;
+            for (Map.Entry<String, ToolCallSlot> e : calls.entrySet()) {
+                if (e.getValue().inFlight) {
+                    fallback = e.getKey();
+                }
+            }
+            return fallback != null ? fallback : "__no_id__";
+        }
+
+        ToolCallSlot get(String toolCallId) {
+            return calls.get(resolveKey(toolCallId));
+        }
+
+        /**
+         * TOOL_CALL_START 专用 key：id 缺失时不能复用「最后一次在途」的槽位
+         * （那会把新调用写进旧卡片），固定落到单槽兜底位。
+         */
+        String resolveKeyForStart(String toolCallId) {
+            return (toolCallId != null && !toolCallId.isEmpty()) ? toolCallId : "__no_id__";
+        }
 
         /** 追加回复文本；超过上限后停止累积，避免长回复占用内存（审计标记在尾部，改用滑动保留尾部） */
         void appendReply(String delta) {
@@ -1633,12 +1727,15 @@ public class AgentService {
             case TEXT_BLOCK_DELTA -> {
                 if (event instanceof TextBlockDeltaEvent e) {
                     trace.hasText = true;
+                    trace.hasOutput = true;
                     trace.appendReply(e.getDelta());
                     batcher.onText(e.getDelta());
                 }
             }
             case THINKING_BLOCK_DELTA -> {
                 if (event instanceof ThinkingBlockDeltaEvent e) {
+                    // 思考内容同样算「本回合有产出」，理由见 ToolTrace#hasOutput
+                    trace.hasOutput = true;
                     batcher.onReasoning(e.getDelta());
                 }
             }
@@ -1669,10 +1766,9 @@ public class AgentService {
             case TOOL_CALL_START -> {
                 if (event instanceof ToolCallStartEvent e) {
                     String name = e.getToolCallName();
+                    String callId = e.getToolCallId();
                     trace.toolCalled = true;
-                    trace.toolName = name;
-                    trace.toolInFlight = true;
-                    trace.args.setLength(0);
+                    trace.calls.put(trace.resolveKeyForStart(callId), new ToolCallSlot(name));
                     if (name != null && name.toLowerCase().contains("subagent")) {
                         String subName = extractSubagentName(name);
                         onEvent.accept(StreamEvent.subagent(subName));
@@ -1693,57 +1789,75 @@ public class AgentService {
                                             + " 次），已自动停止。请在后续指令中明确要求不要重复调度同一子 Agent。\"}"));
                         }
                     } else {
-                        onEvent.accept(StreamEvent.tool(name));
+                        onEvent.accept(StreamEvent.tool(name, callId));
                     }
                 }
             }
             case TOOL_CALL_DELTA -> {
                 if (event instanceof ToolCallDeltaEvent e) {
-                    trace.args.append(e.getDelta());
+                    ToolCallSlot st = trace.get(e.getToolCallId());
+                    if (st != null) {
+                        st.args.append(e.getDelta());
+                    }
                 }
             }
             case TOOL_CALL_END -> {
-                String args = trace.args.toString().trim();
-                onEvent.accept(StreamEvent.toolArgs(args.isEmpty() ? "(无参数)" : args));
+                String callId = event instanceof ToolCallEndEvent e ? e.getToolCallId() : null;
+                ToolCallSlot st = trace.get(callId);
+                String args = st == null ? "" : st.args.toString().trim();
+                onEvent.accept(StreamEvent.toolArgs(args.isEmpty() ? "(无参数)" : args, callId));
             }
             case TOOL_RESULT_START -> {
-                trace.result.setLength(0);
+                if (event instanceof ToolResultStartEvent e) {
+                    ToolCallSlot st = trace.get(e.getToolCallId());
+                    if (st != null) {
+                        st.result.setLength(0);
+                    }
+                }
             }
             case TOOL_RESULT_TEXT_DELTA -> {
                 if (event instanceof ToolResultTextDeltaEvent e) {
-                    trace.result.append(e.getDelta());
+                    ToolCallSlot st = trace.get(e.getToolCallId());
+                    if (st != null) {
+                        st.result.append(e.getDelta());
+                    }
                 }
             }
             case TOOL_RESULT_END -> {
-                trace.toolInFlight = false;
-                String result = trace.result.toString().trim();
+                String callId = event instanceof ToolResultEndEvent re ? re.getToolCallId() : null;
+                String key = trace.resolveKey(callId);
+                ToolCallSlot st = trace.calls.get(key);
+                // 该次调用已收尾 → 从在途集合移除（残留条目即「在途」，供流终止时补发）
+                trace.calls.remove(key);
+                String toolName = st != null ? st.toolName : "";
+                String result = st == null ? "" : st.result.toString().trim();
                 String state = event instanceof ToolResultEndEvent e
                         ? inferToolResultState(
                                 e.getState() != null ? e.getState().name() : null,
                                 result)
                         : inferToolResultState(null, result);
                 onEvent.accept(StreamEvent.toolResult("(" + state + ") "
-                        + (result.isEmpty() ? "(空结果)" : result)));
+                        + (result.isEmpty() ? "(空结果)" : result), callId));
                 // 工具连续失败护栏：同一工具连续失败达到配置阈值时注入停止提示
                 if ("ERROR".equalsIgnoreCase(state)) {
                     int maxFails = agentScopeProperties.getAgent().getMaxConsecutiveToolFailures();
-                    int fails = sessions.recordToolFailure(sessionId, trace.toolName);
+                    int fails = sessions.recordToolFailure(sessionId, toolName);
                     if (maxFails > 0 && fails >= maxFails) {
                         log.warn("工具连续失败护栏触发: session={}, tool={}, fails={}",
-                                sessionId, trace.toolName, fails);
+                                sessionId, toolName, fails);
                         onEvent.accept(StreamEvent.context(
-                                "{\"type\":\"tool_fail_guard\",\"tool\":\"" + trace.toolName
+                                "{\"type\":\"tool_fail_guard\",\"tool\":\"" + toolName
                                 + "\",\"fails\":" + fails
-                                + ",\"message\":\"工具[" + trace.toolName + "] 连续失败 " + fails
+                                + ",\"message\":\"工具[" + toolName + "] 连续失败 " + fails
                                 + " 次，请停止重试，检查参数/路径/权限后向用户说明并询问。\"}"));
                     }
                 } else {
                     // 成功则重置该工具的失败计数
-                    sessions.resetToolFailure(sessionId, trace.toolName);
+                    sessions.resetToolFailure(sessionId, toolName);
                     // 写类工具成功 → 通知前端刷新文件树/已打开预览（实时刷新，免手动点「刷新」）
-                    emitFileChangedIfWriteTool(trace.toolName, trace.args.toString(), onEvent);
+                    emitFileChangedIfWriteTool(toolName, st == null ? "" : st.args.toString(), onEvent);
                 }
-                onEvent.accept(StreamEvent.toolEnd(trace.toolName));
+                onEvent.accept(StreamEvent.toolEnd(toolName, callId));
             }
             case REQUIRE_USER_CONFIRM -> {
                 // 工具执行前需用户确认：只有未被预授权规则覆盖的工具才会走到这里（弹窗）。

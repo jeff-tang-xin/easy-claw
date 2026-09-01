@@ -36,6 +36,13 @@ export interface Segment {
   content?: string;
   /** 工具名 或 子 Agent 名 */
   name?: string;
+  /**
+   * 工具调用 id（type==='tool'）。来自后端 StreamEvent.toolCallId，
+   * 用于把 tool_args / tool_result / tool_end 精确配对到发起它的那张卡片：
+   * 并发工具调用下按「最后一个 tool 段」或按工具名匹配都会错关卡片。
+   * 历史转录回放（无 id）时为 undefined，此时退化为就近匹配。
+   */
+  toolCallId?: string;
   /** 工具调用参数（JSON 字符串） */
   args?: string;
   /** 工具执行结果（含状态前缀，如 "(SUCCESS) ..."） */

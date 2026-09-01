@@ -3,6 +3,8 @@
 export interface StreamEvent {
   type: string;
   content: string;
+  /** 工具类事件（tool / tool_args / tool_result / tool_end）携带的调用 id，用于精确配对 */
+  toolCallId?: string;
 }
 
 async function safeJson<T>(res: Response): Promise<T> {

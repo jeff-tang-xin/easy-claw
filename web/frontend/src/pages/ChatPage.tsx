@@ -223,16 +223,38 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
   const next = [...prev];
   const lastIdx = next.length - 1;
   const last = next[lastIdx];
-  // 取最后一条 tool 段（反向查找，匹配最新一次工具调用）
-  const patchLastTool = (fn: (s: Segment) => Segment) => {
+  // 定位工具段并原地更新。
+  // 优先按 toolCallId 精确匹配发起该次调用的卡片；并发工具调用下「最后一个 tool 段」
+  // 会被后发起的调用抢占，导致先发起的卡片永远收不到自己的 result/tool_end。
+  // 无 id（历史转录回放 / 旧后端）时退化为原有的就近匹配。
+  const patchTool = (
+    fn: (s: Segment) => Segment,
+    opts?: { callId?: string; preferRunning?: boolean },
+  ) => {
     if (!last || last.role !== 'ai') return;
     const segs = [...last.segments];
-    for (let j = segs.length - 1; j >= 0; j--) {
-      if (segs[j].type === 'tool') {
-        segs[j] = fn(segs[j]);
-        break;
+    const callId = opts?.callId;
+    let idx = -1;
+    if (callId) {
+      for (let j = segs.length - 1; j >= 0; j--) {
+        if (segs[j].type === 'tool' && segs[j].toolCallId === callId) { idx = j; break; }
       }
     }
+    if (idx < 0) {
+      // 兜底：优先命中仍在执行的工具段，再退到最后一个 tool 段
+      if (opts?.preferRunning) {
+        for (let j = segs.length - 1; j >= 0; j--) {
+          if (segs[j].type === 'tool' && segs[j].running) { idx = j; break; }
+        }
+      }
+      if (idx < 0) {
+        for (let j = segs.length - 1; j >= 0; j--) {
+          if (segs[j].type === 'tool') { idx = j; break; }
+        }
+      }
+    }
+    if (idx < 0) return;
+    segs[idx] = fn(segs[idx]);
     next[lastIdx] = { ...last, segments: segs };
   };
   switch (evt.type) {
@@ -267,8 +289,15 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       break;
     }
     case 'tool': {
-      // 工具调用开始：新建一个结构化工具段
-      const seg: Segment = { type: 'tool', name: evt.content, args: '', result: '', running: true };
+      // 工具调用开始：新建一个结构化工具段（记录调用 id 以便后续事件精确配对）
+      const seg: Segment = {
+        type: 'tool',
+        name: evt.content,
+        toolCallId: evt.toolCallId,
+        args: '',
+        result: '',
+        running: true,
+      };
       if (last && last.role === 'ai') {
         next[lastIdx] = { ...last, segments: [...last.segments, seg] };
       } else {
@@ -277,27 +306,41 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       break;
     }
     case 'tool_args': {
-      patchLastTool((s) => ({ ...s, args: (s.args || '') + evt.content }));
+      patchTool((s) => ({ ...s, args: (s.args || '') + evt.content }), {
+        callId: evt.toolCallId,
+        preferRunning: true,
+      });
       break;
     }
     case 'tool_result': {
-      patchLastTool((s) => ({ ...s, result: (s.result || '') + evt.content }));
+      patchTool((s) => ({ ...s, result: (s.result || '') + evt.content }), {
+        callId: evt.toolCallId,
+        preferRunning: true,
+      });
       break;
     }
     case 'tool_end': {
-      // 优先按工具名匹配仍在执行的那次调用（同名/多工具场景不能错关别的卡片），
-      // 找不到时兜底关最后一个 tool 段
+      // 优先按 toolCallId 精确关闭对应卡片；无 id 时按工具名匹配仍在执行的那次调用，
+      // 再兜底关最后一个仍在执行的 tool 段
       if (last && last.role === 'ai') {
         const segs = [...last.segments];
         const name = evt.content;
+        const callId = evt.toolCallId;
         let idx = -1;
-        for (let j = segs.length - 1; j >= 0; j--) {
-          const s = segs[j];
-          if (s.type === 'tool' && s.running && (!name || s.name === name)) { idx = j; break; }
+        if (callId) {
+          for (let j = segs.length - 1; j >= 0; j--) {
+            if (segs[j].type === 'tool' && segs[j].toolCallId === callId) { idx = j; break; }
+          }
         }
         if (idx < 0) {
           for (let j = segs.length - 1; j >= 0; j--) {
-            if (segs[j].type === 'tool') { idx = j; break; }
+            const s = segs[j];
+            if (s.type === 'tool' && s.running && (!name || s.name === name)) { idx = j; break; }
+          }
+        }
+        if (idx < 0) {
+          for (let j = segs.length - 1; j >= 0; j--) {
+            if (segs[j].type === 'tool' && segs[j].running) { idx = j; break; }
           }
         }
         if (idx >= 0) {

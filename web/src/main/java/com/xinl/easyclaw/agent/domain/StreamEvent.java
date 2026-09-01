@@ -1,5 +1,7 @@
 package com.xinl.easyclaw.agent.domain;
 
+import com.fasterxml.jackson.annotation.JsonInclude;
+
 /**
  * 流式对话事件（从 AgentScope 事件流解析后推送给 UI）
  * <p>
@@ -15,11 +17,24 @@ package com.xinl.easyclaw.agent.domain;
  *   <li>stopped - 用户主动停止（区别于 end：不触发前端队列自动发送）</li>
  *   <li>error - 执行出错（content 为错误信息）</li>
  * </ul>
+ *
+ * <p>{@code toolCallId} 仅在工具类事件（tool / tool_args / tool_result / tool_end）上非空，
+ * 取自框架事件的 {@code getToolCallId()}，用于前端把「同一次工具调用」的开始、入参、结果、
+ * 结束四个事件精确配对。并发工具调用（多个 tool_call 交错返回）下，按「最后一个工具段」
+ * 或按工具名匹配都会错关卡片：先返回的结果会抢走后发起卡片的槽位，导致先发起的那张卡
+ * 永久停留在「执行中」。为 null 时前端退化为旧的就近匹配策略（兼容历史转录回放）。
  */
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public record StreamEvent(
         String type,
-        String content
+        String content,
+        String toolCallId
 ) {
+
+    /** 非工具事件：无 toolCallId */
+    public StreamEvent(String type, String content) {
+        this(type, content, null);
+    }
 
     public static StreamEvent reasoning(String content) {
         return new StreamEvent("reasoning", content);
@@ -33,14 +48,29 @@ public record StreamEvent(
         return new StreamEvent("tool", toolName);
     }
 
+    /** 工具调用开始（带调用 id，供前端精确配对并发调用） */
+    public static StreamEvent tool(String toolName, String toolCallId) {
+        return new StreamEvent("tool", toolName, toolCallId);
+    }
+
     /** 工具调用参数（追溯） */
     public static StreamEvent toolArgs(String args) {
         return new StreamEvent("tool_args", args);
     }
 
+    /** 工具调用参数（追溯，带调用 id） */
+    public static StreamEvent toolArgs(String args, String toolCallId) {
+        return new StreamEvent("tool_args", args, toolCallId);
+    }
+
     /** 工具调用结果（追溯，含状态） */
     public static StreamEvent toolResult(String content) {
         return new StreamEvent("tool_result", content);
+    }
+
+    /** 工具调用结果（追溯，含状态，带调用 id） */
+    public static StreamEvent toolResult(String content, String toolCallId) {
+        return new StreamEvent("tool_result", content, toolCallId);
     }
 
     /** 工具执行需用户确认（content 为 JSON：replyId + 待确认工具列表） */
@@ -61,6 +91,11 @@ public record StreamEvent(
     /** 工具执行结束（配套 tool 事件；content 为工具名） */
     public static StreamEvent toolEnd(String toolName) {
         return new StreamEvent("tool_end", toolName);
+    }
+
+    /** 工具执行结束（配套 tool 事件，带调用 id：前端据此精确关闭对应卡片） */
+    public static StreamEvent toolEnd(String toolName, String toolCallId) {
+        return new StreamEvent("tool_end", toolName, toolCallId);
     }
 
     /**
