@@ -30,24 +30,53 @@ public class DataInitializer {
     @Bean
     public CommandLineRunner initDefaultRoles(RoleManagementService roleService) {
         return args -> {
-            // 确保"主智能体"角色存在（团队模式默认角色，模型配置决定主智能体模型）
+            // 确保主角色 AI-CLAW 存在。它是所有未绑定角色的场景的默认人格，
+            // 也是多智能体模式下协调者的默认角色，不可删除。
             if (roleService.findByName("main").isEmpty()) {
                 roleService.create(AgentRoleEntity.builder()
                         .name("main")
-                        .displayName("主智能体")
-                        .role("AI 团队的主导航者与协调者")
-                        .goal("拆解任务、组建子智能体团队、并行调度成员、汇总结果后给出最终答复")
-                        .backstory("你是整个 AI 团队的主智能体，负责整体规划与跨子任务的协调，模型留空表示使用全局默认模型，可在角色管理中单独配置。")
+                        .displayName("AI-CLAW")
+                        .role("AI-CLAW —— 全栈工程智能体，兼具实现者与团队协调者双重身份")
+                        .goal("以最小必要改动达成用户的真实意图：先把问题理解透，再动手；"
+                                + "交付前自行验证，交付时如实说明做了什么、怎么验证的、还剩什么风险")
+                        .backstory("""
+                                你在真实工程环境中工作，面对的是有历史包袱的代码库，而不是白纸。你的行事准则：
+
+                                **理解先于动作**——改任何代码前先读相关文件，弄清调用链与副作用。宁可多读两个文件，也不要基于猜测下手。
+
+                                **外科手术式修改**——只改必须改的地方。不顺手重构、不擅自调整风格、不引入用户没要求的依赖和抽象。改动越小，越容易验证和回滚。
+
+                                **事实与推测分开**——读过代码得出的是事实，没验证过的是推测。表述时必须区分，不把"应该是"讲成"就是"。不确定就说不确定。
+
+                                **自己闭环**——用户说"编译一下"意味着执行、看输出、修问题、报结果，而不是跑完命令就回头问下一步。只有在信息缺失、需要授权、需求真有歧义时才打断用户。
+
+                                **如实交付**——报告要包含未验证项和遗留风险。掩盖问题比暴露问题代价大得多。同一个手段连续失败两次就停下来换思路或求助，不做无意义重试。
+
+                                作为协调者时，你额外负责：拆解任务、挑选合适的成员、并行调度、汇总交叉验证结果，并对最终产出负责。
+                                """)
                         .temperature(0.4)
                         .model("")
                         .active(true)
                         .build());
-                log.info("已确保主智能体角色存在（name=main）");
+                log.info("已创建主角色 AI-CLAW（name=main）");
+            } else {
+                // 老库升级：main 角色已存在但仍是旧的"主智能体"文案时，一次性刷新为 AI-CLAW。
+                // 只在 displayName 完全等于旧默认值时才覆盖——用户若已自定义过，不动他的配置。
+                roleService.findByName("main").ifPresent(existing -> {
+                    if ("主智能体".equals(existing.getDisplayName())) {
+                        existing.setDisplayName("AI-CLAW");
+                        roleService.update(existing.getId(), existing);
+                        log.info("主角色已升级为 AI-CLAW（保留原有角色设定，仅更新展示名）");
+                    }
+                });
             }
 
-            if (roleService.findAll().isEmpty()) {
+            if (roleService.findAll().size() <= 1) {
                 log.info("初始化默认角色...");
 
+                // model 留空 = 跟随全局默认模型。不要硬编码具体模型名：
+                // 写死的模型（如 gpt-4）在用户实际配置的 provider 下往往解析失败并回退，
+                // 徒增一次告警日志且行为不可预期。
                 roleService.create(AgentRoleEntity.builder()
                         .name("code-expert")
                         .displayName("代码专家")
@@ -55,7 +84,7 @@ public class DataInitializer {
                         .goal("帮助用户编写高质量、可维护的代码")
                         .backstory("你拥有10年Java开发经验，精通Spring生态、设计模式、代码重构。你注重代码规范、性能优化和可维护性。")
                         .temperature(0.3)
-                        .model("gpt-4")
+                        .model("")
                         .active(true)
                         .build());
 
@@ -66,7 +95,7 @@ public class DataInitializer {
                         .goal("高效、安全地管理文件和目录")
                         .backstory("你熟悉各种文件操作，注重数据安全，严格遵守文件沙箱隔离规则。")
                         .temperature(0.2)
-                        .model("gpt-4")
+                        .model("")
                         .active(true)
                         .build());
 
@@ -77,7 +106,7 @@ public class DataInitializer {
                         .goal("提供准确、全面的信息查询和分析")
                         .backstory("你擅长信息检索、数据分析和知识综合，能够从多个角度分析问题。")
                         .temperature(0.7)
-                        .model("gpt-4")
+                        .model("")
                         .active(true)
                         .build());
 
@@ -88,7 +117,7 @@ public class DataInitializer {
                         .goal("帮助用户创作富有创意和感染力的内容")
                         .backstory("你是一位经验丰富的作家，擅长各种文体创作，注重语言的表达力和感染力。")
                         .temperature(0.9)
-                        .model("gpt-4")
+                        .model("")
                         .active(false)
                         .build());
 

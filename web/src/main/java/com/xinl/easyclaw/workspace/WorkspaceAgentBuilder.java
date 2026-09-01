@@ -5,10 +5,12 @@ import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
+import com.xinl.easyclaw.role.RolePromptComposer;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.scenario.McpToolExpander;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
+import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.tool.service.ToolPermissionPolicy;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
@@ -61,6 +63,9 @@ import java.util.concurrent.ConcurrentHashMap;
 public class WorkspaceAgentBuilder {
 
     private static final Logger log = LoggerFactory.getLogger(WorkspaceAgentBuilder.class);
+
+    /** 默认主角色名：场景未绑定角色时使用（AI-CLAW） */
+    private static final String DEFAULT_MAIN_ROLE = "main";
 
     private final AgentFactory agentFactory;
     private final SubagentLoader subagentLoader;
@@ -188,13 +193,18 @@ public class WorkspaceAgentBuilder {
         List<SubagentDeclaration> subagents = subagentLoader.loadMerged(
                 globalSubagentsDir, agentRoot.resolve("subagents"), binding);
 
-        String sysPrompt = composeSystemPrompt(workspaceId, subagents, sysPromptAugment, binding);
+        // 当前生效角色：场景绑定优先，否则主角色（AI-CLAW）。
+        // 一次解析，两处使用（system prompt 人格 / 主模型），避免二者取到不同角色
+        AgentRoleEntity activeRole = resolveActiveRole(workspaceId);
+
+        String sysPrompt = composeSystemPrompt(workspaceId, subagents, sysPromptAugment,
+                binding, activeRole);
 
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(workspaceId)
                 .description(name)
                 .sysPrompt(sysPrompt)
-                .model(resolveMainModel())
+                .model(resolveMainModel(activeRole))
                 .toolkit(agentFactory.createWorkspaceToolkit(
                         binding.hasMcpBinding() ? binding.mcpServices() : null))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
@@ -297,13 +307,24 @@ public class WorkspaceAgentBuilder {
     // ==================== 系统提示词 ====================
 
     /**
-     * 拼装系统提示词：默认人格 + 团队协作引导 + Skill/模式片段 + 场景编排。
+     * 拼装系统提示词：默认人格 + 角色人格 + 团队协作引导 + Skill/模式片段 + 场景编排。
      * <p>
      * 顺序有意义：越靠后的片段越具体，模型对靠后的指令更敏感。
+     * 角色人格排在基础提示词之后、场景之前——角色定义"你是谁"（相对稳定），
+     * 场景定义"当前在做什么"（更具体，应当能覆盖角色的默认倾向）。
      */
     private String composeSystemPrompt(String workspaceId, List<SubagentDeclaration> subagents,
-                                       String sysPromptAugment, ScenarioBinding binding) {
+                                       String sysPromptAugment, ScenarioBinding binding,
+                                       AgentRoleEntity activeRole) {
         String sysPrompt = agentFactory.defaultSystemPrompt();
+
+        // 角色人格：由场景绑定的角色决定，未绑定时取主角色（AI-CLAW）
+        String rolePrompt = RolePromptComposer.compose(activeRole);
+        if (rolePrompt != null) {
+            sysPrompt = sysPrompt + "\n\n" + rolePrompt;
+            log.info("角色人格已注入 system prompt: workspace={}, {} chars",
+                    workspaceId, rolePrompt.length());
+        }
 
         if (!subagents.isEmpty()) {
             sysPrompt = sysPrompt + teamModeGuide(subagents);
@@ -417,21 +438,51 @@ public class WorkspaceAgentBuilder {
     // ==================== 模型与权限 ====================
 
     /**
-     * 主智能体模型：优先使用"主智能体"角色（name=main）配置的模型，
-     * 未配置或无效时回退全局默认模型。
+     * 解析当前工作区生效的角色：场景绑定优先，否则回退主角色 {@code main}（AI-CLAW）。
+     * <p>
+     * 场景绑定的角色名若查无此人（角色被删除/改名），退回主角色而不是报错——
+     * 场景配置失效不该让整个工作区起不来。
      */
-    private Model resolveMainModel() {
+    private AgentRoleEntity resolveActiveRole(String workspaceId) {
         try {
-            AgentRoleEntity main = roleService.findByName("main").orElse(null);
-            log.info("resolveMainModel: main role found={}, model='{}'",
-                    main != null, main != null ? main.getModel() : "null");
-            if (main != null && main.getModel() != null && !main.getModel().isBlank()) {
-                Model m = agentFactory.resolveModel(main.getModel());
+            ScenarioEntity scenario = scenarioResolver.activeScenario(workspaceId);
+            if (scenario != null && scenario.getRoleName() != null
+                    && !scenario.getRoleName().isBlank()) {
+                String bound = scenario.getRoleName().trim();
+                AgentRoleEntity role = roleService.findByName(bound).orElse(null);
+                if (role != null) {
+                    log.info("场景[{}] 绑定角色 -> {}", scenario.getName(), bound);
+                    return role;
+                }
+                log.warn("场景[{}] 绑定的角色[{}] 不存在，回退主角色", scenario.getName(), bound);
+            }
+            return roleService.findByName(DEFAULT_MAIN_ROLE).orElse(null);
+        } catch (Exception e) {
+            log.warn("解析激活角色失败，回退无角色人格: {}", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * 主智能体模型：优先使用<b>当前生效角色</b>（场景绑定角色，否则 main）配置的模型，
+     * 未配置或无效时回退全局默认模型。
+     * <p>
+     * 入参而非自行查库，是为了和 {@code composeSystemPrompt} 用的角色保持同一个——
+     * 否则会出现"人格来自场景绑定角色、模型却来自 main"的错配。
+     */
+    private Model resolveMainModel(AgentRoleEntity role) {
+        try {
+            log.info("resolveMainModel: role={}, model='{}'",
+                    role != null ? role.getName() : "null",
+                    role != null ? role.getModel() : "null");
+            if (role != null && role.getModel() != null && !role.getModel().isBlank()) {
+                Model m = agentFactory.resolveRoleModel(
+                        role.getModel(), role.getBaseUrl(), role.getApiKey());
                 log.info("resolveMainModel: 使用角色配置的模型 -> {}", m.getModelName());
                 return m;
             }
         } catch (Exception e) {
-            log.warn("读取主智能体角色模型失败，用全局默认: {}", e.getMessage());
+            log.warn("读取角色模型失败，用全局默认: {}", e.getMessage());
         }
         Model fallback = ModelRegistry.resolve(agentFactory.getModelId());
         log.info("resolveMainModel: 回退全局默认 -> {}", fallback.getModelName());

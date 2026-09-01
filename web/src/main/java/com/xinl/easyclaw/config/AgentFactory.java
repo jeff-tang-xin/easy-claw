@@ -83,6 +83,14 @@ public class AgentFactory {
     }
 
     /**
+     * 按角色解析 Model：角色自带 baseUrl+apiKey 时用其独立端点，
+     * 否则按 modelId 走全局 provider 配置。
+     */
+    public io.agentscope.core.model.Model resolveRoleModel(String modelId, String baseUrl, String apiKey) {
+        return modelRegistryService.resolveWithCredentials(modelId, baseUrl, apiKey);
+    }
+
+    /**
      * 创建 Workspace 使用的完整 Toolkit：
      * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 用户定义的 HTTP 工具 + 已连接的 MCP 服务工具
      */

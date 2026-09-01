@@ -46,6 +46,26 @@ public class AgentRoleEntity {
     @Column(name = "model", length = 64)
     private String model;
 
+    /**
+     * 角色专属 API 基址（可选）。
+     * <p>留空 = 沿用全局 provider 配置（推荐）。仅当该角色要走一个未在全局
+     * providers 中登记的端点时才填写，填写后必须同时提供 {@link #apiKey}。
+     */
+    @Column(name = "base_url", length = 256)
+    private String baseUrl;
+
+    /**
+     * 角色专属 API Key（可选，与 {@link #baseUrl} 成对使用）。
+     * <p><b>安全说明</b>：本字段以明文存于本地 SQLite。Easy-Claw 是单机自用工具，
+     * 数据库文件位于用户自己的机器上，威胁模型与服务端多租户不同；但仍不建议
+     * 在共享机器上使用该字段——优先走全局 provider 配置。
+     * <p>对外返回时由 API 层做掩码，不回传明文。
+     */
+    @Column(name = "api_key", length = 256)
+    @com.fasterxml.jackson.annotation.JsonProperty(
+            access = com.fasterxml.jackson.annotation.JsonProperty.Access.WRITE_ONLY)
+    private String apiKey;
+
     @Column(name = "is_active")
     private Boolean active;
 
@@ -67,5 +87,16 @@ public class AgentRoleEntity {
     @PreUpdate
     protected void onUpdate() {
         updatedAt = Instant.now();
+    }
+
+    /**
+     * 是否已配置角色专属密钥（只读，供前端区分"未配置"与"已配置但不回传明文"）。
+     * apiKey 本身是 WRITE_ONLY，前端拿不到明文，只能靠这个标志渲染占位符。
+     */
+    @jakarta.persistence.Transient
+    @com.fasterxml.jackson.annotation.JsonProperty(
+            access = com.fasterxml.jackson.annotation.JsonProperty.Access.READ_ONLY)
+    public boolean isApiKeyConfigured() {
+        return apiKey != null && !apiKey.isBlank();
     }
 }

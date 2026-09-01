@@ -48,6 +48,12 @@ public class RoleManagementServiceImpl implements RoleManagementService {
                     existing.setBackstory(role.getBackstory());
                     existing.setTemperature(role.getTemperature());
                     existing.setModel(role.getModel());
+                    existing.setBaseUrl(role.getBaseUrl());
+                    // apiKey 留空 = 保持原值不变（前端回显的是掩码，不能把掩码写回库）；
+                    // 要清除请显式传入空白串以外的哨兵值由上层处理，这里遵循"空即不改"
+                    if (role.getApiKey() != null && !role.getApiKey().isBlank()) {
+                        existing.setApiKey(role.getApiKey());
+                    }
                     if (role.getActive() != null) {
                         existing.setActive(role.getActive());
                     }

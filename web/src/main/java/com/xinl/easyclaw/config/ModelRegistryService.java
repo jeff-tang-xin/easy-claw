@@ -131,6 +131,59 @@ public class ModelRegistryService {
     }
 
     /**
+     * 用<b>显式凭证</b>解析模型：角色自带 baseUrl + apiKey 时走这里，
+     * 绕开全局 providers 表。
+     * <p>
+     * 二者任一为空即退回 {@link #resolveOrBuild(String)}（按全局配置解析）——
+     * 半套凭证无法建连接，与其抛错不如退回可用路径。
+     * <p>
+     * 注册 ID 带 {@code custom@} 前缀 + baseUrl 哈希，避免与全局注册的同名模型
+     * 互相覆盖（否则角色 A 的自定义端点会污染其他人的 "deepseek:deepseek-chat"）。
+     *
+     * @param modelName 模型名，可含 provider 前缀（会被剥离，因为端点已显式给出）
+     * @param baseUrl   自定义 API 基址
+     * @param apiKey    自定义 API Key
+     */
+    public io.agentscope.core.model.Model resolveWithCredentials(String modelName,
+                                                                 String baseUrl,
+                                                                 String apiKey) {
+        if (baseUrl == null || baseUrl.isBlank() || apiKey == null || apiKey.isBlank()) {
+            return resolveOrBuild(modelName);
+        }
+        if (modelName == null || modelName.isBlank()) {
+            log.warn("自定义凭证缺少模型名，回退全局默认");
+            return ModelRegistry.resolve(resolveModelId());
+        }
+        String bare = modelName.trim();
+        int idx = bare.indexOf(':');
+        if (idx > 0) {
+            bare = bare.substring(idx + 1).trim();
+        }
+        String dynamicId = "custom@" + Integer.toHexString(baseUrl.trim().hashCode()) + ":" + bare;
+        if (ModelRegistry.canResolve(dynamicId)) {
+            return ModelRegistry.resolve(dynamicId);
+        }
+        try {
+            HttpTransport transport = new LoggingHttpTransport(
+                    new RetryableHttpTransport(HttpTransportFactory.getDefault()));
+            Boolean stream = props.getModel().getStream();
+            io.agentscope.core.model.Model model = OpenAIChatModel.builder()
+                    .baseUrl(baseUrl.trim())
+                    .apiKey(apiKey.trim())
+                    .modelName(bare)
+                    .stream(stream == null || stream)
+                    .httpTransport(transport)
+                    .build();
+            ModelRegistry.register(dynamicId, model);
+            log.info("按自定义凭证注册模型: {} (baseUrl={})", dynamicId, baseUrl);
+            return model;
+        } catch (Exception e) {
+            log.warn("自定义凭证构建模型失败，回退全局默认: {}", e.getMessage());
+            return ModelRegistry.resolve(resolveModelId());
+        }
+    }
+
+    /**
      * 当前激活的模型 ID，如 "deepseek:deepseek-chat"
      */
     public String resolveModelId() {
