@@ -46,6 +46,16 @@ public class ReasoningContext {
     private final String agentName;
     private String messageId;
 
+    /**
+     * Last non-null {@code finish_reason} reported by the model.
+     *
+     * <p>In streaming mode only the final chunk carries it, so we keep the last non-null value
+     * rather than overwriting with the nulls of earlier chunks. A value of {@code "length"} means
+     * the model hit its output-token ceiling and the reply is cut mid-sentence — callers should
+     * surface that instead of presenting the truncated text as a complete answer.
+     */
+    private String finishReason;
+
     private final TextAccumulator textAcc = new TextAccumulator();
     private final ThinkingAccumulator thinkingAcc = new ThinkingAccumulator();
     private final ToolCallsAccumulator toolCallsAcc = new ToolCallsAccumulator();
@@ -78,6 +88,10 @@ public class ReasoningContext {
      */
     public List<Msg> processChunk(ChatResponse chunk) {
         this.messageId = chunk.getId();
+        // Streaming: only the terminal chunk carries finish_reason — never clobber it with nulls.
+        if (chunk.getFinishReason() != null) {
+            this.finishReason = chunk.getFinishReason();
+        }
 
         // Accumulate ChatUsage
         ChatUsage usage = chunk.getUsage();
@@ -279,6 +293,28 @@ public class ReasoningContext {
      */
     public List<ToolUseBlock> getAllAccumulatedToolCalls() {
         return toolCallsAcc.getAllAccumulatedToolCalls();
+    }
+
+    /**
+     * Get the model-reported finish reason for this turn.
+     *
+     * @return finish reason (e.g. {@code "stop"}, {@code "length"}, {@code "tool_calls"}), or
+     *     {@code null} if the provider did not report one
+     */
+    public String getFinishReason() {
+        return finishReason;
+    }
+
+    /**
+     * Whether the model stopped because it hit the output-token ceiling.
+     *
+     * <p>When true the accumulated text/tool arguments are cut mid-stream and must not be treated
+     * as a complete reply.
+     *
+     * @return true if {@code finish_reason == "length"}
+     */
+    public boolean isTruncatedByLength() {
+        return "length".equals(finishReason);
     }
 
     /**
