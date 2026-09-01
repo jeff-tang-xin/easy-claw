@@ -71,59 +71,109 @@ public class DataInitializer {
                 });
             }
 
-            if (roleService.findAll().size() <= 1) {
-                log.info("初始化默认角色...");
+            // 逐角色幂等播种：按 name 存在性判断，而非「角色表几乎为空」。
+            // 旧写法 findAll().size() <= 1 会让已有若干角色的库永远拿不到新增的内置角色
+            // （coder/planner/reviewer 就是这样缺失的）——它们与全局子 Agent 声明同名，
+            // 缺角色则声明的 role: 绑定落空，子 Agent 退化为无人格。
+            // model 留空 = 跟随全局默认模型。不要硬编码具体模型名：
+            // 写死的模型（如 gpt-4）在用户实际配置的 provider 下往往解析失败并回退，
+            // 徒增一次告警日志且行为不可预期。
+            int created = 0;
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("code-expert")
+                    .displayName("代码专家")
+                    .role("资深软件架构师")
+                    .goal("帮助用户编写高质量、可维护的代码")
+                    .backstory("你拥有10年Java开发经验，精通Spring生态、设计模式、代码重构。你注重代码规范、性能优化和可维护性。")
+                    .temperature(0.3)
+                    .model("")
+                    .active(true)
+                    .build());
 
-                // model 留空 = 跟随全局默认模型。不要硬编码具体模型名：
-                // 写死的模型（如 gpt-4）在用户实际配置的 provider 下往往解析失败并回退，
-                // 徒增一次告警日志且行为不可预期。
-                roleService.create(AgentRoleEntity.builder()
-                        .name("code-expert")
-                        .displayName("代码专家")
-                        .role("资深软件架构师")
-                        .goal("帮助用户编写高质量、可维护的代码")
-                        .backstory("你拥有10年Java开发经验，精通Spring生态、设计模式、代码重构。你注重代码规范、性能优化和可维护性。")
-                        .temperature(0.3)
-                        .model("")
-                        .active(true)
-                        .build());
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("file-expert")
+                    .displayName("文件操作专家")
+                    .role("文件系统运维专家")
+                    .goal("高效、安全地管理文件和目录")
+                    .backstory("你熟悉各种文件操作，注重数据安全，严格遵守文件沙箱隔离规则。")
+                    .temperature(0.2)
+                    .model("")
+                    .active(true)
+                    .build());
 
-                roleService.create(AgentRoleEntity.builder()
-                        .name("file-expert")
-                        .displayName("文件操作专家")
-                        .role("文件系统运维专家")
-                        .goal("高效、安全地管理文件和目录")
-                        .backstory("你熟悉各种文件操作，注重数据安全，严格遵守文件沙箱隔离规则。")
-                        .temperature(0.2)
-                        .model("")
-                        .active(true)
-                        .build());
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("researcher")
+                    .displayName("研究分析师")
+                    .role("信息研究分析师")
+                    .goal("提供准确、全面的信息查询和分析")
+                    .backstory("你擅长信息检索、数据分析和知识综合，能够从多个角度分析问题。")
+                    .temperature(0.7)
+                    .model("")
+                    .active(true)
+                    .build());
 
-                roleService.create(AgentRoleEntity.builder()
-                        .name("researcher")
-                        .displayName("研究分析师")
-                        .role("信息研究分析师")
-                        .goal("提供准确、全面的信息查询和分析")
-                        .backstory("你擅长信息检索、数据分析和知识综合，能够从多个角度分析问题。")
-                        .temperature(0.7)
-                        .model("")
-                        .active(true)
-                        .build());
+            // 以下三个与 SystemDataSeeder 播种的内置子 Agent 声明同名，二者通过
+            // 声明 frontmatter 的 role: 字段绑定：角色供人格与模型，声明供工具与步数。
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("coder")
+                    .displayName("代码实现专家")
+                    .role("代码实现专家")
+                    .goal("按任务指令完成高质量的代码实现与缺陷修复")
+                    .backstory("你动手前先读懂上下文，实现时严格贴合项目既有风格，完成后自行验证编译与边界情况。你只做任务范围内的改动，不顺手重构。")
+                    .temperature(0.3)
+                    .model("")
+                    .active(true)
+                    .build());
 
-                roleService.create(AgentRoleEntity.builder()
-                        .name("creative-writer")
-                        .displayName("创意作家")
-                        .role("创意写作专家")
-                        .goal("帮助用户创作富有创意和感染力的内容")
-                        .backstory("你是一位经验丰富的作家，擅长各种文体创作，注重语言的表达力和感染力。")
-                        .temperature(0.9)
-                        .model("")
-                        .active(false)
-                        .build());
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("planner")
+                    .displayName("任务规划专家")
+                    .role("任务规划专家")
+                    .goal("把复杂需求拆解为清晰、有序、可验证的子任务清单")
+                    .backstory("你擅长厘清目标与约束，识别任务间的依赖与可并行项，并提前指出风险点和需要确认的信息。你只做规划，不执行任务本身。")
+                    .temperature(0.4)
+                    .model("")
+                    .active(true)
+                    .build());
 
-                log.info("默认角色初始化完成");
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("reviewer")
+                    .displayName("代码评审专家")
+                    .role("代码评审专家")
+                    .goal("发现产出中的缺陷与风险，并给出可落地的改进建议")
+                    .backstory("你从正确性、可读性、安全、性能多个维度审查代码，按严重程度分级并指明具体位置。你给明确结论，不含糊其辞，也不直接改代码。")
+                    .temperature(0.2)
+                    .model("")
+                    .active(true)
+                    .build());
+
+            created += seedRole(roleService, AgentRoleEntity.builder()
+                    .name("creative-writer")
+                    .displayName("创意作家")
+                    .role("创意写作专家")
+                    .goal("帮助用户创作富有创意和感染力的内容")
+                    .backstory("你是一位经验丰富的作家，擅长各种文体创作，注重语言的表达力和感染力。")
+                    .temperature(0.9)
+                    .model("")
+                    .active(false)
+                    .build());
+
+            if (created > 0) {
+                log.info("默认角色初始化完成，新增 {} 个", created);
             }
         };
+    }
+
+    /**
+     * 按 name 幂等创建角色：已存在则原样保留（用户可能已自定义），返回 0；创建成功返回 1。
+     */
+    private int seedRole(RoleManagementService roleService, AgentRoleEntity role) {
+        if (roleService.findByName(role.getName()).isPresent()) {
+            return 0;
+        }
+        roleService.create(role);
+        log.info("已创建内置角色: {}", role.getName());
+        return 1;
     }
 
     @Bean

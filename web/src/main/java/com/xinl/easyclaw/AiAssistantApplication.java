@@ -157,11 +157,14 @@ public class AiAssistantApplication {
     }
 
     /**
-     * 将 JAR 内置的 3 个全局子 Agent 模板播种到 ~/.easyClaw/subagents/。
+     * 将 JAR 内置的 6 个全局子 Agent 模板播种到 ~/.easyClaw/subagents/。
+     * 每个模板的 frontmatter 带 {@code role:}，与 DataInitializer 播种的同名角色绑定
+     * （角色供人格与模型，声明供工具与步数）。
      * 只复制目标文件不存在的情况（不覆盖用户可能已修改的版本）。
      */
     private static void seedBundledSubagents(Path targetDir) {
-        String[] bundled = {"code-expert", "file-expert", "researcher"};
+        String[] bundled = {"code-expert", "file-expert", "researcher",
+                "coder", "planner", "reviewer"};
         for (String name : bundled) {
             Path target = targetDir.resolve(name + ".md");
             if (Files.exists(target)) continue;

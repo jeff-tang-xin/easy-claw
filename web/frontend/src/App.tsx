@@ -43,7 +43,7 @@ export default function App() {
             </NavLink>
           ))}
         </nav>
-        <div className="sidebar-footer">AgentScope 2.0</div>
+        <div className="sidebar-footer">Powered by xinl.tang</div>
       </aside>
       <main className="app-main">
         <Routes>
