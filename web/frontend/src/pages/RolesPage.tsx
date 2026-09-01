@@ -5,6 +5,9 @@ import Modal from '../components/Modal';
 interface Role {
   id: number; name: string; displayName: string; role: string;
   goal: string; backstory: string; model: string; temperature: number; active: boolean;
+  baseUrl?: string; apiKey?: string;
+  /** 只读：后端不回传 apiKey 明文，靠该标志区分"未配置"与"已配置" */
+  apiKeyConfigured?: boolean;
 }
 
 export default function RolesPage() {
@@ -52,7 +55,7 @@ export default function RolesPage() {
     <div className="page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h1 className="page-title">🎭 角色管理</h1>
-        <button className="btn primary" onClick={() => setEditing({ id: 0, name: '', displayName: '', role: '', goal: '', backstory: '', model: '', temperature: 0.4, active: true })}>＋ 新建角色</button>
+        <button className="btn primary" onClick={() => setEditing({ id: 0, name: '', displayName: '', role: '', goal: '', backstory: '', model: '', temperature: 0.4, active: true, baseUrl: '', apiKey: '' })}>＋ 新建角色</button>
       </div>
       {error && <div className="error-box">{error}</div>}
 
@@ -90,6 +93,24 @@ export default function RolesPage() {
               <input type="number" step="0.1" min="0" max="2" value={editing.temperature} onChange={(e) => setEditing({ ...editing, temperature: Number(e.target.value) })} />
             </div>
           </div>
+          <div style={{ display: 'flex', gap: 12 }}>
+            <div className="field" style={{ flex: 1 }}>
+              <label>专属 API 基址（可选）</label>
+              <input value={editing.baseUrl || ''} onChange={(e) => setEditing({ ...editing, baseUrl: e.target.value })} placeholder="留空 = 使用全局 provider 配置" />
+            </div>
+            <div className="field" style={{ flex: 1 }}>
+              <label>专属 API Key（可选）</label>
+              <input
+                type="password"
+                value={editing.apiKey || ''}
+                onChange={(e) => setEditing({ ...editing, apiKey: e.target.value })}
+                placeholder={editing.apiKeyConfigured ? '已配置，留空则保持不变' : '留空 = 使用全局 provider 配置'}
+              />
+            </div>
+          </div>
+          <div className="hint" style={{ marginTop: -4 }}>
+            基址与 Key 需成对填写，只填其一将忽略并回退全局配置。密钥保存后不再回显。
+          </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button className="btn" onClick={() => setEditing(null)}>取消</button>
             <button className="btn primary" onClick={save}>保存</button>
@@ -100,7 +121,7 @@ export default function RolesPage() {
       <div className="card">
         <table>
           <thead>
-            <tr><th>名称</th><th>定位</th><th>模型</th><th>温度</th><th>状态</th><th></th></tr>
+            <tr><th>名称</th><th>定位</th><th>模型</th><th>端点</th><th>温度</th><th>状态</th><th></th></tr>
           </thead>
           <tbody>
             {items.map((r) => (
@@ -108,6 +129,9 @@ export default function RolesPage() {
                 <td style={{ fontWeight: 600 }}>{r.displayName || r.name}</td>
                 <td className="hint">{r.role}</td>
                 <td><code style={{ fontSize: 12 }}>{r.model || '全局默认'}</code></td>
+                <td className="hint" style={{ fontSize: 12 }}>
+                  {r.baseUrl && r.apiKeyConfigured ? '专属' : '全局'}
+                </td>
                 <td>{r.temperature}</td>
                 <td>
                   <button className="btn small" onClick={() => toggleActive(r)}>
