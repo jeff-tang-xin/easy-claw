@@ -1628,6 +1628,13 @@ public class AgentService {
     private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file");
 
     /**
+     * 会改动文件但拿不到确切路径的工具。shell 可以做任何事（git checkout、del、mv、
+     * 重定向输出），入参里的命令行无法可靠解析出受影响路径，因此只发"位置未知"信号，
+     * 由前端按自身上下文（当前目录 + 已打开标签页）决定重拉什么。
+     */
+    private static final Set<String> OPAQUE_WRITE_TOOLS = Set.of("execute");
+
+    /**
      * 写类工具成功后推送 file_changed 事件，驱动前端实时刷新。
      * <p>
      * 路径从工具入参 JSON 的 {@code path} 字段取。入参可能因流式累积而不是合法 JSON
@@ -1637,7 +1644,18 @@ public class AgentService {
     private static void emitFileChangedIfWriteTool(String toolName,
                                                    String argsJson,
                                                    Consumer<StreamEvent> onEvent) {
-        if (toolName == null || !FILE_WRITE_TOOLS.contains(toolName.toLowerCase(Locale.ROOT))) {
+        if (toolName == null) {
+            return;
+        }
+        String normalized = toolName.toLowerCase(Locale.ROOT);
+
+        // shell 类工具：受影响路径不可知，发空路径让前端刷新它当前关心的位置
+        if (OPAQUE_WRITE_TOOLS.contains(normalized)) {
+            onEvent.accept(StreamEvent.fileChanged(""));
+            return;
+        }
+
+        if (!FILE_WRITE_TOOLS.contains(normalized)) {
             return;
         }
         if (argsJson == null || argsJson.isBlank()) {

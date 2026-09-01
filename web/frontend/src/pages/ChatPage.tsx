@@ -1379,14 +1379,20 @@ export default function ChatPage() {
     pendingFileChangesRef.current.clear();
     if (changed.length === 0 || !workspaceId) return;
 
+    // 空路径 = 后端说"文件变了但不知道是哪个"（shell 类工具）。
+    // 用户必然处在某个目录、打开着某几个文件，刷新这些即可，无需后端给出精确路径。
+    const unknownPath = changed.some((p) => p === '');
+
     // 1) 文件树：只要有变更就刷新当前目录（新增/删除文件需要重新列举）
     loadFiles(workspaceId, filePath);
 
-    // 2) 已打开的标签页：只重拉真正受影响的那些，避免无意义的 N 次请求
+    // 2) 已打开的标签页：路径已知时只重拉受影响的，未知时全部重拉
     const openPaths = new Set(openFilesRef.current.map((f) => f.entry.path));
     let touchedImage = false;
-    for (const p of changed) {
-      if (!openPaths.has(p)) continue;
+    const targets = unknownPath
+      ? openFilesRef.current.map((f) => f.entry.path)
+      : changed.filter((p) => openPaths.has(p));
+    for (const p of targets) {
       const target = openFilesRef.current.find((f) => f.entry.path === p);
       if (!target) continue;
       if (target.kind === 'text') {
