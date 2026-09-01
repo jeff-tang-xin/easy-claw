@@ -94,28 +94,58 @@ class OrchestrationPromptBuilderTest {
     void teamOrchestrationNestedUnderMethodology() {
         ScenarioEntity e = scenario("team", "团队环境", "你是编排者");
         e.setWorkflow("""
-                {"steps":[{"subagent":"planner","instruction":"拆解需求","parallel":false}]}""");
+                {"steps":[{"role":"planner","instruction":"拆解需求","parallel":false}]}""");
 
         String out = OrchestrationPromptBuilder.build(
                 e, List.of(decl("planner", "规划")), null);
 
         int method = out.indexOf("### 工作方法论");
-        int plan = out.indexOf("多智能体编排工作流");
+        int plan = out.indexOf("角色编排工作流");
         assertTrue(plan > method, "编排计划应位于方法论段之内");
         assertTrue(out.contains("planner"));
-        assertFalse(out.contains("（未注册，由主控自己完成）"),
-                "planner 已注册，不应标记为未注册");
+        assertFalse(out.contains("无专属执行体"),
+                "planner 已有同名执行体，不应标记");
     }
 
     @Test
-    @DisplayName("team 模式：未注册的子 Agent 被显式标注，避免诱导调用不存在的成员")
-    void marksUnregisteredSubagent() {
+    @DisplayName("team 模式：协调者被定位为「只分发+验收」，不亲自执行")
+    void coordinatorIsDispatcherAndReviewerOnly() {
         ScenarioEntity e = scenario("team", "团队环境", "你是编排者");
         e.setWorkflow("""
-                {"steps":[{"subagent":"ghost","instruction":"干活","parallel":false}]}""");
+                {"steps":[{"role":"coder","instruction":"实现"}]}""");
+
+        String out = OrchestrationPromptBuilder.build(e, List.of(decl("coder", "实现")), null);
+        assertTrue(out.contains("分发者"), "应声明协调者的分发职责");
+        assertTrue(out.contains("验收"), "应声明协调者的验收职责");
+        assertTrue(out.contains("返工"), "验收结论应包含返工分支");
+        assertTrue(out.contains("不亲自干活") || out.contains("不要替他们"),
+                "应明确协调者不亲自执行具体任务");
+    }
+
+    @Test
+    @DisplayName("team 模式：同阶段多角色渲染为「同一轮同时派发」的并发指令")
+    void parallelStageDeclaresConcurrentDispatch() {
+        ScenarioEntity e = scenario("team", "团队环境", "你是编排者");
+        e.setWorkflow("""
+                {"steps":[{"role":"coder","instruction":"实现"},\
+                {"role":"reviewer","instruction":"评审","parallel":true}]}""");
+
+        String out = OrchestrationPromptBuilder.build(
+                e, List.of(decl("coder", "实现"), decl("reviewer", "评审")), null);
+        assertTrue(out.contains("2 个角色必须在同一轮同时派发"),
+                "并行阶段应显式给出角色数与并发要求，实际输出:\n" + out);
+    }
+
+    @Test
+    @DisplayName("team 模式：无专属执行体的角色被标注，但仍要求派发而非主控代劳")
+    void marksRoleWithoutDedicatedExecutor() {
+        ScenarioEntity e = scenario("team", "团队环境", "你是编排者");
+        e.setWorkflow("""
+                {"steps":[{"role":"ghost","instruction":"干活","parallel":false}]}""");
 
         String out = OrchestrationPromptBuilder.build(e, List.of(), null);
-        assertTrue(out.contains("（未注册，由主控自己完成）"));
+        assertTrue(out.contains("无专属执行体"));
+        assertTrue(out.contains("仍要派发出去执行"), "不应回退成主控亲自动手");
     }
 
     @Test
@@ -126,7 +156,7 @@ class OrchestrationPromptBuilderTest {
 
         String out = OrchestrationPromptBuilder.build(e, List.of(), null);
         assertTrue(out.contains("你是编排者"), "场景方法论文本应保留");
-        assertFalse(out.contains("多智能体编排工作流"), "非法工作流不应渲染计划");
+        assertFalse(out.contains("角色编排工作流"), "非法工作流不应渲染计划");
     }
 
     @Test

@@ -21,12 +21,21 @@ interface Scenario {
   mcpServices?: string;
   /** 基础能力档位：none / readonly / standard / full；"" = 未配置（继承默认） */
   capabilityTier?: string;
+  /** 绑定的主角色名；"" = 解绑（回退默认主角色 main） */
+  roleName?: string;
 }
 
 interface Step {
-  subagent: string;
+  /** 执行该步骤的角色名（编排主键）——角色自带人格与模型，是完整的执行单元 */
+  role: string;
   instruction: string;
   parallel: boolean;
+}
+
+/** /api/roles 返回项（仅取下拉所需字段） */
+interface RoleOption {
+  name: string;
+  displayName?: string;
 }
 
 interface WorkspaceSummary {
@@ -142,7 +151,7 @@ const serializeNames = (names: string[]): string => (names.length ? JSON.stringi
 const emptyScenario = (): Scenario => ({
   id: 0, name: '', displayName: '', icon: '🎬', description: '',
   mode: 'single', systemPrompt: '', workflow: null, active: true, builtin: false,
-  skills: '', subagents: '', mcpServices: '', capabilityTier: '',
+  skills: '', subagents: '', mcpServices: '', capabilityTier: '', roleName: '',
 });
 
 const parseSteps = (workflow: string | null): Step[] => {
@@ -150,8 +159,9 @@ const parseSteps = (workflow: string | null): Step[] => {
   try {
     const parsed = JSON.parse(workflow);
     if (Array.isArray(parsed.steps)) {
-      return parsed.steps.map((s: Partial<Step>) => ({
-        subagent: s.subagent || '',
+      // 历史数据以 subagent 为主键，读取时迁移为 role（保存时只写 role）
+      return parsed.steps.map((s: Partial<Step> & { subagent?: string }) => ({
+        role: s.role || s.subagent || '',
         instruction: s.instruction || '',
         parallel: !!s.parallel,
       }));
@@ -162,10 +172,22 @@ const parseSteps = (workflow: string | null): Step[] => {
   return [];
 };
 
+/**
+ * 移动步骤位置。
+ * <p>parallel 的语义是「与上一步骤同组」，因此步骤被移到首位时必须清掉该标记，
+ * 否则会产生「首步并行」这种解析层会告警的非法状态。
+ */
+const moveStep = (list: Step[], from: number, delta: number): Step[] => {
+  const to = from + delta;
+  if (to < 0 || to >= list.length) return list;
+  const next = [...list];
+  [next[from], next[to]] = [next[to], next[from]];
+  return next.map((s, i) => (i === 0 && s.parallel ? {...s, parallel: false} : s));
+};
+
 export default function ScenariosPage() {
   const [items, setItems] = useState<Scenario[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
-  const [subagentNames, setSubagentNames] = useState<string[]>([]);
   const [activeMap, setActiveMap] = useState<Record<string, number>>({});
   const [selectedWs, setSelectedWs] = useState('');
   const [editing, setEditing] = useState<Scenario | null>(null);
@@ -178,6 +200,7 @@ export default function ScenariosPage() {
   const [skillOptions, setSkillOptions] = useState<SkillOption[]>([]);
   const [subagentOptions, setSubagentOptions] = useState<SubagentOption[]>([]);
   const [mcpOptions, setMcpOptions] = useState<McpOption[]>([]);
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
   const [bindSkills, setBindSkills] = useState<string[]>([]);
   const [bindSubagents, setBindSubagents] = useState<string[]>([]);
   const [bindMcp, setBindMcp] = useState<string[]>([]);
@@ -186,14 +209,12 @@ export default function ScenariosPage() {
 
   const load = async () => {
     try {
-      const [sc, ws, subs] = await Promise.all([
+      const [sc, ws] = await Promise.all([
         getJson<Scenario[]>('/api/scenarios'),
         getJson<WorkspaceSummary[]>('/api/workspaces'),
-        getJson<{ name: string }[]>('/api/scenarios/subagents'),
       ]);
       setItems(sc);
       setWorkspaces(ws);
-      setSubagentNames(subs.map((s) => s.name));
       const act: Record<string, number> = {};
       await Promise.all(ws.map(async (w) => {
         const s = await getJson<Scenario | null>(`/api/scenarios/active/${w.workspaceId}`);
@@ -222,10 +243,11 @@ export default function ScenariosPage() {
     setBindLoading(true);
     const wsQuery = selectedWs ? `?workspaceId=${encodeURIComponent(selectedWs)}` : '';
     try {
-      const [sk, subs, mcp] = await Promise.all([
+      const [sk, subs, mcp, roles] = await Promise.all([
         getJson<SkillOption[]>(`/api/skills${wsQuery}`).catch(() => [] as SkillOption[]),
         getJson<SubagentOption[]>(`/api/scenarios/subagents${wsQuery}`).catch(() => [] as SubagentOption[]),
         getJson<McpOption[]>('/api/mcp').catch(() => [] as McpOption[]),
+        getJson<RoleOption[]>('/api/roles').catch(() => [] as RoleOption[]),
       ]);
       // 只保留 skill 作用域：scope 为 global / workspace。
       // 排除 *-subagent（global-subagent / workspace-subagent）—— 那是子 Agent 声明文件，
@@ -233,6 +255,7 @@ export default function ScenariosPage() {
       setSkillOptions(sk.filter((s) => !String(s.scope || '').endsWith('-subagent')));
       setSubagentOptions(subs);
       setMcpOptions(mcp.filter((m) => !m.isTemplate));
+      setRoleOptions(roles);
     } finally {
       setBindLoading(false);
     }
@@ -279,6 +302,8 @@ export default function ScenariosPage() {
       subagents: serializeNames(bindSubagents),
       mcpServices: serializeNames(bindMcp),
       capabilityTier: bindTier,
+      // 与能力绑定同理：显式传 ""（而非 null）才能解绑回默认主角色
+      roleName: (editing.roleName || '').trim(),
     };
     try {
       if (editing.id) await putJson(`/api/scenarios/${editing.id}`, body);
@@ -404,7 +429,7 @@ export default function ScenariosPage() {
                   {parseSteps(s.workflow).map((st, i) => (
                     <div key={i}>
                       {i + 1}. {st.parallel ? '∥ ' : '→ '}
-                      <code style={{fontSize: 11}}>{st.subagent}</code>
+                      <code style={{fontSize: 11}}>{st.role}</code>
                       {st.instruction ? `：${st.instruction.length > 26 ? st.instruction.slice(0, 26) + '…' : st.instruction}` : ''}
                     </div>
                   ))}
@@ -426,8 +451,9 @@ export default function ScenariosPage() {
         })}
       </div>
       <p className="hint" style={{marginTop: 12}}>
-        场景激活后立即重建该工作区的 Agent 并注入 system prompt；team 模式会按工作流阶段调度子 Agent
-        （在 Skills 页「子Agent」中管理成员）。成员名单：{subagentNames.length ? subagentNames.join('、') : '（暂无全局子 Agent）'}
+        场景激活后立即重建该工作区的 Agent 并注入 system prompt；team 模式下主智能体作为
+        <strong>常驻协调者</strong>——只做分发与验收（决定质量与走向），按工作流阶段把各角色派发出去执行，
+        同一阶段的多个角色并发激活。角色在「角色」页管理（人格与模型随角色走）。
       </p>
 
       {editing && (
@@ -465,6 +491,22 @@ export default function ScenariosPage() {
                 <option value="team">team 多智能体</option>
               </select>
             </div>
+            <div className="field" style={{width: 160}}>
+              <label>主角色</label>
+              <select
+                value={editing.roleName || ''}
+                title="本场景下主智能体扮演的角色；留空则使用默认主角色"
+                onChange={(e) => setEditing({...editing, roleName: e.target.value})}
+              >
+                <option value="">默认主角色</option>
+                {roleOptions.map((r) => (
+                  <option key={r.name} value={r.name}>{r.displayName || r.name}</option>
+                ))}
+                {editing.roleName && !roleOptions.some((r) => r.name === editing.roleName) && (
+                  <option value={editing.roleName}>{editing.roleName}（已删除）</option>
+                )}
+              </select>
+            </div>
           </div>
           <div className="field">
             <label>描述</label>
@@ -483,32 +525,53 @@ export default function ScenariosPage() {
           {editing.mode === 'team' && (
             <div className="field">
               <label>
-                编排工作流步骤（按阶段顺序执行；勾选「并行」表示与上一步同时执行）
+                编排工作流步骤（<strong>自上而下按顺序执行</strong>；勾选「并行」表示与上一步同时执行；用 ↑↓ 调整顺序）
               </label>
               {steps.map((st, i) => (
-                <div key={i} style={{display: 'flex', gap: 8, marginBottom: 8, alignItems: 'center'}}>
+                <div key={i} style={{display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center'}}>
                   <span className="hint" style={{width: 22}}>{i + 1}.</span>
+                  <div style={{display: 'flex', flexDirection: 'column', gap: 2}}>
+                    <button
+                      className="btn small"
+                      style={{padding: '0 6px', lineHeight: 1.4}}
+                      disabled={i === 0}
+                      title="上移"
+                      onClick={() => setSteps(moveStep(steps, i, -1))}
+                    >↑</button>
+                    <button
+                      className="btn small"
+                      style={{padding: '0 6px', lineHeight: 1.4}}
+                      disabled={i === steps.length - 1}
+                      title="下移"
+                      onClick={() => setSteps(moveStep(steps, i, 1))}
+                    >↓</button>
+                  </div>
                   <select
-                    value={st.subagent}
-                    style={{width: 160}}
-                    onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, subagent: e.target.value} : s))}
+                    value={st.role}
+                    style={{width: 150}}
+                    title="执行本步骤的角色——角色自带人格与模型，是完整的执行单元"
+                    onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, role: e.target.value} : s))}
                   >
-                    <option value="">选择子 Agent…</option>
-                    {subagentNames.map((n) => <option key={n} value={n}>{n}</option>)}
-                    {st.subagent && !subagentNames.includes(st.subagent) && (
-                      <option value={st.subagent}>{st.subagent}（未注册）</option>
+                    <option value="">选择角色…</option>
+                    {roleOptions.map((r) => (
+                      <option key={r.name} value={r.name}>{r.displayName || r.name}</option>
+                    ))}
+                    {st.role && !roleOptions.some((r) => r.name === st.role) && (
+                      <option value={st.role}>{st.role}（已删除）</option>
                     )}
                   </select>
                   <input
                     style={{flex: 1}}
                     value={st.instruction}
-                    placeholder="任务指令（派发给该子 Agent 的具体任务）"
+                    placeholder="任务指令（派发给该角色的具体任务）"
                     onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, instruction: e.target.value} : s))}
                   />
                   <label style={{display: 'flex', gap: 4, alignItems: 'center', fontSize: 12, whiteSpace: 'nowrap'}}>
                     <input
                       type="checkbox"
                       checked={st.parallel}
+                      disabled={i === 0}
+                      title={i === 0 ? '首个步骤无前序步骤可并行' : '与上一步骤同时执行'}
                       onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, parallel: e.target.checked} : s))}
                     />
                     并行
@@ -516,7 +579,7 @@ export default function ScenariosPage() {
                   <button className="btn small danger" onClick={() => setSteps(steps.filter((_, j) => j !== i))}>✕</button>
                 </div>
               ))}
-              <button className="btn small" onClick={() => setSteps([...steps, {subagent: '', instruction: '', parallel: false}])}>
+              <button className="btn small" onClick={() => setSteps([...steps, {role: '', instruction: '', parallel: false}])}>
                 ＋ 添加步骤
               </button>
             </div>

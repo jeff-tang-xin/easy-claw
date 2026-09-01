@@ -138,7 +138,7 @@ public final class OrchestrationAuditVerifier {
             try {
                 stages.add(Integer.parseInt(number));
             } catch (NumberFormatException ignored) {
-                // 非阶段号写法（直接写子 Agent 名）：跳过，不污染结果
+                // 非阶段号写法（直接写角色名）：跳过，不污染结果
             }
         }
         return stages;

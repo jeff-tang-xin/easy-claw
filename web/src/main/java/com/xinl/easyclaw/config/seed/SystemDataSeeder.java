@@ -103,7 +103,7 @@ public class SystemDataSeeder {
     }
 
     /** 内置子 Agent 模板的当前版本。修改任一内置声明正文时递增，使旧的未改动文件自动刷新。 */
-    static final int SUBAGENT_SEED_VERSION = 3;
+    static final int SUBAGENT_SEED_VERSION = 4;
 
     /** frontmatter 扫描行数上限：正常声明的头部远小于此值，防止无闭合分隔符时扫全文。 */
     private static final int MAX_FRONTMATTER_LINES = 50;
@@ -154,10 +154,20 @@ public class SystemDataSeeder {
     record SeedMeta(Integer version, String hash, String actualHash) {
     }
 
+    /**
+     * 播种一份内置子 Agent 声明。
+     * <p>
+     * frontmatter 自动写入 {@code role: <name>} —— 内置声明的文件名与
+     * {@code DataInitializer} 的种子角色同名，二者本就是同一实体的两个面：
+     * 角色（DB）定义「你是什么」（人格 + 模型），声明（.md）定义「你怎么干活」
+     * （tools / steps / 工作区模式）。绑定后 {@code SubagentLoader} 会把角色人格
+     * 前置到正文，使子 Agent 真正按角色设定运行。
+     */
     private void seedSubagent(Path dir, String name, String description, String prompt) {
         Path file = dir.resolve(name + ".md");
         String body = prompt + "\n";
         String content = "---\ndescription: " + description
+                + "\nrole: " + name
                 + "\nseedVersion: " + SUBAGENT_SEED_VERSION
                 + "\nseedHash: " + bodyHash(body)
                 + "\n---\n\n" + body;

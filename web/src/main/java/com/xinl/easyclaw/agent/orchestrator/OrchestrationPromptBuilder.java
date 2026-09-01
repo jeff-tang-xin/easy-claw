@@ -17,8 +17,13 @@ import java.util.Set;
  * <ul>
  *   <li>single 模式：只注入场景人格/规范提示词</li>
  *   <li>team 模式：在场景提示词之上，把工作流步骤组织成「阶段（串行）/ 分组（并行）」
- *       的执行计划，主智能体作为编排者按计划调度子 Agent 并汇总结果</li>
+ *       的执行计划。主智能体在此模式下是<b>常驻协调者</b>——只做分发与验收，
+ *       决定「质量（合格否）」与「走向（下一阶段 / 返工 / 调整）」，不亲自执行具体任务</li>
  * </ul>
+ * <b>编排单位是角色</b>：角色自带人格与模型，是完整的执行单元；同一阶段的 N 个角色
+ * 应被同时激活为 N 路并发调用。子 Agent 只是承载角色运行的载体（同名声明即该角色的
+ * 执行体），属于实现细节，不进场景配置。
+ * <p>
  * 解析与校验职责已下沉到 {@link WorkflowParser}，本类只负责渲染。
  * <p>
  * team 模式会要求主智能体在回复末尾输出 {@code <orchestration-audit .../>} 审计行，
@@ -107,9 +112,8 @@ public final class OrchestrationPromptBuilder {
             available.add(d.getName());
         }
         List<List<WorkflowStep>> groups = WorkflowParser.groupByStage(parsed.steps());
-
         StringBuilder sb = new StringBuilder();
-        sb.append("### 🤝 多智能体编排工作流（本场景的任务默认按此计划执行）\n");
+        sb.append("### 🤝 角色编排工作流（本场景的任务默认按此计划执行）\n");
         for (int g = 0; g < groups.size(); g++) {
             List<WorkflowStep> group = groups.get(g);
             int stage = g + 1;
@@ -118,7 +122,8 @@ public final class OrchestrationPromptBuilder {
                         .append(describeStep(group.get(0), available)).append("\n");
             } else {
                 sb.append("阶段 ").append(stage)
-                        .append("（并行，同一轮同时发起多个 subagent 调用）：\n");
+                        .append("（并行：以下 ").append(group.size())
+                        .append(" 个角色必须在同一轮同时派发，全部返回后统一验收）：\n");
                 for (WorkflowStep s : group) {
                     sb.append("  - ").append(describeStep(s, available)).append("\n");
                 }
@@ -132,28 +137,42 @@ public final class OrchestrationPromptBuilder {
     private static String buildRules(int stageCount) {
         return """
                 
+                你的定位——协调者（常驻，不亲自干活）：
+                本场景下你不是执行者，而是全程常驻的**分发者 + 验收者**。你只决定两件事：
+                「质量」（这一阶段的产出合格吗）和「走向」（进入下一阶段，还是打回返工）。
+                具体活由各角色的执行体去干；你不要替他们写代码、写文档、做调研。
+                
                 编排规则：
-                1. 按阶段顺序执行；同一阶段内标注「并行」的步骤必须在同一轮同时发起 subagent 调用，等全部返回后再进入下一阶段。
-                2. 派发子 Agent 时把「任务指令」连同必要上下文写入 subagent 调用参数，不要让子 Agent 猜测任务。
-                3. 每个阶段结束后先校验产出：不符合预期就地修正或自己补做，再进入下一阶段。
-                4. 所有阶段完成后，由你（主控）汇总各成员产出，交叉验证后给出最终答复。
-                5. 工作流是默认路径而非死板约束：任务明显不适用时可自行裁剪步骤，但需在回复中说明调整原因。
-                6. 缺少可用成员（未注册的子 Agent）的阶段由你自己直接完成该步骤的工作。
-                7. 本场景工作流中重复出现的子 Agent 按计划次数调度，不受「同一子 Agent 最多 2 次」的通用上限约束。
+                1. 逐阶段推进。每个阶段开始时，把该阶段的每个角色都用 agent_spawn 派发出去，
+                   agent_id 用角色名——每个角色都有自己独立的人格与模型，是独立的执行单元。
+                2. 同一阶段有多个角色时，必须在同一轮里同时发起全部调用（并发执行），
+                   等这一批全部返回后再验收，不要串行地一个个等。
+                3. 派发时把「任务指令」连同必要上下文（上游阶段的产出、约束、验收标准）写进调用参数，
+                   不要让执行体自己猜任务。
+                4. 每个阶段返回后你必须做验收，给出明确结论之一：
+                   - 通过 → 进入下一阶段，并把本阶段产出作为上下文带下去；
+                   - 返工 → 指出具体问题，带着修改要求重新派发同一角色（返工不算新阶段）；
+                   - 调整走向 → 说明原因后裁剪/追加步骤。
+                   同一阶段的返工累计 2 次仍不达标时，停下来向用户说明卡点，不要无限重试。
+                5. 计划中的角色没有专属执行体时，仍要派发出去执行（在指令里写清该角色的职责与视角），
+                   而不是你自己动手完成。
+                6. 全部阶段通过后，由你汇总各角色产出、交叉验证一致性，再给出最终答复。
+                7. 工作流是默认路径而非死板约束：任务明显不适用时可裁剪步骤，但需在回复中说明原因。
+                8. 本场景工作流中重复出现的角色按计划次数调度，且返工重派不受「同一执行体最多 2 次」的通用上限约束。
                 
                 执行审计（必须遵守）：
                 完成任务后，在回复的最后一行输出如下审计标记，供系统校验编排是否按计划执行：
-                <orchestration-audit stages="%d" executed="阶段号:子Agent名,..." skipped="被跳过的阶段号" />
+                <orchestration-audit stages="%d" executed="阶段号:角色名,..." skipped="被跳过的阶段号" />
                 示例：<orchestration-audit stages="%d" executed="1:planner,2:coder|reviewer" skipped="" />
-                说明：executed 中同一阶段的多个并行成员用 | 分隔，阶段之间用 , 分隔；
+                说明：executed 中同一阶段的多个并行角色用 | 分隔，阶段之间用 , 分隔；
                 裁剪掉的阶段填入 skipped 并在正文说明原因。
                 """.formatted(stageCount, stageCount);
     }
 
     private static String describeStep(WorkflowStep step, Set<String> available) {
-        String mark = available.contains(step.subagent()) ? "" : "（未注册，由主控自己完成）";
+        String mark = available.contains(step.role()) ? "" : "（无专属执行体，派发时把该角色的职责要求写进指令）";
         String instruction = notBlank(step.instruction()) ? step.instruction() : "完成本阶段任务";
-        return "子 Agent **" + step.subagent() + "**" + mark + " —— " + instruction;
+        return "角色 **" + step.role() + "**" + mark + " —— " + instruction;
     }
 
     private static String displayName(ScenarioEntity scenario) {

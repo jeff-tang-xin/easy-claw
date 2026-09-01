@@ -76,6 +76,7 @@ public class ScenarioService {
         scenario.setSubagents(blankToNull(scenario.getSubagents()));
         scenario.setMcpServices(blankToNull(scenario.getMcpServices()));
         scenario.setCapabilityTier(blankToNull(scenario.getCapabilityTier()));
+        scenario.setRoleName(blankToNull(scenario.getRoleName()));
         ScenarioEntity saved = scenarioRepo.save(scenario);
         log.info("创建场景: name={}, mode={}", name, saved.getMode());
         return saved;
@@ -99,6 +100,11 @@ public class ScenarioService {
                     if (patch.getMcpServices() != null) existing.setMcpServices(blankToNull(patch.getMcpServices()));
                     if (patch.getCapabilityTier() != null) {
                         existing.setCapabilityTier(blankToNull(patch.getCapabilityTier()));
+                    }
+                    // 绑定角色同属「"" 表示解绑」语义：用户在下拉里选回「默认主角色」
+                    // 时前端传 ""，必须能真正清空，否则角色一旦绑定就摘不掉
+                    if (patch.getRoleName() != null) {
+                        existing.setRoleName(blankToNull(patch.getRoleName()));
                     }
                     validateWorkflow(existing);
                     ScenarioEntity updated = scenarioRepo.save(existing);

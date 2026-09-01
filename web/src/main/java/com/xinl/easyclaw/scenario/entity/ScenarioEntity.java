@@ -96,6 +96,15 @@ public class ScenarioEntity {
     @Column(name = "capability_tier", length = 20)
     private String capabilityTier;
 
+    /**
+     * 场景绑定的主角色名（对应 {@code agent_roles.name}）。
+     * <p>single 模式：该角色的人格（role/goal/backstory）+ 模型用于本场景的主智能体。
+     * 为空 = 沿用默认主角色 {@code main}（AI-CLAW）。
+     * <p>multi-agent 模式下本字段指协调者角色，其余成员见 {@code teamRoles}。
+     */
+    @Column(name = "role_name", length = 64)
+    private String roleName;
+
     @Column(name = "is_active")
     @Builder.Default
     private Boolean active = true;
