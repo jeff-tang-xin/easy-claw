@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.agent;
 
 import com.xinl.easyclaw.config.AgentScopeProperties;
+import com.xinl.easyclaw.role.RolePromptComposer;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
 import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
@@ -189,21 +190,38 @@ public class SubagentLoader {
             steps = configuredSteps;
         }
 
+        // 绑定角色：一次查库同时拿人格与模型（编排单位是角色，.md 只是执行外壳）
+        AgentRoleEntity boundRole = null;
+        if (roleName != null && !roleName.isBlank()) {
+            try {
+                boundRole = roleService.findByName(roleName.trim()).orElse(null);
+                if (boundRole == null) {
+                    log.warn("子 Agent [{}] 声明的角色 [{}] 不存在，按无角色处理", agentId, roleName.trim());
+                }
+            } catch (Exception e) {
+                log.debug("读取角色 {} 失败: {}", roleName, e.getMessage());
+            }
+        }
+
+        // 人格：角色的 role/goal/backstory 置于声明正文之前。
+        // 角色回答「你是什么」（身份），.md 正文回答「你怎么干活」（专项工作方法），
+        // 二者正交故叠加而非互斥；角色在前使身份先于方法确立。
+        String persona = RolePromptComposer.compose(boundRole);
+        if (persona != null) {
+            prompt = persona + "\n\n" + prompt;
+        }
+
         SubagentDeclaration.Builder builder = SubagentDeclaration.builder()
                 .name(agentId)
                 .description(description.isBlank() ? "子 Agent: " + agentId : description)
                 .inlineAgentsBody(prompt)
                 .steps(steps);
-        // 模型：frontmatter 显式指定优先；否则取关联角色的模型配置（团队模式按角色模型运行）
-        if ((model == null || model.isBlank()) && roleName != null && !roleName.isBlank()) {
-            try {
-                AgentRoleEntity role = roleService.findByName(roleName.trim()).orElse(null);
-                if (role != null && role.getModel() != null && !role.getModel().isBlank()) {
-                    model = role.getModel();
-                }
-            } catch (Exception e) {
-                log.debug("读取角色 {} 模型失败: {}", roleName, e.getMessage());
-            }
+        // 模型：frontmatter 显式指定优先；否则取关联角色的模型配置（团队模式按角色模型运行）。
+        // 注：角色的 baseUrl/apiKey 无法经 SubagentDeclaration 传递（声明层只有 model 字符串），
+        // 故角色私有端点在子 Agent 上不生效 —— 现有角色 model 均留空跟随全局，暂无影响。
+        if ((model == null || model.isBlank()) && boundRole != null
+                && boundRole.getModel() != null && !boundRole.getModel().isBlank()) {
+            model = boundRole.getModel();
         }
         if (model != null && !model.isBlank()) {
             builder.model(model);
