@@ -1929,28 +1929,6 @@ export default function ChatPage() {
           </span>
         ))}
         <span className="ws-path">{workspace?.path}</span>
-        <button
-            className="btn refresh-env-btn"
-            onClick={async () => {
-              const btn = document.querySelector('.refresh-env-btn') as HTMLButtonElement;
-              if (btn) { btn.disabled = true; btn.textContent = '刷新中...'; }
-              try {
-                const res = await postJson<{success: boolean; pathSegments?: number; error?: string}>(
-                    `/api/workspaces/${workspaceId}/refresh-env`, {});
-                if (res.success) {
-                  if (btn) { btn.textContent = `✅ 已刷新 (${res.pathSegments} 段 PATH)`; }
-                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 2500);
-                } else {
-                  if (btn) { btn.textContent = `❌ ${res.error || '刷新失败'}`; }
-                  setTimeout(() => { if (btn) btn.textContent = '🔄 刷新运行环境'; }, 3000);
-                }
-              } catch (e) {
-                if (btn) { btn.textContent = `❌ ${String(e)}`; btn.disabled = false; }
-                setTimeout(() => { if (btn) { btn.textContent = '🔄 刷新运行环境'; btn.disabled = false; } }, 3000);
-              }
-            }}
-            title="运行中安装/切换语言（node/python/java）后点击，让 execute 感知最新 PATH"
-        >🔄 刷新运行环境</button>
       </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={(e) => {
         const el = e.currentTarget;

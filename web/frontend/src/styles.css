@@ -493,26 +493,6 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
   font-weight: 600;
 }
 .chat-topbar .ws-path { font-size: 0.75em; color: var(--text-tertiary); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.chat-topbar .refresh-env-btn {
-  font-size: 0.78em;
-  padding: 5px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--panel-hover);
-  color: var(--text-secondary);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: all 0.15s ease;
-}
-.chat-topbar .refresh-env-btn:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: rgba(59,130,246,0.08);
-}
-.chat-topbar .refresh-env-btn:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
 
 .chat-scroll {
   flex: 1;
