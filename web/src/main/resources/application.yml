@@ -41,9 +41,11 @@ agentscope:
     # 被服务端默认上限截断 → JSON 不合法 → 上游降级为 {} → 报「未找到 path/content 参数」
     # 这里只是「全局兜底值」，取所有模型都能接受的保守值；
     # 具体模型的真实上限在下方 model-limits 中按模型名覆盖（route 网关多模型必读）
-    max-tokens: ${AGENTSCOPE_MAX_TOKENS:8192}
-    # 禁用并行 tool_call：避免多路 arguments 流式分片交错串台，破坏 JSON
-    parallel-tool-calls: false
+    max-tokens: ${AGENTSCOPE_MAX_TOKENS:16384}
+    # 并行 tool_call：开启后单轮可并发多个工具，吞吐更高。
+    # 代价是多路 arguments 的流式分片会交错到达，对上游累积器的分片归位要求更高；
+    # 若再次出现 JSON 不合法 / 参数串台，优先把这里改回 false 定位问题。
+    parallel-tool-calls: true
   agent:
     max-iters: 50
     model-timeout-minutes: 10
