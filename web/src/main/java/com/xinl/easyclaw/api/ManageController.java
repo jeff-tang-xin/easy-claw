@@ -20,9 +20,11 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
@@ -34,6 +36,10 @@ import java.util.Map;
 @RestController
 @RequestMapping("/api")
 public class ManageController {
+
+    /** 内置子 Agent 名单，复用播种端的单一来源，避免两处漂移。 */
+    private static final java.util.Set<String> BUNDLED_SUBAGENTS =
+            java.util.Set.copyOf(com.xinl.easyclaw.AiAssistantApplication.BUNDLED_SUBAGENTS);
 
     private final RoleManagementService roleService;
     private final ToolManagementService toolService;
@@ -317,6 +323,114 @@ public class ManageController {
         }
         return new RunScriptResult(
                 skillScriptTools.runSkillScript(req.skill(), req.script(), req.args(), ws));
+    }
+
+    public record SkillUpdateRequest(String path, String content, String workspaceId) {}
+
+    /**
+     * 更新已存在的 skill / 子 Agent 声明文件内容。
+     *
+     * <p>为什么需要这个端点：内置子 Agent 由 {@code seedBundledSubagents} 在启动时释放为
+     * {@code ~/.easyClaw/subagents/*.md} 真实文件（且不覆盖已存在的），本就允许用户修改，
+     * 但此前只有「创建」与「删除」端点，页面无法回写 → 用户想调 {@code steps} 却无处可改。
+     *
+     * <p>只接受 {@code path}（列表接口已返回绝对路径）而不是 scope+name，避免在这里重算落点
+     * 与 {@link #collectMd} 的扫描规则产生分歧。
+     *
+     * <p><b>路径校验</b>：必须落在受管目录内（全局 skills/subagents 或某工作区的
+     * {@code .easyClaw/agent/} 下），否则拒绝——该端点接受调用方传入的绝对路径，
+     * 不校验就等于任意文件写入。
+     */
+    @PutMapping("/skills")
+    public SkillFileDto updateSkill(@RequestBody SkillUpdateRequest req) {
+        if (req.path() == null || req.path().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "path 不能为空");
+        }
+        Path target = Path.of(req.path()).toAbsolutePath().normalize();
+        if (!Files.isRegularFile(target)) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "文件不存在: " + target);
+        }
+        if (!isManagedDeclarationPath(target, req.workspaceId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "路径不在受管目录内，拒绝写入: " + target);
+        }
+        try {
+            Files.writeString(target, req.content() == null ? "" : req.content(),
+                    StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "保存失败: " + e.getMessage());
+        }
+        // 声明文件改了必须重建 Agent，否则改动要等下次重启才生效（与 createSkill 一致）。
+        if (req.workspaceId() != null && !req.workspaceId().isBlank()) {
+            workspaceManager.rebuildAgent(req.workspaceId());
+        }
+        String content = readAllSafe(target);
+        String fileName = target.getFileName().toString();
+        String id = fileName.endsWith(".md")
+                ? fileName.substring(0, fileName.length() - 3) : fileName;
+        return new SkillFileDto(null, id, readDescription(target),
+                target.toString(), content, "file", List.of());
+    }
+
+    /**
+     * 判定路径是否位于允许写入的受管目录内：全局 skills/subagents，或传入 workspaceId 对应工作区的
+     * {@code .easyClaw/agent/} 子树。
+     *
+     * <p>与 {@link #listSkills} 的扫描范围严格对称——列表接口只扫「全局 + 传入的那一个工作区」，
+     * 因此可写范围也只放开这三处，不去遍历全部工作区（能读到才可能编辑）。
+     */
+    private boolean isManagedDeclarationPath(Path target, String workspaceId) {
+        if (target.startsWith(SystemHomePaths.globalSubagentsDir().toAbsolutePath().normalize())
+                || target.startsWith(SystemHomePaths.globalSkillsDir().toAbsolutePath().normalize())) {
+            return true;
+        }
+        if (workspaceId != null && !workspaceId.isBlank()) {
+            WorkspaceContext ws = workspaceManager.getWorkspace(workspaceId);
+            if (ws != null) {
+                Path agentRoot = ws.getPath().resolve(".easyClaw/agent")
+                        .toAbsolutePath().normalize();
+                return target.startsWith(agentRoot);
+            }
+        }
+        return false;
+    }
+
+    public record SkillResetRequest(String name, String workspaceId) {}
+
+    /**
+     * 把内置子 Agent 声明恢复为 JAR 内置的出厂版本。
+     *
+     * <p>与 {@code AiAssistantApplication.seedBundledSubagents} 的差别：那里是「文件不存在才写」
+     * 的播种语义，这里是**显式覆盖**——用户主动要求丢弃自己的修改。
+     *
+     * <p>只允许恢复 {@link #BUNDLED_SUBAGENTS} 名单内的名字，且落点固定为全局 subagents 目录：
+     * 名字来自请求体，不做白名单就会变成「用任意 JAR 资源覆盖任意文件」。
+     */
+    @PostMapping("/skills/reset")
+    public SkillFileDto resetBundledSubagent(@RequestBody SkillResetRequest req) {
+        String name = req.name() == null ? "" : req.name().trim();
+        if (!BUNDLED_SUBAGENTS.contains(name)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "不是内置子 Agent，无法恢复默认: " + name);
+        }
+        Path target = SystemHomePaths.globalSubagentsDir().resolve(name + ".md");
+        try (InputStream in = getClass().getResourceAsStream("/subagents/" + name + ".md")) {
+            if (in == null) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND,
+                        "内置模板缺失: " + name);
+            }
+            Files.createDirectories(target.getParent());
+            Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "恢复默认失败: " + e.getMessage());
+        }
+        if (req.workspaceId() != null && !req.workspaceId().isBlank()) {
+            workspaceManager.rebuildAgent(req.workspaceId());
+        }
+        return new SkillFileDto("global-subagent", name, readDescription(target),
+                target.toAbsolutePath().toString(), readAllSafe(target), "file", List.of());
     }
 
     @DeleteMapping("/skills")

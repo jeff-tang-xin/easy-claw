@@ -1,5 +1,5 @@
 import {useEffect, useState} from 'react';
-import {del, getJson, postJson} from '../api';
+import {del, getJson, postJson, putJson} from '../api';
 import Modal from '../components/Modal';
 
 interface SkillChild { name: string; description: string; path: string; content: string; }
@@ -28,6 +28,10 @@ export default function SkillsPage() {
   const [skillType, setSkillType] = useState<'file' | 'dir'>('file');
   const [children, setChildren] = useState<{name: string; content: string}[]>([]);
   const [viewing, setViewing] = useState<SkillFile | null>(null);
+  // 编辑态与 viewing 分离：草稿改坏了可以「取消」回到 viewing.content，不必重新拉列表
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState('');
   const [runOut, setRunOut] = useState<Record<string, string>>({});
 
@@ -105,8 +109,58 @@ export default function SkillsPage() {
     }
   };
 
-  const remove = async (path: string) => {
-    if (!confirm('删除该项？')) return;
+  /** 打开编辑：用当前内容做草稿起点。 */
+  const startEdit = () => {
+    if (!viewing) return;
+    setDraft(viewing.content || '');
+    setEditing(true);
+  };
+
+  /**
+   * 保存声明文件。后端写盘后会 rebuildAgent，故保存即生效，无需重启。
+   * 保存成功后同步更新 viewing，避免关掉再打开才看到新内容。
+   */
+  const saveEdit = async () => {
+    if (!viewing) return;
+    setSaving(true);
+    try {
+      await putJson('/api/skills', {
+        path: viewing.path,
+        content: draft,
+        workspaceId: viewing.scope.startsWith('workspace') ? workspaceId : undefined,
+      });
+      setViewing({ ...viewing, content: draft });
+      setEditing(false);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /** 恢复内置默认：后端用 JAR 模板覆盖磁盘文件，会丢弃本地修改，故需二次确认。 */
+  const resetToDefault = async () => {
+    if (!viewing) return;
+    if (!confirm(`确定把「${viewing.name}」恢复为内置默认版本？当前修改将被覆盖且无法撤销。`)) return;
+    setSaving(true);
+    try {
+      const fresh = await postJson<SkillFile>('/api/skills/reset', {
+        name: viewing.name,
+        workspaceId: viewing.scope.startsWith('workspace') ? workspaceId : undefined,
+      });
+      setViewing(fresh);
+      setDraft(fresh.content || '');
+      setEditing(false);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (path: string) => {    if (!confirm('删除该项？')) return;
     try {
       await del(`/api/skills?path=${encodeURIComponent(path)}`);
       await load();
@@ -153,7 +207,8 @@ export default function SkillsPage() {
                 <td className="hint">{s.description}{s.type === 'dir' && s.children && s.children.length > 0 && ` · ${s.children.length} 条子规则`}</td>
                 <td className="hint" style={{ fontSize: 11 }}>{s.scope === 'system' ? '（数据库内置）' : s.path}</td>
                 <td>
-                  <button className="btn small" onClick={() => setViewing(s)}>查看</button>
+                  <button className="btn small"
+                    onClick={() => { setViewing(s); setEditing(false); setDraft(''); }}>查看</button>
                   {s.scope !== 'system' && <button className="btn danger small" onClick={() => remove(s.path)}>删除</button>}
                   {s.scope === 'system' && <span className="hint" style={{fontSize: 11}}>只读</span>}
                 </td>
@@ -281,7 +336,7 @@ export default function SkillsPage() {
       {viewing && (
         <Modal
           title={`${viewing.scope.includes('subagent') ? '🤖' : viewing.type === 'dir' ? '📁' : '📚'} ${viewing.name}`}
-          onClose={() => setViewing(null)}
+          onClose={() => { setViewing(null); setEditing(false); setDraft(''); }}
           width={760}
         >
           <div style={{ marginBottom: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -300,24 +355,73 @@ export default function SkillsPage() {
             </div>
           )}
 
-          {/* 主内容 */}
+          {/* 主内容：system scope 无磁盘文件（打包在 JAR 内），只能看不能改 */}
           <div style={{ marginBottom: viewing.type === 'dir' && viewing.children?.length ? 16 : 0 }}>
-            <div className="hint" style={{ fontSize: 11, marginBottom: 4 }}>
-              {viewing.type === 'dir' ? '📌 主入口 (SKILL.md)' : '📄 内容'}
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+              <div className="hint" style={{ fontSize: 11 }}>
+                {viewing.type === 'dir' ? '📌 主入口 (SKILL.md)' : '📄 内容'}
+              </div>
+              <div style={{ marginLeft: 'auto', display: 'flex', gap: 6 }}>
+                {viewing.scope !== 'system' && !editing && (
+                  <button className="btn small" onClick={startEdit}>✏️ 编辑</button>
+                )}
+                {viewing.scope === 'global-subagent' && !editing && (
+                  <button className="btn small" disabled={saving} onClick={resetToDefault}>
+                    ↩️ 恢复默认
+                  </button>
+                )}
+                {editing && (
+                  <>
+                    <button className="btn small primary" disabled={saving} onClick={saveEdit}>
+                      {saving ? '保存中…' : '💾 保存'}
+                    </button>
+                    <button className="btn small" disabled={saving}
+                      onClick={() => { setEditing(false); setDraft(''); }}>
+                      取消
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
-            <pre style={{
-              background: '#f8f9fa',
-              border: '1px solid #e0e0e0',
-              borderRadius: 6,
-              padding: 14,
-              maxHeight: 320,
-              overflow: 'auto',
-              fontSize: 13,
-              lineHeight: 1.6,
-              whiteSpace: 'pre-wrap',
-              wordBreak: 'break-word',
-              margin: 0,
-            }}>{viewing.content || '（空）'}</pre>
+            {editing && (
+              <div className="hint" style={{ fontSize: 11, marginBottom: 6, color: '#e65100' }}>
+                提示：子 Agent 的迭代步数由 frontmatter 的 <code>steps:</code> 决定；
+                低于全局下限（30）会被自动抬升到 30，高于则按你写的值生效。保存后立即生效。
+              </div>
+            )}
+            {editing ? (
+              <textarea
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                spellCheck={false}
+                style={{
+                  width: '100%',
+                  minHeight: 320,
+                  boxSizing: 'border-box',
+                  border: '1px solid #1565c0',
+                  borderRadius: 6,
+                  padding: 14,
+                  fontSize: 13,
+                  lineHeight: 1.6,
+                  fontFamily: 'Consolas, Monaco, monospace',
+                  resize: 'vertical',
+                }}
+              />
+            ) : (
+              <pre style={{
+                background: '#f8f9fa',
+                border: '1px solid #e0e0e0',
+                borderRadius: 6,
+                padding: 14,
+                maxHeight: 320,
+                overflow: 'auto',
+                fontSize: 13,
+                lineHeight: 1.6,
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+                margin: 0,
+              }}>{viewing.content || '（空）'}</pre>
+            )}
           </div>
 
           {/* 目录 skill 子规则列表 */}
@@ -393,7 +497,7 @@ export default function SkillsPage() {
           )}
 
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
-            <button className="btn" onClick={() => setViewing(null)}>关闭</button>
+            <button className="btn" onClick={() => { setViewing(null); setEditing(false); setDraft(''); }}>关闭</button>
           </div>
         </Modal>
       )}

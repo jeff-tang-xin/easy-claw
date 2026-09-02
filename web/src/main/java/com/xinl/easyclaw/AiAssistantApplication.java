@@ -157,15 +157,21 @@ public class AiAssistantApplication {
     }
 
     /**
+     * JAR 内置的全局子 Agent 模板名单。
+     * <p>被 {@code ManageController} 的「恢复默认」端点共用——名单必须单一来源，
+     * 否则两处漂移会出现「页面能恢复但启动不播种」或反之。
+     */
+    public static final java.util.List<String> BUNDLED_SUBAGENTS = java.util.List.of(
+            "code-expert", "file-expert", "researcher", "coder", "planner", "reviewer");
+
+    /**
      * 将 JAR 内置的 6 个全局子 Agent 模板播种到 ~/.easyClaw/subagents/。
      * 每个模板的 frontmatter 带 {@code role:}，与 DataInitializer 播种的同名角色绑定
      * （角色供人格与模型，声明供工具与步数）。
      * 只复制目标文件不存在的情况（不覆盖用户可能已修改的版本）。
      */
     private static void seedBundledSubagents(Path targetDir) {
-        String[] bundled = {"code-expert", "file-expert", "researcher",
-                "coder", "planner", "reviewer"};
-        for (String name : bundled) {
+        for (String name : BUNDLED_SUBAGENTS) {
             Path target = targetDir.resolve(name + ".md");
             if (Files.exists(target)) continue;
             try (InputStream in = AiAssistantApplication.class.getResourceAsStream("/subagents/" + name + ".md")) {
