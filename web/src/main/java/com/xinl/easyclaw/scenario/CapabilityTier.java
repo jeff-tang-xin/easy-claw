@@ -56,6 +56,16 @@ public enum CapabilityTier {
      */
     private static final List<String> SKILL_TOOLS = List.of("run_skill_script", "run_python");
 
+    /**
+     * 共享黑板工具：只往本次任务的记录本追加/读取结论，不碰业务文件。
+     * <p>
+     * <b>为什么不分档位</b>（NONE 除外）：黑板是并行子 Agent 之间唯一的共享载体。
+     * 若被白名单裁掉，READONLY 档位的 reviewer / researcher 就退回各干各的，
+     * 而系统提示词里仍在要求它们「随手登记结论」——等于诱导模型反复调用不存在的工具。
+     */
+    private static final List<String> BLACKBOARD_TOOLS =
+            List.of("blackboard_append", "blackboard_read");
+
     private static final List<String> SHELL_TOOLS = List.of("execute");
 
     private static final List<String> SUBAGENT_TOOLS = List.of(
@@ -69,6 +79,7 @@ public enum CapabilityTier {
             return names;
         }
         names.addAll(READ_TOOLS);
+        names.addAll(BLACKBOARD_TOOLS);
         if (this == READONLY) {
             return names;
         }

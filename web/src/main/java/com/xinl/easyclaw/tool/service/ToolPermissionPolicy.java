@@ -50,7 +50,13 @@ public final class ToolPermissionPolicy {
             "read_file", "list_files", "list_directory", "glob_files", "grep_files",
             "search_files", "analyze_code", "format_code", "diff_code",
             "web_search", "fetch_webpage",
-            "memory_search", "memory_get"
+            "memory_search", "memory_get",
+            // 共享黑板：只读写「本次任务的协作记录本」，不触碰用户文件、不对外发送。
+            // 必须放行的原因：黑板是并行子 Agent 之间唯一的信息通道，若走默认 ASK，
+            // 每登记一条结论都要弹一次确认，而子 Agent 的确认请求对用户来说毫无上下文，
+            // 实际效果等于把多智能体协作变成不断打断用户 —— 权限收益为零，代价是功能不可用。
+            // blackboard_append 虽是写操作，写入范围仅限本次会话的黑板存储，故与只读同档。
+            "blackboard_read", "blackboard_append"
     );
 
     /**

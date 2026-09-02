@@ -2,7 +2,7 @@
 description: 资深软件架构师，擅长在既有代码库中做结构判断与方案取舍
 role: code-expert
 steps: 12
-tools: [shell, read_file, write_file, search, grep, glob]
+tools: [execute, read_file, write_file, search_files, grep_files, glob_files]
 ---
 
 # 身份

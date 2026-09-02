@@ -31,10 +31,13 @@ public final class ScenarioBinding {
     private static final Logger log = LoggerFactory.getLogger(ScenarioBinding.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /** {@link ScenarioEntity#getMode()} 中代表多智能体编排的取值 */
+    private static final String MODE_TEAM = "team";
+
     /** 无绑定单例：任何 isEmpty() 判断都为真，调用方走原有不限制路径 */
     public static final ScenarioBinding EMPTY =
             new ScenarioBinding(List.of(), List.of(), List.of(),
-                    CapabilityTier.STANDARD, false, List.of());
+                    CapabilityTier.STANDARD, false, List.of(), false);
 
     private final List<String> skills;
     private final List<String> subagents;
@@ -48,16 +51,24 @@ public final class ScenarioBinding {
     private final boolean tierExplicit;
     /** 场景绑定 MCP 服务展开后的工具名（由上层注入，本类不访问数据库） */
     private final List<String> mcpTools;
+    /**
+     * 当前激活场景是否为 team（多智能体编排）模式。
+     * <p>决定子 Agent 的迭代步数是否对齐主 Agent —— team 模式下子 Agent 承担的是
+     * 完整子任务而非一次问答，用默认 30 步会中途被截断。
+     */
+    private final boolean teamMode;
 
     private ScenarioBinding(List<String> skills, List<String> subagents,
                             List<String> mcpServices, CapabilityTier tier,
-                            boolean tierExplicit, List<String> mcpTools) {
+                            boolean tierExplicit, List<String> mcpTools,
+                            boolean teamMode) {
         this.skills = Collections.unmodifiableList(skills);
         this.subagents = Collections.unmodifiableList(subagents);
         this.mcpServices = Collections.unmodifiableList(mcpServices);
         this.tier = tier;
         this.tierExplicit = tierExplicit;
         this.mcpTools = Collections.unmodifiableList(mcpTools);
+        this.teamMode = teamMode;
     }
 
     /**
@@ -77,7 +88,8 @@ public final class ScenarioBinding {
                 parseNameArray(scenario.getMcpServices()),
                 CapabilityTier.parse(rawTier, CapabilityTier.STANDARD),
                 explicit,
-                List.of());
+                List.of(),
+                MODE_TEAM.equals(scenario.getMode()));
     }
 
     /**
@@ -155,9 +167,11 @@ public final class ScenarioBinding {
      * 避免本类依赖持久层。
      */
     public ScenarioBinding withMcpTools(Collection<String> expanded) {
-        List<String> safe = (expanded == null) ? List.of() : List.copyOf(expanded);        return new ScenarioBinding(
+        List<String> safe = (expanded == null) ? List.of() : List.copyOf(expanded);
+        return new ScenarioBinding(
                 new ArrayList<>(skills), new ArrayList<>(subagents),
-                new ArrayList<>(mcpServices), tier, tierExplicit, new ArrayList<>(safe));
+                new ArrayList<>(mcpServices), tier, tierExplicit, new ArrayList<>(safe),
+                teamMode);
     }
 
     /** 是否存在 MCP 硬约束（决定 toolkit 是否走白名单路径） */
@@ -168,6 +182,15 @@ public final class ScenarioBinding {
     /** 档位是否由场景显式配置 */
     public boolean hasExplicitTier() {
         return tierExplicit;
+    }
+
+    /**
+     * 当前激活场景是否为 team（多智能体编排）模式。
+     * <p><b>注意</b>：{@link #EMPTY}（无激活场景）返回 false，因此单智能体场景与
+     * 「场景查询失败降级」都走原有默认步数，不受影响。
+     */
+    public boolean isTeamMode() {
+        return teamMode;
     }
 
     /**
@@ -192,6 +215,7 @@ public final class ScenarioBinding {
     public String toString() {
         return "ScenarioBinding{skills=" + skills + ", subagents=" + subagents
                 + ", mcpServices=" + mcpServices + ", tier=" + tier
-                + (tierExplicit ? "(explicit)" : "(default)") + '}';
+                + (tierExplicit ? "(explicit)" : "(default)")
+                + (teamMode ? ", mode=team" : "") + '}';
     }
 }

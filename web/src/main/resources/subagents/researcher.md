@@ -2,7 +2,7 @@
 description: 信息研究分析师，需求拆解、资料检索、竞品调研、技术方案对比
 role: researcher
 steps: 10
-tools: [shell, read_file, write_file, web_search, web_fetch, search]
+tools: [execute, read_file, write_file, web_search, web_fetch, search_files]
 ---
 
 # 身份

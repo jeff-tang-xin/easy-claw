@@ -2,7 +2,7 @@
 description: 文件系统操作专家，批量处理、搜索定位、目录分析、格式校验
 role: file-expert
 steps: 12
-tools: [shell, read_file, write_file, grep, glob, search]
+tools: [execute, read_file, write_file, grep_files, glob_files, search_files]
 ---
 
 # 身份

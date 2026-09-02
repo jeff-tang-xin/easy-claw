@@ -2,7 +2,7 @@
 description: 代码评审专家：检查产出质量并给出具体改进建议
 role: reviewer
 steps: 15
-tools: [read_file, search, grep, glob]
+tools: [read_file, search_files, grep_files, glob_files]
 ---
 
 # 工作方法

@@ -2,7 +2,7 @@
 description: 代码实现专家：按任务指令完成高质量代码实现与修复
 role: coder
 steps: 15
-tools: [shell, read_file, write_file, edit_file, search, grep, glob]
+tools: [execute, read_file, write_file, edit_file, search_files, grep_files, glob_files]
 ---
 
 # 工作方法
