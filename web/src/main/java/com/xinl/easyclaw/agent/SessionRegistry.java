@@ -52,6 +52,8 @@ public class SessionRegistry {
     private final Map<String, String> sessionWorkspaces = new ConcurrentHashMap<>();
     /** 子 Agent 调度计数（sessionId → subagentName → 次数），用于循环调度防护 */
     private final Map<String, Map<String, Integer>> subagentCallCounts = new ConcurrentHashMap<>();
+    /** 已交付过结果的子 Agent（sessionId → subagentName 集合），用于区分并行批次与串行重派 */
+    private final Map<String, Set<String>> subagentDelivered = new ConcurrentHashMap<>();
     /** 子 Agent 工具结果文本缓冲（"sessionId::source" → 累积文本） */
     private final Map<String, StringBuilder> subagentResultBuffers = new ConcurrentHashMap<>();
     /** 每个会话正在运行的流订阅（用于停止时 dispose 取消） */
@@ -262,11 +264,33 @@ public class SessionRegistry {
     /**
      * 递增子 Agent 调度次数并返回累计值（含本次）。
      * 用于识别「同一子 Agent 被反复调度」的循环编排。
+     * <p>
+     * 注意 {@code subagentName} 必须是子 Agent 身份（声明名 agent_id），不是工具名。
+     * 传工具名会把「并行派发多个不同子 Agent」误计为同一个，从而误伤 team 模式。
      */
     public int recordSubagentCall(String sessionId, String subagentName) {
         return subagentCallCounts
                 .computeIfAbsent(sessionId, k -> new ConcurrentHashMap<>())
                 .merge(subagentName, 1, Integer::sum);
+    }
+
+    /**
+     * 标记某子 Agent 已完成一次交付（其派发工具的结果已返回）。
+     * <p>
+     * 「循环调度」的判据不是次数多，而是<b>拿到结果后仍反复重派同一个子 Agent</b>：
+     * team 模式同一轮并发派 5 个是健康的并行，此时一个结果都还没回；
+     * 而串行地「派→拿结果→再派同一个」才是病态循环。故计数只在已有交付记录时才追责。
+     */
+    public void markSubagentDelivered(String sessionId, String subagentName) {
+        subagentDelivered
+                .computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet())
+                .add(subagentName);
+    }
+
+    /** 该子 Agent 在本会话是否已交付过结果（用于区分并行批次与串行重派） */
+    public boolean hasSubagentDelivered(String sessionId, String subagentName) {
+        Set<String> delivered = subagentDelivered.get(sessionId);
+        return delivered != null && delivered.contains(subagentName);
     }
 
     /** 递增指定工具的连续失败次数并返回累计值（含本次） */
@@ -333,6 +357,7 @@ public class SessionRegistry {
      */
     public void beginTurn(String sessionId) {
         subagentCallCounts.remove(sessionId);
+        subagentDelivered.remove(sessionId);
         toolFailCounts.remove(sessionId);
         resuming.remove(sessionId);
     }
@@ -377,6 +402,7 @@ public class SessionRegistry {
         turnAllowed.remove(sessionId);
         sessionWorkspaces.remove(sessionId);
         subagentCallCounts.remove(sessionId);
+        subagentDelivered.remove(sessionId);
         toolFailCounts.remove(sessionId);
         resuming.remove(sessionId);
         lastTouchedAt.remove(sessionId);

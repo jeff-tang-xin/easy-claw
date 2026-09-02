@@ -2,6 +2,7 @@ package com.xinl.easyclaw.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
@@ -40,6 +41,8 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Agent 服务门面
@@ -1710,6 +1713,53 @@ public class AgentService {
         }
     }
 
+    /**
+     * blackboard_append 成功后推送 blackboard 事件，驱动前端实时展示该条目。
+     * <p>
+     * {@code type}/{@code content} 取自工具入参；而 {@code seq}/{@code author} 只存在于
+     * 工具返回文本（形如 {@code ✅ #12 已登记（risk, by main）}）—— 它们由服务端生成，
+     * 入参里没有，故用轻量正则从返回值反解。解析不到就退化为不带序号/作者，
+     * 而不是整条丢弃：让用户看见内容比看见完整元数据更重要。
+     * <p>
+     * 与 {@code file_changed} 一致，仅在工具执行成功分支调用；失败（❌ 开头）不推，
+     * 避免把「没登记进去」的内容显示成已登记。
+     */
+    private static void emitBlackboardIfAppend(String toolName,
+                                               String argsJson,
+                                               String resultText,
+                                               Consumer<StreamEvent> onEvent) {
+        if (toolName == null || !"blackboard_append".equalsIgnoreCase(toolName.trim())) {
+            return;
+        }
+        // 工具自身把失败以 ❌ 前缀返回（不抛异常），此处必须据此排除
+        if (resultText == null || resultText.startsWith("❌")) {
+            return;
+        }
+        try {
+            JsonNode node = mapper.readTree(argsJson);
+            String content = node.path("content").asText("");
+            if (content.isBlank()) {
+                return;
+            }
+            String type = node.path("type").asText("note");
+
+            ObjectNode payload = mapper.createObjectNode();
+            payload.put("type", type);
+            payload.put("content", content);
+            Matcher seq = Pattern.compile("#(\\d+)").matcher(resultText);
+            if (seq.find()) {
+                payload.put("seq", Integer.parseInt(seq.group(1)));
+            }
+            Matcher author = Pattern.compile("by\\s+([^）)]+)").matcher(resultText);
+            if (author.find()) {
+                payload.put("author", author.group(1).trim());
+            }
+            onEvent.accept(StreamEvent.blackboard(mapper.writeValueAsString(payload)));
+        } catch (Exception e) {
+            log.debug("blackboard 事件跳过（工具入参非合法 JSON）: {}", e.getMessage());
+        }
+    }
+
     private static String inferToolResultState(String state, String resultText) {
         if (state != null && !"SUCCESS".equalsIgnoreCase(state) && !"RUNNING".equalsIgnoreCase(state)) {
             return state;
@@ -1838,24 +1888,10 @@ public class AgentService {
                     trace.toolCalled = true;
                     trace.calls.put(trace.resolveKeyForStart(callId), new ToolCallSlot(name));
                     if (name != null && SUBAGENT_DISPATCH_TOOLS.contains(name.toLowerCase())) {
-                        String subName = extractSubagentName(name);
-                        onEvent.accept(StreamEvent.subagent(subName));
-                        // 循环调度防护：同一会话内同一子 Agent 超过配置次数 → 打断
-                        int maxSameSubagent = agentScopeProperties.getAgent().getMaxSameSubagentCalls();
-                        int count = sessions.recordSubagentCall(sessionId, subName);
-                        if (maxSameSubagent > 0 && count > maxSameSubagent) {
-                            log.warn("检测到子 Agent 循环调度: session={}, subagent={}, count={}", sessionId, subName, count);
-                            try {
-                                agent.interrupt();
-                            } catch (Exception ignored) {
-                                // 打断失败不影响后续
-                            }
-                            onEvent.accept(StreamEvent.context(
-                                    "{\"type\":\"loop_warning\",\"subagent\":\"" + subName
-                                            + "\",\"count\":" + count
-                                            + ",\"message\":\"检测到子 Agent[" + subName + "] 循环调度（" + count
-                                            + " 次），已自动停止。请在后续指令中明确要求不要重复调度同一子 Agent。\"}"));
-                        }
+                        // 此刻工具参数尚在 TOOL_CALL_DELTA 流式拼接中，拿不到 agent_id →
+                        // 循环防护无法在此判定，已下移到 TOOL_CALL_END（参数已完整）。
+                        // 这里只负责渲染「子 Agent 执行」气泡。
+                        onEvent.accept(StreamEvent.subagent(extractSubagentName(name)));
                     } else {
                         onEvent.accept(StreamEvent.tool(name, callId));
                     }
@@ -1874,6 +1910,11 @@ public class AgentService {
                 ToolCallSlot st = trace.get(callId);
                 String args = st == null ? "" : st.args.toString().trim();
                 onEvent.accept(StreamEvent.toolArgs(args.isEmpty() ? "(无参数)" : args, callId));
+                // 循环调度防护：参数已完整，此处才能取到真实的子 Agent 身份
+                if (st != null && st.toolName != null
+                        && SUBAGENT_DISPATCH_TOOLS.contains(st.toolName.toLowerCase())) {
+                    guardSubagentLoop(sessionId, extractDispatchTarget(args), onEvent, agent);
+                }
             }
             case TOOL_RESULT_START -> {
                 if (event instanceof ToolResultStartEvent e) {
@@ -1899,6 +1940,12 @@ public class AgentService {
                 trace.calls.remove(key);
                 String toolName = st != null ? st.toolName : "";
                 String result = st == null ? "" : st.result.toString().trim();
+                // 该子 Agent 已交付结果 → 之后再派同一个才可能是「串行重派」
+                if (st != null && toolName != null
+                        && SUBAGENT_DISPATCH_TOOLS.contains(toolName.toLowerCase())) {
+                    sessions.markSubagentDelivered(sessionId,
+                            extractDispatchTarget(st.args.toString()));
+                }
                 String state = event instanceof ToolResultEndEvent e
                         ? inferToolResultState(
                                 e.getState() != null ? e.getState().name() : null,
@@ -1924,6 +1971,8 @@ public class AgentService {
                     sessions.resetToolFailure(sessionId, toolName);
                     // 写类工具成功 → 通知前端刷新文件树/已打开预览（实时刷新，免手动点「刷新」）
                     emitFileChangedIfWriteTool(toolName, st == null ? "" : st.args.toString(), onEvent);
+                    // 黑板登记成功 → 推送条目给 UI 实时展示（并行子 Agent 的结论对用户可见）
+                    emitBlackboardIfAppend(toolName, st == null ? "" : st.args.toString(), result, onEvent);
                 }
                 onEvent.accept(StreamEvent.toolEnd(toolName, callId));
             }
@@ -1986,6 +2035,78 @@ public class AgentService {
                 // 仍继承同一 key → 同一轮协作的主/子 Agent 共用一块黑板。
                 .put(BlackboardKeys.CTX_KEY, sessionId)
                 .build();
+    }
+
+    /**
+     * 从派发工具的参数 JSON 中取出「被调度对象」的身份，用于循环防护计数。
+     * <p>
+     * agent_spawn 用 {@code agent_id}（声明名），agent_send 用 {@code agent_key} 或
+     * {@code label}（已存在的实例）。取不到时返回占位串——此时退化为「按工具粒度计数」，
+     * 与旧行为一致，不会漏防护，但可能误伤并行；故取不到会打 debug 日志便于排查。
+     * <p>
+     * 用轻量正则而非完整 JSON 解析：这里只需一个标量字段，且参数可能因流式拼接不完整，
+     * 严格解析失败反而会让防护整体失效。
+     */
+    private String extractDispatchTarget(String argsJson) {
+        if (argsJson == null || argsJson.isBlank()) {
+            return "(未知)";
+        }
+        for (String field : new String[]{"agent_id", "agent_key", "label"}) {
+            Matcher m = Pattern.compile("\"" + field + "\"\\s*:\\s*\"([^\"]+)\"").matcher(argsJson);
+            if (m.find()) {
+                String v = m.group(1).trim();
+                if (!v.isEmpty()) {
+                    return v;
+                }
+            }
+        }
+        log.debug("派发工具参数中未找到子 Agent 身份字段，循环防护退化为工具粒度: args={}",
+                argsJson.length() > 200 ? argsJson.substring(0, 200) + "…" : argsJson);
+        return "(未知)";
+    }
+
+    /**
+     * 子 Agent 循环调度防护。
+     * <p>
+     * 判据是「已交付过结果后仍反复重派同一个子 Agent」，而非单纯次数多：
+     * team 模式同一轮并发派多个子 Agent 时一个结果都还没回，属健康并行，不应计数。
+     * 只有 {@link SessionRegistry#hasSubagentDelivered} 为真（说明上一次已拿到结果）
+     * 才追责，从而把「并行批次」与「串行死循环」区分开。
+     * <p>
+     * 触发后必须走 {@code agent.interrupt()}：{@link StreamEvent#context} 只是推给前端
+     * 渲染的单向通道，<b>模型读不到</b>，仅注入告警等于没有防护。
+     * 注意 interrupt 只中断编排者的 ReAct 循环，已 spawn 的子 Agent 仍在后台运行
+     * （其结果将无人接收），这是当前实现的已知缺口，见 TODO。
+     */
+    private void guardSubagentLoop(String sessionId, String subName,
+                                   Consumer<StreamEvent> onEvent, HarnessAgent agent) {
+        int maxSameSubagent = agentScopeProperties.getAgent().getMaxSameSubagentCalls();
+        if (maxSameSubagent <= 0) {
+            return;
+        }
+        if (!sessions.hasSubagentDelivered(sessionId, subName)) {
+            // 尚无交付记录 → 本次属同一批并行派发，不计数
+            return;
+        }
+        int count = sessions.recordSubagentCall(sessionId, subName);
+        if (count > maxSameSubagent) {
+            log.warn("检测到子 Agent 循环调度: session={}, subagent={}, count={}",
+                    sessionId, subName, count);
+            // TODO 已 spawn 的子 Agent 任务此处未被取消，仍会在后台跑完（结果无人接收）。
+            //  彻底止损需拿到本会话的 spawned task 句柄并逐个 task_cancel，
+            //  当前 AgentService 无该句柄通道，需后续接入。
+            try {
+                agent.interrupt();
+            } catch (Exception ignored) {
+                // 打断失败不影响后续
+            }
+            onEvent.accept(StreamEvent.context(
+                    "{\"type\":\"loop_warning\",\"subagent\":\"" + subName
+                            + "\",\"count\":" + count
+                            + ",\"message\":\"检测到子 Agent[" + subName + "] 循环调度（" + count
+                            + " 次，每次均在拿到上一次结果后重派），已自动停止。"
+                            + "请在后续指令中明确要求不要重复调度同一子 Agent。\"}"));
+        }
     }
 
     private String extractSubagentName(String raw) {
