@@ -11,7 +11,7 @@
 //   · activeTools / pending 是瞬时 UI 状态，重连后清空
 import {useEffect, useReducer} from 'react';
 
-export type SegmentType = 'text' | 'reasoning' | 'tool' | 'subagent' | 'note';
+export type SegmentType = 'text' | 'reasoning' | 'tool' | 'subagent' | 'note' | 'blackboard';
 
 /** 子 Agent 内部的一步：正文 / 思考 / 工具调用，按到达顺序线性排列 */
 export interface SubStep {
@@ -55,6 +55,12 @@ export interface Segment {
   endedAt?: number;
   /** 子 Agent 内部步骤（type==='subagent'），按时间顺序 */
   steps?: SubStep[];
+  /** 黑板条目序号（type==='blackboard'）。后端从工具返回值反解，可能缺失 */
+  bbSeq?: number;
+  /** 黑板条目类型：note / finding / risk / conclusion */
+  bbType?: string;
+  /** 黑板登记者：main 或 sub-xxxxxx（由服务端从运行时上下文解析，不可伪造） */
+  bbAuthor?: string;
 }
 
 export interface ChatMessage {

@@ -24,6 +24,8 @@ public class BoxMessage {
         TOOL_RESULT,
         /** 子代理活动（可折叠） */
         SUBAGENT,
+        /** 共享记录本条目（team 模式并行子 Agent 登记的结论） */
+        BLACKBOARD,
         /** 权限确认请求 */
         CONFIRM,
         /** 系统提示（错误/上下文压缩等） */

@@ -110,6 +110,12 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 }
             }
             case "subagent_end" -> flushSubagent();
+            // 记录本条目：与工具/子 Agent 步骤并列，属于回合内的实质产出，必须入转录，
+            // 否则刷新页面后这些结论就丢了。先 flushText 保证它落在正文的正确时序位置。
+            case "blackboard" -> {
+                flushText();
+                appendBlackboard(evt.content());
+            }
             case "confirm" -> {
                 // 人工确认暂停：原流将被释放，先把未完成工具调用固化（结果由恢复流补写）
                 flushText();
@@ -182,6 +188,22 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
             SessionTranscriptStore.append(sessionDir, bm);
             textBuf.setLength(0);
         }
+    }
+
+    /**
+     * 记录本条目落盘。
+     * <p>
+     * 直接把 emit 时的 payload JSON 原样存进 {@code content}，不给 BoxMessage 新增字段：
+     * 该结构只有本类型使用，加三个专用字段会污染所有其他消息类型的模型。
+     * 回放端按同一套 JSON 解析，与 WS 实时通道共用一条渲染路径。
+     */
+    private void appendBlackboard(String payloadJson) {
+        if (payloadJson == null || payloadJson.isBlank()) {
+            return;
+        }
+        BoxMessage bm = new BoxMessage(BoxMessage.Type.BLACKBOARD, ++seq);
+        bm.setContent(payloadJson);
+        SessionTranscriptStore.append(sessionDir, bm);
     }
 
     private void flushTool() {

@@ -376,6 +376,29 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       }
       break;
     }
+    case 'blackboard': {
+      // 每条登记都是独立的不可变记录 → 追加新 segment，不合并进已有的
+      let payload: { seq?: number; type?: string; author?: string; content?: string } = {};
+      try {
+        payload = JSON.parse(evt.content);
+      } catch {
+        // 后端保证是 JSON；解析失败时降级为纯文本展示，不能让整条消息渲染中断
+        payload = { content: evt.content };
+      }
+      const seg: Segment = {
+        type: 'blackboard',
+        content: payload.content || '',
+        bbSeq: payload.seq,
+        bbType: payload.type || 'note',
+        bbAuthor: payload.author || 'unknown',
+      };
+      if (last && last.role === 'ai') {
+        next[lastIdx] = { ...last, segments: [...last.segments, seg] };
+      } else {
+        next.push({ role: 'ai', segments: [seg] });
+      }
+      break;
+    }
     case 'subagent_text': {
       const sep = evt.content.indexOf('\u0001');
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
@@ -475,6 +498,30 @@ function FoldBlock({ title, children, className, loading, defaultOpen }: {
       </summary>
       <div className="fold-body md-content" dangerouslySetInnerHTML={{ __html: md(children || '') }} />
     </details>
+  );
+}
+
+// 共享记录本条目卡片：让并行子 Agent 登记的结论在对话流中即时可见。
+// 不可折叠、不带展开态 —— 黑板条目是简短结论，藏起来就失去「一眼看到同伴进展」的意义。
+const BB_META: Record<string, { icon: string; label: string }> = {
+  finding: { icon: '🔍', label: '发现' },
+  risk: { icon: '⚠️', label: '风险' },
+  conclusion: { icon: '✅', label: '结论' },
+  note: { icon: '📝', label: '记录' },
+};
+
+function BlackboardCard({ seg }: { seg: Segment }) {
+  const meta = BB_META[seg.bbType || 'note'] || BB_META.note;
+  return (
+    <div className={`blackboard-card bb-${seg.bbType || 'note'}`}>
+      <div className="bb-head">
+        <span className="bb-icon">{meta.icon}</span>
+        <span className="bb-label">记录本 · {meta.label}</span>
+        {seg.bbSeq !== undefined && <span className="bb-seq">#{seg.bbSeq}</span>}
+        <span className="bb-author">{seg.bbAuthor}</span>
+      </div>
+      <div className="bb-body md-content" dangerouslySetInnerHTML={{ __html: md(seg.content || '') }} />
+    </div>
   );
 }
 
@@ -755,6 +802,8 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
                 return <ToolCallCard key={i} seg={seg} />;
               case 'note':
                 return <div key={i} className="system-note">⚠️ {seg.content}</div>;
+              case 'blackboard':
+                return <BlackboardCard key={i} seg={seg} />;
               default:
                 return null;
             }
@@ -771,7 +820,8 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
     const a = prev.msg.segments[i], b = next.msg.segments[i];
     if (a.type !== b.type || a.content !== b.content || a.name !== b.name
         || a.args !== b.args || a.result !== b.result || a.running !== b.running
-        || a.endedAt !== b.endedAt) return false;
+        || a.endedAt !== b.endedAt
+        || a.bbSeq !== b.bbSeq || a.bbType !== b.bbType || a.bbAuthor !== b.bbAuthor) return false;
     // 子 Agent 内部步骤是流式追加的，须逐步比较否则时间线不刷新
     const as = a.steps || [];
     const bs = b.steps || [];
@@ -1063,6 +1113,11 @@ export default function ChatPage() {
     } else if (evt.type === 'file_changed') {
       // 工作区文件被写类工具改动：不进消息流，只触发文件面板刷新（副作用，非渲染数据）
       onFileChangedRef.current(evt.content);
+    } else if (evt.type === 'blackboard') {
+      // 共享记录本新增条目：进消息流按时序渲染成卡片，让并行子 Agent 的结论对用户可见。
+      // 走统一批量队列而非立即 setState —— 与 text/tool 共用 32ms 合批，保证时序不乱。
+      pendingEvtsRef.current.push(evt);
+      scheduleFlush();
     } else if (evt.type === 'text') {
       // text 增量走统一批量渲染（32ms 节流，比打字机快且不丢帧）
       pendingEvtsRef.current.push(evt);
@@ -1277,7 +1332,7 @@ export default function ChatPage() {
         if (b.type === 'USER') {
           cur = null;
           msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
-        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT') {
+        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT' || b.type === 'BLACKBOARD') {
           if (!cur) {
             cur = { role: 'ai', segments: [] };
             msgs.push(cur);
@@ -1294,6 +1349,21 @@ export default function ChatPage() {
             } else {
               cur.segments.push({ type: 'tool', name: b.toolName, args: '', result: b.toolResult || '', running: false });
             }
+          } else if (b.type === 'BLACKBOARD') {
+            // content 存的是 emit 时的 payload JSON，与实时通道同构
+            let p: { seq?: number; type?: string; author?: string; content?: string } = {};
+            try {
+              p = JSON.parse(b.content || '{}');
+            } catch {
+              p = { content: b.content };
+            }
+            cur.segments.push({
+              type: 'blackboard',
+              content: p.content || '',
+              bbSeq: p.seq,
+              bbType: p.type || 'note',
+              bbAuthor: p.author || 'unknown',
+            });
           } else {
             // 历史落盘的 subagent 只有聚合正文（TranscriptRecorder 已把步骤降级为纯文本，
             // 工具入参根本没落盘），故 steps 只能给空数组：由 TimelineNode 退化成单个正文步。

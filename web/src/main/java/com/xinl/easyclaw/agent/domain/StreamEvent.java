@@ -13,6 +13,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *   <li>file_changed - 工作区文件被写类工具修改（content 为相对路径）</li>
  *   <li>subagent - 子 Agent 开始工作（content 为子 Agent 名称）</li>
  *   <li>context - 上下文状态（content 为 JSON：消息数/token/是否已压缩）</li>
+ *   <li>blackboard - 共享记录本新增条目（content 为 JSON：seq/type/author/content）</li>
  *   <li>end - 回复完成</li>
  *   <li>stopped - 用户主动停止（区别于 end：不触发前端队列自动发送）</li>
  *   <li>error - 执行出错（content 为错误信息）</li>
@@ -113,6 +114,16 @@ public record StreamEvent(
 
     public static StreamEvent subagent(String agentName) {
         return new StreamEvent("subagent", agentName);
+    }
+
+    /**
+     * 共享记录本新增条目：让并行子 Agent 登记的结论对用户实时可见。
+     * <p>
+     * 与 {@code file_changed} 只发路径不同，这里直接携带条目正文：黑板条目是短文本
+     * （工具侧已截断），且用户需要的就是内容本身，再让前端回查一次文件纯属多余往返。
+     */
+    public static StreamEvent blackboard(String json) {
+        return new StreamEvent("blackboard", json);
     }
 
     /** 子 Agent 输出增量（content 编码：agentName + \u0001 + delta） */
