@@ -86,6 +86,15 @@ public abstract class AgentEvent {
      */
     public static final String METADATA_PARENT_SESSION_ID = "parentSessionId";
 
+    /**
+     * Well-known {@link #metadata} key identifying the concrete subagent <em>instance</em> that
+     * emitted this event. Distinct from {@link #source}, which only encodes
+     * {@code parentSession/agentId} and is therefore identical for several same-named subagents
+     * spawned in parallel within one session; consumers need this key to keep their per-instance
+     * state (buffers, cards, counters) apart.
+     */
+    public static final String METADATA_AGENT_INSTANCE_ID = "agentInstanceId";
+
     private final String id;
     private final String createdAt;
     private String source;

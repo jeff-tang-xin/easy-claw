@@ -1,4 +1,4 @@
-import {memo, useCallback, useEffect, useRef, useState} from 'react';
+import {memo, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
 import {marked} from 'marked';
@@ -13,6 +13,7 @@ import {
     useChatSession
 } from '../chatStore';
 import {getChatSocket, subscribeChatSocket} from '../chatSocket';
+import {parseNames} from '../scenarioBinding';
 
 // ============ 类型 ============
 interface Workspace { workspaceId: string; name: string; agentName?: string; path: string; description: string; }
@@ -535,7 +536,10 @@ function subagentStateOf(seg: Segment): 'running' | 'error' | 'done' {
   const steps = seg.steps || [];
   // 有工具调用但无正文，仍算完成（有些子 Agent 只做副作用）；完全无步骤才是异常
   if (!c.trim() && steps.length === 0) return 'error';
-  if (/^\s*(?:❌|⚠️)|迭代次数已达上限|执行失败|EXCEED_MAX_ITERS/.test(c)) return 'error';
+  // 只认后端固定文案，不做行首 ❌/⚠️ 锚定：评审/清单类子 Agent 正文里经常出现「⚠️ 注意…」
+  // 这类正常内容，按符号判失败会把成功的调用误标红。
+  // 后端文案：子 Agent「已达迭代上限（x/y 步）」/ 主 Agent「已达到迭代上限（x/y 步）」，故「到」可选。
+  if (/已达(?:到)?迭代上限|执行失败|EXCEED_MAX_ITERS/.test(c)) return 'error';
   return 'done';
 }
 
@@ -590,10 +594,35 @@ function prettyArgs(raw: string): string {
 }
 
 /**
+ * 逐 step 比较两个 steps 列表，供 TimelineNode / SubagentGroup 的 memo 比较器复用。
+ * 必须逐项比而不能只比尾项：appendSubStep 的 toolArgs / toolResult 分支是「向后扫描找最近一个
+ * 仍在 running 的 tool step」，子 Agent 层没有 toolCallId 可用，一次回复里连续起两个工具时
+ * 回填命中的往往是非尾项，只比尾项会漏刷新。args 也必须比 —— 否则工具入参在流式过程中不刷新，
+ * 一直等到 result 到达才整体跳出来。steps 量级是十位数，O(steps) 开销可忽略。
+ */
+function sameSteps(as: SubStep[], bs: SubStep[]): boolean {
+  if (as.length !== bs.length) return false;
+  for (let i = 0; i < as.length; i++) {
+    const x = as[i], y = bs[i];
+    if (x.kind !== y.kind || x.name !== y.name || x.state !== y.state
+        || x.running !== y.running || x.result !== y.result) return false;
+    if ((x.content || '').length !== (y.content || '').length) return false;
+    if ((x.args || '').length !== (y.args || '').length) return false;
+  }
+  return true;
+}
+
+/** 段自身的可见字段是否相同（steps 另由 sameSteps 判定） */
+function sameSegMeta(a: Segment, b: Segment): boolean {
+  return a.running === b.running && a.content === b.content
+    && a.name === b.name && a.endedAt === b.endedAt;
+}
+
+/**
  * 时间线单节点：一次子 Agent 调用。
  * 默认展开运行中的节点、折叠已完成的，避免多个子 Agent 的输出堆成一片。
  */
-function TimelineNode({ seg, index }: { seg: Segment; index: number }) {
+const TimelineNode = memo(function TimelineNode({ seg, index }: { seg: Segment; index: number }) {
   const state = subagentStateOf(seg);
   // 运行中默认展开（要能看到实时输出）；结束后默认收起，由用户按需展开
   const [open, setOpen] = useState(state === 'running');
@@ -627,18 +656,25 @@ function TimelineNode({ seg, index }: { seg: Segment; index: number }) {
         </span>
         <span className="sa-node-meta">{meta}</span>
       </div>
-      <div className={`sa-node-body ${open ? '' : 'collapsed'}`}>
-        {steps.length > 0
-          ? steps.map((s, i) => <SubStepView key={i} step={s} />)
-          : <span style={{ opacity: 0.6 }}>（该子 Agent 未返回内容）</span>}
-        {state === 'running' && <span className="sa-typing" />}
-      </div>
+      {/* 折叠时真卸载：避免已完成节点的 steps 在每帧流式重渲染中继续参与 md() 解析 */}
+      {open && (
+        <div className="sa-node-body">
+          {steps.length > 0
+            ? steps.map((s, i) => <SubStepView key={i} step={s} />)
+            : <span style={{ opacity: 0.6 }}>（该子 Agent 未返回内容）</span>}
+          {state === 'running' && <span className="sa-typing" />}
+        </div>
+      )}
     </div>
   );
-}
+}, (prev, next) => {
+  if (prev.index !== next.index) return false;
+  if (!sameSegMeta(prev.seg, next.seg)) return false;
+  return sameSteps(prev.seg.steps || [], next.seg.steps || []);
+});
 
 /** 子 Agent 分组：把连续的多次子 Agent 调用收进一条时间线 */
-function SubagentGroup({ segs }: { segs: Segment[] }) {
+const SubagentGroup = memo(function SubagentGroup({ segs }: { segs: Segment[] }) {
   const [open, setOpen] = useState(true);
   const running = segs.some((s) => s.running);
   const doneCount = segs.filter((s) => !s.running).length;
@@ -656,7 +692,15 @@ function SubagentGroup({ segs }: { segs: Segment[] }) {
       )}
     </div>
   );
-}
+}, (prev, next) => {
+  const as = prev.segs, bs = next.segs;
+  if (as.length !== bs.length) return false;
+  for (let i = 0; i < as.length; i++) {
+    if (!sameSegMeta(as[i], bs[i])) return false;
+    if (!sameSteps(as[i].steps || [], bs[i].steps || [])) return false;
+  }
+  return true;
+});
 
 /** 把相邻的 subagent 段合并成组，其余段原样保留，供渲染层按块输出 */
 type RenderBlock = { kind: 'seg'; seg: Segment; i: number } | { kind: 'sa'; segs: Segment[]; i: number };
@@ -682,13 +726,16 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
   const label = agentLabel || 'AI';
   // 末段正文位置：仅此处显示打字光标
   const lastTextIdx = msg.segments.reduce((acc, s, idx) => (s.type === 'text' ? idx : acc), -1);
+  // 分组只依赖 segments 引用；流式期间 AiMessage 每帧重渲染，缓存后子组件 props 才能保持稳定引用，
+  // 否则 SubagentGroup 的 memo 每次都会拿到新的 segs 数组（引用变化不影响其自定义比较器，但省一次分组开销）。
+  const blocks = useMemo(() => groupSegments(msg.segments), [msg.segments]);
   return (
     <div className="chat-block ai">
       <div className="chat-meta">🤖 {label}</div>
       <div className="chat-row">
         <div className="chat-avatar">🤖</div>
         <div className="chat-bubble">
-          {groupSegments(msg.segments).map((blk) => {
+          {blocks.map((blk) => {
             if (blk.kind === 'sa') {
               return <SubagentGroup key={`sa-${blk.i}`} segs={blk.segs} />;
             }
@@ -836,8 +883,39 @@ export default function ChatPage() {
   const [resizing, setResizing] = useState(false);
   const [skillName, setSkillName] = useState<string>('');
   const [availableSkills, setAvailableSkills] = useState<{ name: string; description: string; scope: string }[]>([]);
+  // /api/skills 是否已给出结论（成功或失败都算）。用来区分"候选集未知"与"已知为空"，
+  // 只有已知时才允许清理 skillName —— 否则请求未回的窗口期会静默抹掉用户的选择。
+  const [skillsLoaded, setSkillsLoaded] = useState(false);
   // 当前工作区激活的场景（场景编排页激活后在此显示）
-  const [scenario, setScenario] = useState<{ icon: string; displayName: string; name: string; mode: string } | null>(null);
+  // skills：场景绑定的 skill 白名单原文（JSON 数组或逗号分隔），用于收窄下方 Skill 下拉候选
+  const [scenario, setScenario] = useState<{ icon: string; displayName: string; name: string; mode: string; skills?: string | null } | null>(null);
+  /**
+   * Skill 下拉的可见候选：用激活场景绑定的 skill 白名单收窄 availableSkills（全量）。
+   * <p>场景绑定是软约束/推荐，只影响 UI 候选，不做发送前拦截，后端语义不变。
+   * <ul>
+   *   <li>白名单为空（未绑定）→ 全量；</li>
+   *   <li>有交集 → 按白名单顺序取交集（顺序体现场景作者的推荐次序）；</li>
+   *   <li>交集为空（白名单里的 skill 已被删/改名）→ 回退全量。否则下拉整体消失，
+   *       用户既选不了 skill 也看不出原因。</li>
+   * </ul>
+   */
+  const skillCandidates = useMemo(() => {
+    const whitelist = parseNames(scenario?.skills);
+    if (whitelist.length === 0) return { list: availableSkills, narrowed: false, stale: false };
+    // 同名 skill 可能同时存在于 global / workspace 两级，两条都保留（option key 含 scope，不冲突）
+    const picked = whitelist.flatMap((n) => availableSkills.filter((s) => s.name === n));
+    if (picked.length === 0) return { list: availableSkills, narrowed: false, stale: true };
+    return { list: picked, narrowed: true, stale: false };
+  }, [availableSkills, scenario?.skills]);
+  const visibleSkills = skillCandidates.list;
+  // 已选 skill 被收窄掉（切换场景 / skill 被删）时静默清空，避免提交一个下拉里看不见的值
+  useEffect(() => {
+    // 候选集未加载完时不做清理判断：availableSkills 为空既可能是"还没回"，
+    // 也可能是"确实没有"，后者必须清（下拉已隐藏，用户改不了残值），前者绝不能清。
+    // 用 availableSkills.length 无法区分这两种情况，只能靠显式的加载标志。
+    if (!skillsLoaded) return;
+    if (skillName && !visibleSkills.some((s) => s.name === skillName)) setSkillName('');
+  }, [skillsLoaded, visibleSkills, skillName]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const stickRef = useRef(true);
@@ -1138,6 +1216,10 @@ export default function ChatPage() {
   // 加载工作区 + 会话
   useEffect(() => {
     if (!workspaceId) return;
+    // 切换工作区：候选集重新变为"未知"，并清掉上一个工作区选中的 skill
+    // （skill 是按 workspaceId 拉的，A 工作区的选择不该串到 B 工作区）。
+    setSkillsLoaded(false);
+    setSkillName('');
     (async () => {
       try {
         const list = await getJson<Workspace[]>('/api/workspaces');
@@ -1177,7 +1259,7 @@ export default function ChatPage() {
         loadFiles(workspaceId, '');
         loadSkills(workspaceId);
         // 激活场景徽标（未激活返回 null）
-        getJson<{ icon: string; displayName: string; name: string; mode: string } | null>(
+        getJson<{ icon: string; displayName: string; name: string; mode: string; skills?: string | null } | null>(
           `/api/scenarios/active/${workspaceId}`,
         ).then(setScenario).catch(() => setScenario(null));
       } catch (e) {
@@ -1213,9 +1295,32 @@ export default function ChatPage() {
               cur.segments.push({ type: 'tool', name: b.toolName, args: '', result: b.toolResult || '', running: false });
             }
           } else {
-            cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content });
+            // 历史落盘的 subagent 只有聚合正文（TranscriptRecorder 已把步骤降级为纯文本，
+            // 工具入参根本没落盘），故 steps 只能给空数组：由 TimelineNode 退化成单个正文步。
+            // 显式给出 running/steps 以对齐 Segment 类型契约，避免 undefined 让节点误判为运行中。
+            cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content, running: false, steps: [] });
           }
         }
+      }
+      // 重连触发的 loadHistory 可能与正在进行的流式输出撞车：历史里的 subagent 是塌成纯文本的，
+      // 一旦覆盖就会把正在生长的时间线（steps）整块抹平。因此运行中且已有 running 段时放弃覆盖，
+      // 后续 WS 增量会继续追加到现有段上。仅同步运行状态。
+      // 取「最后一条 ai 消息」而非最后一条消息：运行期间队列可能已在尾部追加了新的 user 消息，
+      // 若只看尾项就会漏判、时间线仍被压平。也不能扫全部消息 —— 历史里残留的 stale running 段
+      // 会永久阻塞历史刷新。
+      const curSession = getChatSession(chatKey(wid, sid));
+      let lastAi: (typeof curSession.messages)[number] | null = null;
+      for (let i = curSession.messages.length - 1; i >= 0; i--) {
+        if (curSession.messages[i].role === 'ai') { lastAi = curSession.messages[i]; break; }
+      }
+      const hasRunningSeg = !!lastAi && lastAi.segments.some((s) => s.running);
+      if (curSession.running && hasRunningSeg) {
+        // tsconfig 未引入 vite/client 类型，import.meta.env 无声明，这里做结构化收窄而非改配置
+        if ((import.meta as { env?: { DEV?: boolean } }).env?.DEV) {
+          console.log('[history] 会话运行中且存在 running 段，跳过历史覆盖以保留时间线结构');
+        }
+        syncSessionStatus(wid, sid);
+        return;
       }
       updateChatSession(chatKey(wid, sid), (c) => ({ ...c, messages: msgs }));
       // 历史加载完后同步运行状态（HTTP 接口兜底，WS status 事件可能稍后到达）
@@ -1279,10 +1384,16 @@ export default function ChatPage() {
     try {
       const all = await getJson<{ scope: string; name: string; description: string }[]>(
         `/api/skills?workspaceId=${encodeURIComponent(wid)}`);
-      // 包含 system/global/workspace 三级
-      setAvailableSkills(all.filter(s => s.scope === 'system' || s.scope === 'global' || s.scope === 'workspace'));
+      // 排除 *-subagent（global-subagent / workspace-subagent）—— 那是子 Agent 声明文件，
+      // 与 skill 同接口返回、靠 scope 区分，混进来会让用户把子 Agent 当 skill 加载。
+      // 这里保留全量 skill，场景白名单的收窄在 visibleSkills 里做（避免两个并发请求的时序竞态）。
+      setAvailableSkills(all.filter(s => !String(s.scope || '').endsWith('-subagent')));
     } catch {
       setAvailableSkills([]);
+    } finally {
+      // 失败也置 true：拿不到列表等同于"已知为空"，下拉会隐藏，
+      // 此时必须允许清理 skillName，否则会提交一个用户看不见也改不了的残值。
+      setSkillsLoaded(true);
     }
   };
 
@@ -2002,15 +2113,21 @@ export default function ChatPage() {
           </div>
         )}
         <div className="input-row">
-          {availableSkills.length > 0 && (
+          {visibleSkills.length > 0 && (
             <select
               className="skill-select"
               value={skillName}
               onChange={(e) => setSkillName(e.target.value)}
-              title="加载 Skill 作为本轮对话的操作指南"
+              title={
+                skillCandidates.narrowed
+                  ? '加载 Skill 作为本轮对话的操作指南（候选已按当前场景收窄）'
+                  : skillCandidates.stale
+                    ? '加载 Skill 作为本轮对话的操作指南（当前场景绑定的 Skill 均不存在，已回退为全部候选）'
+                    : '加载 Skill 作为本轮对话的操作指南'
+              }
             >
               <option value="">— 不指定 —</option>
-              {availableSkills.map((s) => (
+              {visibleSkills.map((s) => (
                 <option key={s.scope + ':' + s.name} value={s.name}>
                   {s.name}{s.description ? ` — ${s.description}` : ''}
                 </option>

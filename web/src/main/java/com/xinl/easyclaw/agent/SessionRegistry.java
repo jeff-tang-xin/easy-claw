@@ -383,7 +383,9 @@ public class SessionRegistry {
         disarmConfirmTimeout(sessionId);
         // 防止 RetryScope 的 abort 标记随已驱逐会话无界堆积
         RetryScope.clear(sessionId);
-        // 子 Agent 结果缓冲以 "sessionId::source" 为 key，按前缀清理本会话的残留条目
+        // 子 Agent 结果缓冲以 "sessionId::instanceKey::toolCallId" 为 key，按前缀清理本会话的
+        // 残留条目。key 含 toolCallId 维度后，若某次 ToolResultEnd 事件丢失，该条目不会再被
+        // 后续调用覆盖清理，只能靠这里的前缀兜底回收 —— 故此前缀清理不可删。
         String prefix = sessionId + "::";
         subagentResultBuffers.keySet().removeIf(k -> k.startsWith(prefix));
         log.debug("已释放会话内存状态: sessionId={}", sessionId);

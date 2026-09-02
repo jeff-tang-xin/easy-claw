@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
+import com.xinl.easyclaw.tools.BlackboardTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -32,6 +33,7 @@ public class ToolRegistryService {
 
     private final ToolManagementService toolService;
     private final FileOperationTools fileTools;
+    private final BlackboardTools blackboardTools;
     private final WebSearchTools searchTools;
     private final CodeGenerationTools codeTools;
 
@@ -207,10 +209,12 @@ public class ToolRegistryService {
 
     public ToolRegistryService(ToolManagementService toolService,
                                FileOperationTools fileTools,
+                               BlackboardTools blackboardTools,
                                WebSearchTools searchTools,
                                CodeGenerationTools codeTools) {
         this.toolService = toolService;
         this.fileTools = fileTools;
+        this.blackboardTools = blackboardTools;
         this.searchTools = searchTools;
         this.codeTools = codeTools;
     }
@@ -259,7 +263,7 @@ public class ToolRegistryService {
         }
 
         // 2. 自定义补充工具（反射 @Tool 注解）
-        for (Object instance : List.of(fileTools, searchTools, codeTools)) {
+        for (Object instance : List.of(fileTools, searchTools, codeTools, blackboardTools)) {
             for (Method m : instance.getClass().getMethods()) {
                 Tool tool = m.getAnnotation(Tool.class);
                 if (tool == null) {

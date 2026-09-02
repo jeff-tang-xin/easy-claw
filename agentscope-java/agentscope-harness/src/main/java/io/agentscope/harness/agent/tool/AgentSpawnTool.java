@@ -780,19 +780,36 @@ public class AgentSpawnTool {
                     if (emitterOpt.isPresent()) {
                         AgentEventEmitter parentEmitter = emitterOpt.get();
                         String sourcePath = buildSourcePath(spawned, parentCtx);
+                        // sourcePath only encodes parentSession/agentId, so parallel spawns of the
+                        // same subagent type share it. Also tag the unique instance key so
+                        // consumers can keep per-instance state apart.
                         AgentEventEmitter taggedEmitter =
-                                event -> parentEmitter.emit(event.withSource(sourcePath));
+                                event ->
+                                        parentEmitter.emit(
+                                                event.withSource(sourcePath)
+                                                        .withMetadataEntry(
+                                                                AgentEvent
+                                                                        .METADATA_AGENT_INSTANCE_ID,
+                                                                spawned.key()));
 
                         parentEmitter.emit(
                                 new AgentStartEvent(spawned.sessionId(), null, spawned.agentId())
-                                        .withSource(sourcePath));
+                                        .withSource(sourcePath)
+                                        .withMetadataEntry(
+                                                AgentEvent.METADATA_AGENT_INSTANCE_ID,
+                                                spawned.key()));
 
                         AtomicBoolean endEmitted = new AtomicBoolean();
                         Runnable emitEnd =
                                 () -> {
                                     if (endEmitted.compareAndSet(false, true)) {
                                         parentEmitter.emit(
-                                                new AgentEndEvent(null).withSource(sourcePath));
+                                                new AgentEndEvent(null)
+                                                        .withSource(sourcePath)
+                                                        .withMetadataEntry(
+                                                                AgentEvent
+                                                                        .METADATA_AGENT_INSTANCE_ID,
+                                                                spawned.key()));
                                     }
                                 };
 

@@ -56,7 +56,7 @@ class ToolRegistryIsRegisteredTest {
 
     /** isRegistered 只依赖 toolService，其余协作者不参与，传 null 即可暴露误用。 */
     private ToolRegistryService service() {
-        return new ToolRegistryService(new EmptyToolService(), null, null, null);
+        return new ToolRegistryService(new EmptyToolService(), null, null, null, null);
     }
 
     @Test

@@ -6,6 +6,7 @@ import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
+import com.xinl.easyclaw.blackboard.BlackboardKeys;
 import com.xinl.easyclaw.agent.orchestrator.OrchestrationAuditVerifier;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
@@ -1564,9 +1565,9 @@ public class AgentService {
     private void handleSubagentEvent(AgentEvent event, String subName, Consumer<StreamEvent> onEvent,
                                      DeltaBatcher batcher, String sessionId) {
         String source = event.getSource();
-        // 缓冲 key 带上 sessionId：原先仅用 source，跨会话同名子 Agent 会互相串写，
-        // 且会话结束后无法按会话前缀清理残留条目
-        String bufKey = sessionId + "::" + source;
+        // 实例键：source 形如 parentSessionId/角色名，不含实例身份 → 同名并行实例会串写。
+        // 上游 spawn 事件已带 agentInstanceId，缺失时回退 source（与改前行为一致）。
+        String instanceKey = resolveInstanceKey(event, source);
         if (event instanceof TextBlockDeltaEvent e) {
             batcher.onSubagentText(subName, e.getDelta());
         } else if (event instanceof ThinkingBlockDeltaEvent e) {
@@ -1581,7 +1582,8 @@ public class AgentService {
                     subName, cur, max);
             onEvent.accept(StreamEvent.subagentText(subName,
                     "\n⚠️ 已达迭代上限（" + cur + "/" + max + " 步），子 Agent 回复被强制结束。"
-                            + "可在该子 Agent 声明的 frontmatter 里调高 steps。"));
+                            + "可在「Skills 与子 Agent」页面打开 " + subName
+                            + "，编辑 frontmatter 的 steps 后保存（保存即生效）。"));
         } else if (event.getType() == AgentEventType.AGENT_END) {
             // 子 Agent 结束：先 flush 剩余 delta，再发 subagent_end 标记
             batcher.flush();
@@ -1590,7 +1592,7 @@ public class AgentService {
             // 非 delta 事件：先 flush 累积的 subagent delta，保证顺序正确
             batcher.flush();
             if (event instanceof ToolCallStartEvent e) {
-                sessions.clearSubagentResult(bufKey);
+                sessions.clearSubagentResult(subagentBufKey(sessionId, instanceKey, e.getToolCallId()));
                 onEvent.accept(StreamEvent.subagentTool(subName, e.getToolCallName()));
             } else if (event instanceof ToolCallDeltaEvent e) {
                 onEvent.accept(StreamEvent.subagentToolArgs(subName, e.getDelta()));
@@ -1599,9 +1601,11 @@ public class AgentService {
                 // 避免工具原始输出混进子 Agent 的正文时间线。
                 // 累积上限见 SessionRegistry.MAX_SUBAGENT_BUFFER_CHARS：超限后停止追加，
                 // 避免超长工具输出（如全量日志）撑爆内存。
-                sessions.appendSubagentResult(bufKey, e.getDelta());
+                sessions.appendSubagentResult(
+                        subagentBufKey(sessionId, instanceKey, e.getToolCallId()), e.getDelta());
             } else if (event instanceof ToolResultEndEvent e) {
-                String result = sessions.takeSubagentResult(bufKey);
+                String result = sessions.takeSubagentResult(
+                        subagentBufKey(sessionId, instanceKey, e.getToolCallId()));
                 String state = inferToolResultState(
                         e.getState() != null ? e.getState().name() : null,
                         result);
@@ -1609,6 +1613,39 @@ public class AgentService {
             }
         }
         // 其余子 Agent 内部事件忽略（不进入主流程）
+    }
+
+    /**
+     * 解析子 Agent 事件的实例键。
+     * <p>
+     * 优先取 metadata 里的 {@code agentInstanceId}（上游 spawn 时写入，全局唯一）；
+     * metadata 缺失 / 键不存在 / 值非字符串 / 值为空白时回退到 {@code source}，
+     * 保证旧路径与远程路径的行为与改动前完全一致，不引入回归。
+     */
+    private String resolveInstanceKey(AgentEvent event, String source) {
+        Map<String, Object> metadata = event.getMetadata();
+        if (metadata != null) {
+            Object v = metadata.get(AgentEvent.METADATA_AGENT_INSTANCE_ID);
+            if (v instanceof String s && !s.isBlank()) {
+                return s;
+            }
+        }
+        return source;
+    }
+
+    /**
+     * 子 Agent 工具结果缓冲 key：会话 + 实例 + 本次工具调用 三维隔离。
+     * <p>
+     * 三个维度都必要：跨会话同名子 Agent 会串写；同一会话内并行 spawn 的同名实例会串写；
+     * 同一实例自身并行的工具批次（一轮返回多个 tool_use）也会串写。
+     * 三个消费点（clear / append / take）必须共用本方法，否则写入键与读取键不一致，
+     * 会从「串写」退化成「永远取到空串」，故障更隐蔽。
+     * <p>
+     * {@code toolCallId} 缺失时回退占位符，沿用本文件既有风格（见 resolveKeyForStart）。
+     */
+    private static String subagentBufKey(String sessionId, String instanceKey, String toolCallId) {
+        String id = (toolCallId != null && !toolCallId.isEmpty()) ? toolCallId : "__no_id__";
+        return sessionId + "::" + instanceKey + "::" + id;
     }
 
     /**
@@ -1765,6 +1802,19 @@ public class AgentService {
         }
     }
 
+    /**
+     * 会真正产生 / 驱动子 Agent 运行的调度类工具名单，用于循环调度防护判定。
+     * <p>
+     * 不用 {@code name.contains("subagent")}：一是任何名字里含该子串的普通工具都会被
+     * 误计数并触发 interrupt（把正常回合打断）；二是上游一旦改名，判定会静默失效、
+     * 防护完全不生效且无任何告警。精确名单在上游改名时会立刻表现为「防护不触发」，
+     * 但至少与工具真实名称一一对应，可被 grep 校验。
+     * <p>
+     * 只纳入 agent_spawn / agent_send：{@code agent_list} 是只读查询（计入会误触发防护），
+     * {@code agent_generate} 只生成声明、不产生子 Agent 运行实例。
+     */
+    private static final Set<String> SUBAGENT_DISPATCH_TOOLS = Set.of("agent_spawn", "agent_send");
+
     /** 非 delta 事件的处理（tool_start/end/result, confirm, subagent 等） */
     private void handleNonDeltaEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
                                      Consumer<Throwable> onError, Runnable onFinish,
@@ -1787,7 +1837,7 @@ public class AgentService {
                     String callId = e.getToolCallId();
                     trace.toolCalled = true;
                     trace.calls.put(trace.resolveKeyForStart(callId), new ToolCallSlot(name));
-                    if (name != null && name.toLowerCase().contains("subagent")) {
+                    if (name != null && SUBAGENT_DISPATCH_TOOLS.contains(name.toLowerCase())) {
                         String subName = extractSubagentName(name);
                         onEvent.accept(StreamEvent.subagent(subName));
                         // 循环调度防护：同一会话内同一子 Agent 超过配置次数 → 打断
@@ -1931,6 +1981,10 @@ public class AgentService {
                 .sessionId(sessionId)
                 // 注入 Workspace 上下文给文件工具（沙箱校验），不暴露给 LLM
                 .put(WorkspaceContext.class, workspace)
+                // 黑板隔离键取「父会话 id」：子 Agent 由 RuntimeContext.builder(parentRc) 创建，
+                // Builder.from 会复制 stringAttributes，故子 Agent 虽自带 sub-<UUID> 会话，
+                // 仍继承同一 key → 同一轮协作的主/子 Agent 共用一块黑板。
+                .put(BlackboardKeys.CTX_KEY, sessionId)
                 .build();
     }
 
