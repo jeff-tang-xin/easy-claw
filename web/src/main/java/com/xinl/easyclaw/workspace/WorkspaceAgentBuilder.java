@@ -1,9 +1,12 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.agent.SessionRegistry;
 import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.SystemHomePaths;
+import com.xinl.easyclaw.middleware.FileChangeMiddleware;
+import com.xinl.easyclaw.middleware.ToolFailGuard;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.role.RolePromptComposer;
 import com.xinl.easyclaw.role.entity.AgentRoleEntity;
@@ -74,6 +77,7 @@ public class WorkspaceAgentBuilder {
     private final AgentScopeProperties agentScopeProperties;
     private final ScenarioResolver scenarioResolver;
     private final McpToolExpander mcpToolExpander;
+    private final SessionRegistry sessionRegistry;
 
     /**
      * workspaceId → 刷新后的 PATH 环境变量。
@@ -102,8 +106,10 @@ public class WorkspaceAgentBuilder {
                                  RoleManagementService roleService,
                                  AgentScopeProperties agentScopeProperties,
                                  ScenarioResolver scenarioResolver,
-                                 McpToolExpander mcpToolExpander) {
+                                 McpToolExpander mcpToolExpander,
+                                 SessionRegistry sessionRegistry) {
         this.mcpToolExpander = mcpToolExpander;
+        this.sessionRegistry = sessionRegistry;
         this.agentFactory = agentFactory;
         this.subagentLoader = subagentLoader;
         this.permissionRuleService = permissionRuleService;
@@ -243,7 +249,13 @@ public class WorkspaceAgentBuilder {
                 .transcriptStore(transcriptStore)
                 .enablePlanMode(false)
                 .enableAgentTracingLog(false)
-                .maxContextTokens(16_000);
+                .maxContextTokens(16_000)
+                // 横切逻辑迁移（Phase 1）：两者当前均为影子模式，只记日志不改变行为。
+                // AgentService 中的对应旧实现仍在生效，Phase 5 摘除旧实现时同步关闭影子开关。
+                // 详见 docs/refactor-plan.md:391 的并行降险策略。
+                .middleware(new FileChangeMiddleware())
+                .middleware(new ToolFailGuard(sessionRegistry,
+                        agentCfg.getMaxConsecutiveToolFailures()));
 
         for (SubagentDeclaration decl : subagents) {
             builder.subagent(decl);
