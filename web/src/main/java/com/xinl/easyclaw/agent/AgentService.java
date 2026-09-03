@@ -873,12 +873,11 @@ public class AgentService {
     }
 
     /**
-     * 会话状态预处理：一次读取 agent_state.json，串行应用三项清理/预设，最多回写一次。
+     * 会话状态预处理：一次读取 agent_state.json，应用上下文净化与 plan 预设，最多回写一次。
      * <p>
-     * 此前三项各自独立读文件 + 反序列化 + 回写（{@code clearStaleConfirmation} /
-     * {@code cleanupPollutedContext} / {@code preconfigurePlanFile}），长会话下
-     * agent_state.json 可达数百 KB，每轮 3 次全量解析同步阻塞在发送线程上，
-     * 表现为「每次输入都要挂起一会儿才响应」。合并后 I/O 与解析各降至 1 次。
+     * 此前各项各自独立读文件 + 反序列化 + 回写，长会话下 agent_state.json 可达数百 KB，
+     * 每轮多次全量解析同步阻塞在发送线程上，表现为「每次输入都要挂起一会儿才响应」。
+     * 合并后 I/O 与解析各降至 1 次。
      *
      * @return true 表示上下文被修改过（调用方应 rebuildAgent 以加载清理后的状态）
      */
@@ -889,12 +888,10 @@ public class AgentService {
         }
         try {
             AgentState state = AgentState.fromJsonString(Files.readString(stateFile));
-            // 注意：两项清理必须都执行，不能用 || 短路——残留的 ASKING 消息与被污染的
-            // 上下文是两个独立问题，可能同时存在
-            boolean askingRemoved = removeAskingMessages(state, sessionId);
-            boolean polluteRemoved = purgePollutedContext(state, sessionId);
+            // 注意：上下文净化已包含「悬空 tool_call 补配对」，会为挂起的 ASKING
+            // 工具调用补上 DENIED 结果消息，无需单独删除消息。
+            boolean contextChanged = purgePollutedContext(state, sessionId);
             // 上下文类改动需要重建 Agent；plan 路径只是预设字段，回写即可，无需重建
-            boolean contextChanged = askingRemoved || polluteRemoved;
             boolean planChanged = applyPlanFile(state, sessionId);
             if (contextChanged || planChanged) {
                 Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
@@ -907,30 +904,6 @@ public class AgentService {
     }
 
     /**
-     * 移除含 ASKING 工具调用的消息（保留其余历史）。
-     * <p>用户在确认弹窗出现时刷新/离开页面后，暂停状态会被持久化到 agent_state.json，
-     * 此时直接发新消息会抛
-     * {@code IllegalStateException: Agent is paused for human-in-the-loop confirmation}。</p>
-     *
-     * @return true 表示确实移除过消息
-     */
-    private boolean removeAskingMessages(AgentState state, String sessionId) {
-        if (state.getContext() == null) {
-            return false;
-        }
-        List<Msg> mutable = state.contextMutable();
-        int before = mutable.size();
-        mutable.removeIf(m -> m.getContentBlocks(ToolUseBlock.class).stream()
-                .anyMatch(t -> t.getState() == ToolCallState.ASKING));
-        int removed = before - mutable.size();
-        if (removed == 0) {
-            return false;
-        }
-        log.info("已清除挂起工具确认（移除 ASKING 消息 {}/{}）: session={}", removed, before, sessionId);
-        return true;
-    }
-
-    /**
      * 清理上下文污染：
      * 1. 孤儿 ToolResultBlock（有 tool_call_id 但前面没有 assistant ToolUseBlock 声明过）
      * 2. 空 user 消息（content="" 且没有图片/附件，是 autoConfirmResume 注入的空消息）
@@ -938,13 +911,21 @@ public class AgentService {
      * 这三种污染都会导致 OpenAI-compatible API（方舟）报 InvalidParameter，
      * 因为方舟严格校验 tool_call 链的配对关系。
      * <p>
-     * 第 3 种是「用户在工具执行中点停止」的典型残留：中断发生在 TOOL_RESULT 落盘之前，
-     * 消息里留下一个永远等不到结果的 tool_call。它的 state 是 RUNNING 而非 ASKING，
-     * 因此 {@link #removeAskingMessages} 抓不到。此时下一条消息会在模型侧直接被拒，
-     * 且失败发生在流建立之前 → 前端收不到任何事件，表现为「点停止后再发消息就一直挂起」。
+     * 第 3 种有两个来源，都靠补配对统一收口：
+     * <ul>
+     *   <li><b>RUNNING</b>：用户在工具执行中点停止，中断发生在 TOOL_RESULT 落盘之前。
+     *       此时下一条消息会在模型侧直接被拒，且失败发生在流建立之前 → 前端收不到任何
+     *       事件，表现为「点停止后再发消息就一直挂起」。</li>
+     *   <li><b>ASKING</b>：确认弹窗出现时用户刷新/离开页面，暂停状态被持久化。
+     *       若放任不管，下次发消息会撞上 {@code ReActAgent} 的
+     *       {@code IllegalStateException: Agent is paused for human-in-the-loop confirmation}。
+     *       补上结果后 pending 集合归零，框架便按普通新回合处理用户消息。</li>
+     * </ul>
      * <p>
-     * 对悬空 tool_call 采取「补一条 interrupted 结果」而非删除声明：保留了现场语义
-     * （模型能看到该工具被用户中断），也维持了 tool_call 链的配对完整性。
+     * 对悬空 tool_call 采取「补一条结果」而非删除声明：保留了现场语义
+     * （模型能看到该工具被中断或未获确认），也维持了 tool_call 链的配对完整性。
+     * 删除声明反而会制造孤儿 ToolResultBlock，是此前需要关闭框架
+     * pendingToolRecovery 的根因。
      */
     private boolean purgePollutedContext(AgentState state, String sessionId) {
         if (state.getContext() == null) {
@@ -1032,16 +1013,27 @@ public class AgentService {
                     paired.add(m);
                     for (ToolUseBlock tub : m.getContentBlocks(ToolUseBlock.class)) {
                         if (tub.getId() != null && !resolvedToolIds.contains(tub.getId())) {
+                            // 区分两种悬空来源，给模型的说明与 ToolResultState 都不同：
+                            //   ASKING → 弹窗还没等到用户点就刷新/离开了，语义是「被拒绝」，
+                            //            与框架 applyConfirmResults 的 denied 分支保持一致
+                            //   其余   → 工具执行中被用户点停止，语义是「被中断」
+                            boolean asking = tub.getState() == ToolCallState.ASKING;
+                            ToolResultBlock result = ToolResultBlock
+                                    .of(tub.getId(), tub.getName(), TextBlock.builder()
+                                            .text(asking
+                                                    ? "⚠️ 该工具调用未获得用户确认，已取消执行。"
+                                                    : "⚠️ 该工具调用已被用户中断，未执行完成。")
+                                            .build())
+                                    .withState(asking
+                                            ? ToolResultState.DENIED
+                                            : ToolResultState.INTERRUPTED);
                             // 每个悬空 tool_call 必须单独一条 TOOL 消息：
                             // OpenAIMessageConverter.convertToolMessage 用
                             // getFirstContentBlock(ToolResultBlock.class) 取值，一条消息里
                             // 塞多个结果块只有第一个会被发出，其余会被静默丢弃 → 仍然悬空
                             paired.add(Msg.builder()
                                     .role(MsgRole.TOOL)
-                                    .content(ToolResultBlock.of(tub.getId(), tub.getName(),
-                                            TextBlock.builder()
-                                                    .text("⚠️ 该工具调用已被用户中断，未执行完成。")
-                                                    .build()))
+                                    .content(result)
                                     .build());
                             resolvedToolIds.add(tub.getId());
                             danglingToolCalls++;

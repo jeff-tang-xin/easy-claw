@@ -222,12 +222,11 @@ public class WorkspaceAgentBuilder {
                 // 禁用 harness 自带的会话文件持久化（.easyClaw/agent/<userId>/agents/...jsonl），
                 // 状态统一由 JsonFileAgentStateStore 落在 .easyClaw/agent/state
                 .disableSessionPersistence()
-                // 关闭 pending tool recovery：HarnessAgent 的 maybePatchPendingToolCalls 会在
-                // assistant ToolUseBlock 被 clearStaleConfirmation 移除后，
-                // 检测到"pending tool calls"并自动生成孤儿 ToolResultBlock，
-                // 污染上下文导致 OpenAI-compatible API 报 tool_call_id is not found。
-                // 我们改用 clearStaleConfirmation + cleanupPollutedContext 组合来清理残留。
-                .enablePendingToolRecovery(false)
+                // pending tool recovery 保持默认开启：作为上下文净化漏网时的框架级安全网。
+                // （历史上曾禁用，原因是 clearStaleConfirmation 会删除 assistant 的
+                //  ToolUseBlock，导致框架检测到 pending 并生成孤儿 ToolResultBlock。
+                //  该删除逻辑已移除——改为在 AgentService.purgePollutedContext 里为悬空
+                //  tool_call 就地补配对结果，不再删消息，孤儿的源头随之消失。）
                 .compaction(buildCompactionConfig(agentCfg))
                 // 工具结果淘汰：单结果超 40K 字符时写入磁盘，上下文仅留 2K 预览
                 // Harness 默认 80K 才淘汰，这里收紧更早触发，省出更多上下文空间

@@ -3,7 +3,9 @@ package com.xinl.easyclaw.agent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.message.TextBlock;
+import io.agentscope.core.message.ToolCallState;
 import io.agentscope.core.message.ToolResultBlock;
+import io.agentscope.core.message.ToolResultState;
 import io.agentscope.core.message.ToolUseBlock;
 import io.agentscope.core.state.AgentState;
 import org.junit.jupiter.api.DisplayName;
@@ -14,6 +16,7 @@ import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -127,5 +130,68 @@ class PurgePollutedContextFastPathTest {
 
         assertTrue(purge(state), "blank user message must return true");
         assertEquals(1, state.getContext().size(), "blank user message must be removed");
+    }
+
+    /**
+     * Guards the stale-ASKING recovery path.
+     *
+     * <p>When the confirmation dialog is showing and the user reloads or leaves the page,
+     * the paused state is persisted with the ToolUseBlock still in ASKING. The previous
+     * implementation deleted that whole message, which produced orphan ToolResultBlocks
+     * and forced {@code enablePendingToolRecovery(false)} to paper over the damage.
+     *
+     * <p>Now the block is kept and paired with a DENIED result instead. Two properties
+     * must hold, and both are load-bearing: the assistant message survives (otherwise we
+     * are back to manufacturing orphans), and the pending set is emptied (otherwise
+     * ReActAgent throws "Agent is paused for human-in-the-loop confirmation" on the next
+     * user message).
+     */
+    @Test
+    @DisplayName("stale ASKING tool_call is paired as DENIED instead of deleting the message")
+    void askingToolCallPairedAsDenied() throws Exception {
+        AgentState state = AgentState.builder().build();
+        state.contextMutable().addAll(List.of(
+                user("delete that file"),
+                Msg.builder().role(MsgRole.ASSISTANT)
+                        .content(ToolUseBlock.builder().id("call_ask").name("execute")
+                                .state(ToolCallState.ASKING).build())
+                        .build()));
+
+        assertTrue(purge(state), "stale ASKING must be treated as pollution");
+
+        boolean declarationKept = state.getContext().stream()
+                .flatMap(m -> m.getContentBlocks(ToolUseBlock.class).stream())
+                .anyMatch(b -> "call_ask".equals(b.getId()));
+        assertTrue(declarationKept,
+                "the ToolUseBlock must be kept; deleting it is what created orphan results");
+
+        ToolResultBlock paired = state.getContext().stream()
+                .flatMap(m -> m.getContentBlocks(ToolResultBlock.class).stream())
+                .filter(b -> "call_ask".equals(b.getId()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(paired, "ASKING tool_call must be paired, or the agent stays paused");
+        assertEquals(ToolResultState.DENIED, paired.getState(),
+                "unconfirmed means denied, matching ReActAgent.applyConfirmResults");
+    }
+
+    @Test
+    @DisplayName("interrupted (non-ASKING) tool_call keeps INTERRUPTED, not DENIED")
+    void interruptedToolCallKeepsInterruptedState() throws Exception {
+        AgentState state = AgentState.builder().build();
+        state.contextMutable().addAll(List.of(
+                user("run a command"),
+                toolCall("call_run", "execute")));
+
+        assertTrue(purge(state), "dangling tool_call must return true");
+
+        ToolResultBlock paired = state.getContext().stream()
+                .flatMap(m -> m.getContentBlocks(ToolResultBlock.class).stream())
+                .filter(b -> "call_run".equals(b.getId()))
+                .findFirst()
+                .orElse(null);
+        assertNotNull(paired, "dangling tool_call must be paired");
+        assertEquals(ToolResultState.INTERRUPTED, paired.getState(),
+                "a tool stopped mid-execution was interrupted, not denied by the user");
     }
 }
