@@ -1,7 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
 import com.xinl.easyclaw.agent.SessionTranscriptStore;
-import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
 import org.slf4j.Logger;
@@ -30,10 +29,13 @@ public class SessionHistoryService {
 
     private final SessionRepository sessionRepository;
     private final WorkspaceManager workspaceManager;
+    private final WorkspaceFileLayout workspaceFileLayout;
 
-    public SessionHistoryService(SessionRepository sessionRepository, WorkspaceManager workspaceManager) {
+    public SessionHistoryService(SessionRepository sessionRepository, WorkspaceManager workspaceManager,
+                                 WorkspaceFileLayout workspaceFileLayout) {
         this.sessionRepository = sessionRepository;
         this.workspaceManager = workspaceManager;
+        this.workspaceFileLayout = workspaceFileLayout;
     }
 
     /**
@@ -84,9 +86,8 @@ public class SessionHistoryService {
     public void deleteSession(WorkspaceContext workspace, String sessionId) {
         sessionRepository.deleteById(sessionId);
         try {
-            Path stateDir = workspace.getPath().resolve(".easyClaw/agent/state")
-                    .resolve(workspace.getUserId() == null ? AppConstants.DEFAULT_USER_ID : workspace.getUserId())
-                    .resolve(sessionId);
+            Path stateDir = workspaceFileLayout.sessionStateDir(
+                    workspace.getPath(), workspace.getUserId(), sessionId);
             if (Files.isDirectory(stateDir)) {
                 try (var walk = Files.walk(stateDir)) {
                     walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {

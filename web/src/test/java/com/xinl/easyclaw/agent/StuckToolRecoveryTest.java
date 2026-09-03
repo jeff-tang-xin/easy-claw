@@ -124,7 +124,8 @@ class StuckToolRecoveryTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 sessions,
-                mock(ScenarioResolver.class));
+                mock(ScenarioResolver.class),
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
 
         sessions.bindWorkspace(SESSION_ID, WORKSPACE_ID);
     }

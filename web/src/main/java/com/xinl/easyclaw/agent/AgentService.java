@@ -68,6 +68,7 @@ public class AgentService {
     private final SessionRegistry sessions;
     /** 激活场景查询（编排审计需要对照工作流计划） */
     private final com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver;
+    private final com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout;
 
     /** 空闲会话 TTL：超过此时长无活动且无挂起确认的会话，其内存状态被清扫 */
     private static final long IDLE_TTL_MS = 2 * 60 * 60 * 1000L;
@@ -101,13 +102,15 @@ public class AgentService {
                         PermissionRuleService permissionRuleService,
                         AgentScopeProperties agentScopeProperties,
                         SessionRegistry sessions,
-                        com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver) {
+                        com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver,
+                        com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout) {
         this.workspaceManager = workspaceManager;
         this.agentFactory = agentFactory;
         this.permissionRuleService = permissionRuleService;
         this.agentScopeProperties = agentScopeProperties;
         this.sessions = sessions;
         this.scenarioResolver = scenarioResolver;
+        this.workspaceFileLayout = workspaceFileLayout;
     }
 
     /** 应用停机时关闭宽限调度器，避免守护线程与未决任务泄漏 */
@@ -709,12 +712,13 @@ public class AgentService {
 
     /**
      * 会话状态目录：.easyClaw/agent/state/{userId}/{sessionId}
+     * <p>
+     * 路径拼接统一委托 {@link WorkspaceFileLayout}，避免与 {@code ChatController}
+     * 各自手写同一份字符串。
      */
     private Path sessionStateDir(WorkspaceContext workspace, String sessionId) {
-        String userId = workspace.getUserId() == null
-                ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
-        return workspace.getPath().resolve(".easyClaw/agent/state")
-                .resolve(userId).resolve(sessionId);
+        return workspaceFileLayout.sessionStateDir(
+                workspace.getPath(), workspace.getUserId(), sessionId);
     }
 
     /**
@@ -882,7 +886,8 @@ public class AgentService {
      * @return true 表示上下文被修改过（调用方应 rebuildAgent 以加载清理后的状态）
      */
     private boolean prepareSessionState(WorkspaceContext workspace, String sessionId) {
-        Path stateFile = sessionStateDir(workspace, sessionId).resolve("agent_state.json");
+        Path stateFile = workspaceFileLayout.sessionStateFile(
+                workspace.getPath(), workspace.getUserId(), sessionId);
         if (!Files.exists(stateFile)) {
             return false;
         }
@@ -894,7 +899,7 @@ public class AgentService {
             // 上下文类改动需要重建 Agent；plan 路径只是预设字段，回写即可，无需重建
             boolean planChanged = applyPlanFile(state, sessionId);
             if (contextChanged || planChanged) {
-                Files.writeString(stateFile, state.toJson(), StandardCharsets.UTF_8);
+                workspaceFileLayout.atomicWriteString(stateFile, state.toJson());
             }
             return contextChanged;
         } catch (Exception e) {

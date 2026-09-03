@@ -123,7 +123,8 @@ class InterveneTurnTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 new SessionRegistry(),
-                mock(ScenarioResolver.class));
+                mock(ScenarioResolver.class),
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
     }
 
     @Test

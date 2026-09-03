@@ -7,7 +7,6 @@ import com.xinl.easyclaw.agent.SessionTranscriptStore;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
-import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.springframework.http.MediaType;
@@ -33,19 +32,22 @@ public class ChatController {
     private final com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties;
     private final WorkspaceAccessGuard accessGuard;
     private final ToolConfirmValidator toolConfirmValidator;
+    private final com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout;
     /** sessionId → SSE 连接（确认/恢复继续用同一连接推流） */
     private final Map<String, SseEmitter> emitters = new ConcurrentHashMap<>();
 
     public ChatController(AgentService agentService, WorkspaceManager workspaceManager, ObjectMapper objectMapper,
                           com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
                           WorkspaceAccessGuard accessGuard,
-                          ToolConfirmValidator toolConfirmValidator) {
+                          ToolConfirmValidator toolConfirmValidator,
+                          com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
         this.objectMapper = objectMapper;
         this.agentScopeProperties = agentScopeProperties;
         this.accessGuard = accessGuard;
         this.toolConfirmValidator = toolConfirmValidator;
+        this.workspaceFileLayout = workspaceFileLayout;
     }
 
     public record ChatStreamRequest(String workspaceId, String sessionId, String message,
@@ -230,13 +232,14 @@ public class ChatController {
         if (ws == null) {
             return List.of();
         }
-        String userId = ws.getUserId() == null ? AppConstants.DEFAULT_USER_ID : ws.getUserId();
-        Path sessionDir = ws.getPath().resolve(".easyClaw/agent/state/" + userId + "/" + sessionId);
+        Path sessionDir = workspaceFileLayout.sessionStateDir(
+                ws.getPath(), ws.getUserId(), sessionId);
         List<BoxMessage> fromTranscript = SessionTranscriptStore.read(sessionDir);
         if (!fromTranscript.isEmpty()) {
             return fromTranscript;
         }
-        return AgentStateBoxReader.read(sessionDir.resolve("agent_state.json"));
+        return AgentStateBoxReader.read(
+                sessionDir.resolve(com.xinl.easyclaw.workspace.WorkspaceFileLayout.AGENT_STATE_FILE));
     }
 
     /** SSE 超时毫秒数；配置 &lt;=0 时退化为「永不超时」（不推荐，仅为兼容旧配置保留） */

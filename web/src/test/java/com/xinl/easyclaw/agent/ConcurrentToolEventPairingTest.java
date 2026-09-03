@@ -56,7 +56,8 @@ class ConcurrentToolEventPairingTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 new SessionRegistry(),
-                mock(ScenarioResolver.class));
+                mock(ScenarioResolver.class),
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
 
         Class<?> traceClass = Class.forName("com.xinl.easyclaw.agent.AgentService$ToolTrace");
         Constructor<?> ctor = traceClass.getDeclaredConstructor();

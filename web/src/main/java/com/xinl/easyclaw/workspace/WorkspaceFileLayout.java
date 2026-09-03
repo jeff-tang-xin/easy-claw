@@ -89,6 +89,58 @@ public class WorkspaceFileLayout {
         }
     }
 
+    /**
+     * 会话状态目录：{@code <workspace>/.easyClaw/agent/state/{userId}/{sessionId}}。
+     * <p>
+     * 与框架 {@code JsonFileAgentStateStore} 的布局一致（它的 root 是
+     * {@code .easyClaw/agent/state}，内部再按 {@code <userId>/<sessionId>/<key>.json} 展开），
+     * 因此这里算出的目录就是框架落盘的同一位置。
+     * <p>
+     * 抽出此方法的原因：此前 {@code AgentService}、{@code ChatController} 各自
+     * 手工拼接同一路径，字符串分散在多处，改动布局时容易漏改。
+     */
+    public Path sessionStateDir(Path workspacePath, String userId, String sessionId) {
+        String uid = (userId == null || userId.isBlank()) ? AppConstants.DEFAULT_USER_ID : userId;
+        return workspacePath.resolve(".easyClaw/agent/state").resolve(uid).resolve(sessionId);
+    }
+
+    /** 会话状态文件：会话状态目录下的 {@code agent_state.json}（框架 key = {@code agent_state}） */
+    public Path sessionStateFile(Path workspacePath, String userId, String sessionId) {
+        return sessionStateDir(workspacePath, userId, sessionId).resolve(AGENT_STATE_FILE);
+    }
+
+    /** 框架 {@code AgentStateStore} 中 Agent 状态的 key，对应磁盘文件 {@code agent_state.json} */
+    public static final String AGENT_STATE_KEY = "agent_state";
+
+    /** Agent 状态文件名 */
+    public static final String AGENT_STATE_FILE = AGENT_STATE_KEY + ".json";
+
+    /**
+     * 原子写入文本文件：先写同目录临时文件，再 {@code ATOMIC_MOVE} 覆盖目标。
+     * <p>
+     * 与框架 {@code JsonFileAgentStateStore.save()} 的落盘方式一致。直接
+     * {@code Files.writeString} 在写入中途进程退出时会留下**被截断的**
+     * {@code agent_state.json}，下次启动反序列化失败即等于该会话历史全丢；
+     * 临时文件 + 原子改名可保证目标文件要么是旧内容、要么是完整新内容。
+     * <p>
+     * 注意：这**不提供**并发写保护。实际装配的 {@code JsonFileAgentStateStore}
+     * 未 override {@code supportsVersioning()}，框架的 {@code saveIfVersion} 也退化为
+     * last-writer-wins，故此处与走框架 API 的并发语义相同。
+     */
+    public void atomicWriteString(Path file, String content) throws IOException {
+        Files.createDirectories(file.getParent());
+        Path tmp = file.resolveSibling(file.getFileName() + ".tmp");
+        Files.writeString(tmp, content, java.nio.charset.StandardCharsets.UTF_8);
+        try {
+            Files.move(tmp, file,
+                    java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                    java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            // 少数文件系统（部分网络盘）不支持原子改名，退化为普通替换
+            Files.move(tmp, file, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
     /** 递归删除目录（供工作区删除流程复用） */
     public void deleteRecursively(Path dir) throws IOException {
         if (!Files.exists(dir)) {
