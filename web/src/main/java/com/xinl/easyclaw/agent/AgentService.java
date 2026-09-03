@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.agent;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -13,6 +14,8 @@ import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.config.RetryScope;
+import com.xinl.easyclaw.middleware.FileChangeMiddleware;
+import com.xinl.easyclaw.middleware.ToolFailGuard;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
@@ -1690,60 +1693,6 @@ public class AgentService {
      * 代码内容（可能含 error: 属性、failed 注释等）误判为 ERROR。</p>
      */
     /**
-     * 写类工具（会改动工作区文件的工具）名单。
-     * <p>
-     * 只列出「确定会写文件」的工具：{@code execute} 虽然也可能改文件，但无法从命令行
-     * 可靠解析出受影响路径，误报会导致前端无意义地反复重拉，故不纳入。
-     */
-    private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file");
-
-    /**
-     * 会改动文件但拿不到确切路径的工具。shell 可以做任何事（git checkout、del、mv、
-     * 重定向输出），入参里的命令行无法可靠解析出受影响路径，因此只发"位置未知"信号，
-     * 由前端按自身上下文（当前目录 + 已打开标签页）决定重拉什么。
-     */
-    private static final Set<String> OPAQUE_WRITE_TOOLS = Set.of("execute");
-
-    /**
-     * 写类工具成功后推送 file_changed 事件，驱动前端实时刷新。
-     * <p>
-     * 路径从工具入参 JSON 的 {@code path} 字段取。入参可能因流式累积而不是合法 JSON
-     * （见 ToolCallsAccumulator 的静默降级行为），此时静默跳过——刷新是增强能力，
-     * 不能因为解析失败影响主对话流程。
-     */
-    private static void emitFileChangedIfWriteTool(String toolName,
-                                                   String argsJson,
-                                                   Consumer<StreamEvent> onEvent) {
-        if (toolName == null) {
-            return;
-        }
-        String normalized = toolName.toLowerCase(Locale.ROOT);
-
-        // shell 类工具：受影响路径不可知，发空路径让前端刷新它当前关心的位置
-        if (OPAQUE_WRITE_TOOLS.contains(normalized)) {
-            onEvent.accept(StreamEvent.fileChanged(""));
-            return;
-        }
-
-        if (!FILE_WRITE_TOOLS.contains(normalized)) {
-            return;
-        }
-        if (argsJson == null || argsJson.isBlank()) {
-            return;
-        }
-        try {
-            JsonNode node = mapper.readTree(argsJson);
-            String path = node.path("path").asText("");
-            if (path.isBlank()) {
-                return;
-            }
-            onEvent.accept(StreamEvent.fileChanged(path.replace('\\', '/')));
-        } catch (Exception e) {
-            log.debug("file_changed 事件跳过（工具入参非合法 JSON）: tool={}", toolName);
-        }
-    }
-
-    /**
      * blackboard_append 成功后推送 blackboard 事件，驱动前端实时展示该条目。
      * <p>
      * {@code type}/{@code content} 取自工具入参；而 {@code seq}/{@code author} 只存在于
@@ -1900,6 +1849,14 @@ public class AgentService {
                                      Consumer<Throwable> onError, Runnable onFinish,
                                      ToolTrace trace, String sessionId, HarnessAgent agent) {
         switch (event.getType()) {
+            case CUSTOM -> {
+                // middleware 经 AgentEventEmitter 注入的应用层扩展事件。
+                // 框架 CustomEvent 的 Javadoc 要求「消费端对未知 name 静默跳过」，
+                // 故这里只翻译已知 name，其余不记错误日志、不影响主流程。
+                if (event instanceof CustomEvent e) {
+                    translateCustomEvent(e, onEvent);
+                }
+            }
             case EXCEED_MAX_ITERS -> {
                 // 迭代耗尽：框架会直接结束本轮，之前是静默的 → 回复看起来「无故截断」。
                 // 这里显式告知用户，避免把框架限制误认为模型能力问题。
@@ -1983,24 +1940,10 @@ public class AgentService {
                         : inferToolResultState(null, result);
                 onEvent.accept(StreamEvent.toolResult("(" + state + ") "
                         + (result.isEmpty() ? "(空结果)" : result), callId));
-                // 工具连续失败护栏：同一工具连续失败达到配置阈值时注入停止提示
-                if ("ERROR".equalsIgnoreCase(state)) {
-                    int maxFails = agentScopeProperties.getAgent().getMaxConsecutiveToolFailures();
-                    int fails = sessions.recordToolFailure(sessionId, toolName);
-                    if (maxFails > 0 && fails >= maxFails) {
-                        log.warn("工具连续失败护栏触发: session={}, tool={}, fails={}",
-                                sessionId, toolName, fails);
-                        onEvent.accept(StreamEvent.context(
-                                "{\"type\":\"tool_fail_guard\",\"tool\":\"" + toolName
-                                + "\",\"fails\":" + fails
-                                + ",\"message\":\"工具[" + toolName + "] 连续失败 " + fails
-                                + " 次，请停止重试，检查参数/路径/权限后向用户说明并询问。\"}"));
-                    }
-                } else {
-                    // 成功则重置该工具的失败计数
-                    sessions.resetToolFailure(sessionId, toolName);
-                    // 写类工具成功 → 通知前端刷新文件树/已打开预览（实时刷新，免手动点「刷新」）
-                    emitFileChangedIfWriteTool(toolName, st == null ? "" : st.args.toString(), onEvent);
+                // 工具连续失败护栏与失败计数已迁移至 ToolFailGuard middleware，
+                // 它在 onActing 里统计并经 AgentEventEmitter 发 CustomEvent("tool_fail_guard")，
+                // 由本 switch 的 CUSTOM 分支翻译。此处不再重复统计与推送。
+                if (!"ERROR".equalsIgnoreCase(state)) {
                     // 黑板登记成功 → 推送条目给 UI 实时展示（并行子 Agent 的结论对用户可见）
                     emitBlackboardIfAppend(toolName, st == null ? "" : st.args.toString(), result, onEvent);
                 }
@@ -2028,6 +1971,45 @@ public class AgentService {
             }
             default -> {
                 // 其他事件忽略
+            }
+        }
+    }
+
+    /**
+     * 把 middleware 发来的 {@link CustomEvent} 翻译为前端协议的 {@link StreamEvent}。
+     *
+     * <p>只处理已知 name。框架的 {@code CustomEvent} Javadoc 明确要求消费端对未知 name
+     * 静默跳过（这是协议演进的兼容策略：新版 middleware 发的事件不能让旧消费端报错），
+     * 所以这里的 default 分支不记日志、不抛异常。
+     */
+    private void translateCustomEvent(CustomEvent event, Consumer<StreamEvent> onEvent) {
+        String name = event.getName();
+        if (name == null) {
+            return;
+        }
+        Map<String, Object> value = event.getValue();
+        switch (name) {
+            case FileChangeMiddleware.EVENT_NAME -> {
+                Object path = value.get("path");
+                // 空串是有效载荷（shell 类工具「有变更但位置未知」），不能当无效值过滤
+                onEvent.accept(StreamEvent.fileChanged(path == null ? "" : path.toString()));
+            }
+            case ToolFailGuard.EVENT_NAME -> {
+                // 保持与旧实现完全一致的 JSON 形状：前端按 type 字段路由，
+                // 改字段名会让已上线的前端静默丢弃该提示。
+                try {
+                    ObjectNode payload = mapper.createObjectNode();
+                    payload.put("type", ToolFailGuard.EVENT_NAME);
+                    payload.put("tool", String.valueOf(value.get("tool")));
+                    payload.put("fails", value.get("fails") instanceof Number n ? n.intValue() : 0);
+                    payload.put("message", String.valueOf(value.get("message")));
+                    onEvent.accept(StreamEvent.context(mapper.writeValueAsString(payload)));
+                } catch (JsonProcessingException ex) {
+                    log.debug("tool_fail_guard 事件序列化失败，跳过: {}", ex.getMessage());
+                }
+            }
+            default -> {
+                // 未知 name：按框架约定静默跳过
             }
         }
     }

@@ -250,9 +250,9 @@ public class WorkspaceAgentBuilder {
                 .enablePlanMode(false)
                 .enableAgentTracingLog(false)
                 .maxContextTokens(16_000)
-                // 横切逻辑迁移（Phase 1）：两者当前均为影子模式，只记日志不改变行为。
-                // AgentService 中的对应旧实现仍在生效，Phase 5 摘除旧实现时同步关闭影子开关。
-                // 详见 docs/refactor-plan.md:391 的并行降险策略。
+                // 横切逻辑迁移：两个 middleware 均已正式接管对应职责，
+                // AgentService 中的旧实现已在同一提交内删除（file_changed 推送、
+                // 工具连续失败护栏），均经 AgentEventEmitter 发 CustomEvent。
                 .middleware(new FileChangeMiddleware())
                 .middleware(new ToolFailGuard(sessionRegistry,
                         agentCfg.getMaxConsecutiveToolFailures()));

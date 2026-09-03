@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventEmitter;
+import io.agentscope.core.event.CustomEvent;
 import io.agentscope.core.event.ToolResultEndEvent;
 import io.agentscope.core.middleware.ActingInput;
 import io.agentscope.core.middleware.MiddlewareBase;
@@ -13,6 +15,7 @@ import io.agentscope.core.message.ToolUseBlock;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
 import org.slf4j.Logger;
@@ -20,16 +23,18 @@ import org.slf4j.LoggerFactory;
 import reactor.core.publisher.Flux;
 
 /**
- * 写类工具的文件变更检测 —— <b>影子模式</b>，当前不推送任何前端事件。
+ * 写类工具的文件变更检测 —— 通过 {@link AgentEventEmitter} 推送 {@code file_changed}。
  *
- * <p><b>为什么是影子模式</b>：{@code AgentService.emitFileChangedIfWriteTool} 正在生产环境
- * 承担 {@code file_changed} 推送。若本 middleware 同时推送，前端会收到双份事件并重复刷新
- * 文件树。重构方案（{@code docs/refactor-plan.md:391}）规定的降险策略是「保留旧逻辑并行
- * 运行，日志对比新旧路径输出」——所以这里只算出结果写 DEBUG 日志，供与旧路径比对。
+ * <p><b>本类是 {@code file_changed} 的唯一发射方</b>。原实现
+ * {@code AgentService.emitFileChangedIfWriteTool} 已在同一提交中删除，不存在双推。
  *
- * <p><b>切换时机</b>：Phase 5 删除翻译层时，把 {@link #SHADOW_MODE} 置为 false 并同步摘除
- * {@code AgentService} 的旧实现，两个动作必须在同一个 commit 里完成，否则就会出现
- * 「双推」或「不推」。
+ * <p><b>为什么必须用 AgentEventEmitter 而不是往返回流里拼事件</b>：
+ * {@code ReActAgent:2760} 对 onActing 链的返回流做的是
+ * {@code stream.doOnNext(识别RequestStopEvent).then(...)} —— {@code then()} 会丢弃所有元素。
+ * 在返回的 Flux 上 concat 新事件，事件不会到达订阅端，且单测里流是通的、看起来完全正常，
+ * 属于静默失效。真正的出口是核心自己调用的 {@code publishEvent}（{@code ReActAgent:2896}），
+ * 而 {@link AgentEventEmitter} 正是框架为「从执行链内部注入事件」公开的入口，
+ * 由 {@code ReActAgent:1078} 放入 Reactor Context。
  *
  * <p><b>为什么挂 onActing</b>：{@code MiddlewareBase} 只有 5 个钩子，没有 onToolCall/
  * onToolResult。工具相关的横切逻辑只能挂在 onActing 上，从 {@link ActingInput#toolCalls()}
@@ -41,17 +46,11 @@ public class FileChangeMiddleware implements MiddlewareBase {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    /**
-     * 影子模式开关。为 true 时只记日志不发事件。
-     * <p>
-     * 定义成常量而非配置项，是因为它与「AgentService 旧实现是否还在」严格绑定：
-     * 做成可运行时切换只会让两者失配的窗口变大。
-     */
-    private static final boolean SHADOW_MODE = true;
+    /** CustomEvent 的 name，前端据此路由。与旧 StreamEvent.fileChanged 的语义一致。 */
+    public static final String EVENT_NAME = "file_changed";
 
     /**
-     * 只列出「确定会写文件」的工具。与 {@code AgentService.FILE_WRITE_TOOLS} 保持一致——
-     * 影子比对期间两边必须同源，否则日志差异反映的是清单不同步而非迁移缺陷。
+     * 只列出「确定会写文件」的工具。清单迁移自 {@code AgentService.FILE_WRITE_TOOLS}。
      */
     private static final Set<String> FILE_WRITE_TOOLS = Set.of("write_file", "edit_file");
 
@@ -73,26 +72,35 @@ public class FileChangeMiddleware implements MiddlewareBase {
             return next.apply(input);
         }
 
-        // 【只认成功的工具】旧实现 AgentService:2003 在 state != ERROR 分支才推 file_changed。
-        // 用 doOnComplete 是错的：next 流正常结束不代表工具成功，失败的工具同样会走完流程，
-        // 那样会在写文件失败时也通知前端刷新。必须逐个观察 ToolResultEndEvent 的 state。
-        return next.apply(input)
-                .doOnNext(evt -> {
-                    if (!(evt instanceof ToolResultEndEvent end)) {
-                        return;
-                    }
-                    if (end.getState() == ToolResultState.ERROR) {
-                        return;
-                    }
-                    String path = resolveChangedPath(writeCalls, end.getToolCallId());
-                    if (path == null) {
-                        return;
-                    }
-                    if (SHADOW_MODE) {
-                        log.debug("[shadow] file_changed: session={}, tool={}, path='{}'",
-                                ctx.getSessionId(), end.getToolCallName(), path);
-                    }
-                });
+        // deferContextual 而非直接 next.apply：AgentEventEmitter 存放在 Reactor Context 里，
+        // 只有订阅时才能拿到。emitter 缺席是正常情况（非流式 call() 路径没有它），
+        // 此时静默跳过——文件树刷新是 UI 增强，不能让它影响工具执行。
+        return Flux.deferContextual(cv -> {
+            AgentEventEmitter emitter = AgentEventEmitter.fromContext(cv).orElse(null);
+
+            // 【只认成功的工具】旧实现在 state != ERROR 分支才推 file_changed。
+            // 用 doOnComplete 是错的：next 流正常结束不代表工具成功，失败的工具同样会走完
+            // 流程，那样会在写文件失败时也通知前端刷新。必须逐个观察 ToolResultEndEvent。
+            return next.apply(input)
+                    .doOnNext(evt -> {
+                        if (!(evt instanceof ToolResultEndEvent end)) {
+                            return;
+                        }
+                        if (end.getState() == ToolResultState.ERROR) {
+                            return;
+                        }
+                        String path = resolveChangedPath(writeCalls, end.getToolCallId());
+                        if (path == null) {
+                            return;
+                        }
+                        if (emitter == null) {
+                            log.debug("file_changed 跳过（当前调用链无 AgentEventEmitter）: path='{}'",
+                                    path);
+                            return;
+                        }
+                        emitter.emit(new CustomEvent(EVENT_NAME, Map.of("path", path)));
+                    });
+        });
     }
 
     /** 挑出本轮中属于写类（含路径不可知类）的工具调用 */
