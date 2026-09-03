@@ -1333,11 +1333,15 @@ public class AgentService {
             }
         }
 
+        // 副作用出口：与事件翻译正交的会话级业务状态驱动（循环防护 / 交付登记 / HITL 登记）。
+        // 单独构造而非内联到 handleEvent，是为了让 Phase 3b 替换协议层时这条线不受影响。
+        SideEffectSink sideEffects = new SessionSideEffects(sessionId, agent, eventSink);
+
         Disposable disp = agent.streamEvents(msg, context)
                 // 不设硬超时：LLM 思考/模型响应可能很久，事件流由 AgentScope 生命周期
                 // （AGENT_END / 错误 / 用户中断）控制结束，避免长思考被误杀
                 .doOnNext(event -> {
-                    handleEvent(event, eventSink, onError, onFinish, trace, sessionId, agent, batcher);
+                    handleEvent(event, eventSink, onError, onFinish, trace, sessionId, sideEffects, batcher);
                     // 收到 AGENT_END 即认为回复完成，立即复位 UI（不依赖 Flux complete）
                     if (event.getType() == AgentEventType.AGENT_END) {
                         // 回合结束但仍有在途工具（TOOL_RESULT_END 丢失的异常路径）：补发收尾，避免 UI 卡"执行中"
@@ -1454,6 +1458,45 @@ public class AgentService {
      * 并发调用下可能同时有多个在途条目，必须逐个收尾：早期实现只收尾「最后一次」调用，
      * 其余卡片仍会永久转圈。幂等：收尾后清空集合，重复调用无副作用。
      */
+    /**
+     * {@link SideEffectSink} 的生产实现：把副作用委托给 SessionRegistry 与本类的私有方法。
+     *
+     * <p>为什么是内部类而非独立文件：三个副作用都依赖 AgentService 的私有协作者
+     * （sessions、agentScopeProperties、guardSubagentLoop），抽成顶层类需要把这些
+     * 全部提升为公开依赖，反而扩大了耦合面。接口在顶层、实现在内部，
+     * 既让契约可被测试替换，又不扩散内部结构。
+     */
+    private final class SessionSideEffects implements SideEffectSink {
+
+        private final String sessionId;
+        private final HarnessAgent agent;
+        private final Consumer<StreamEvent> onEvent;
+
+        SessionSideEffects(String sessionId, HarnessAgent agent, Consumer<StreamEvent> onEvent) {
+            this.sessionId = sessionId;
+            this.agent = agent;
+            this.onEvent = onEvent;
+        }
+
+        @Override
+        public void onSubagentDispatched(String target) {
+            guardSubagentLoop(sessionId, target, onEvent, agent);
+        }
+
+        @Override
+        public void onSubagentDelivered(String target) {
+            sessions.markSubagentDelivered(sessionId, target);
+        }
+
+        @Override
+        public void onConfirmRequired(List<ToolUseBlock> toolCalls) {
+            // 登记待确认工具 + 确认截止时间：用户永不响应时由 sweepExpiredConfirmations
+            // 兜底取消，否则 SSE 连接与会话 Map 条目会永久常驻（稳定的 OOM 路径）
+            sessions.armPendingConfirm(sessionId, toolCalls,
+                    agentScopeProperties.getAgent().getConfirmTimeoutMinutes());
+        }
+    }
+
     private void closeInFlightTool(ToolTrace trace, Consumer<StreamEvent> sink, String note) {
         if (trace == null || trace.calls.isEmpty()) {
             return;
@@ -1790,9 +1833,16 @@ public class AgentService {
         return state != null ? state : "SUCCESS";
     }
 
+    /**
+     * 把单个框架事件翻译为前端协议事件，并维护本回合的 {@link ToolTrace} 状态。
+     *
+     * <p>业务副作用（循环防护、交付登记、HITL 登记）一律经 {@code effects} 出口，
+     * 不在本方法内直接触碰 SessionRegistry —— 这样协议层（Phase 3b 的
+     * EventStreamPublisher）可以独立替换 {@code onEvent} 这条线而不影响副作用。
+     */
     private void handleEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
                              Consumer<Throwable> onError, Runnable onFinish,
-                             ToolTrace trace, String sessionId, HarnessAgent agent,
+                             ToolTrace trace, String sessionId, SideEffectSink effects,
                              DeltaBatcher batcher) {
         // 子 Agent 转发的事件（source 形如 "main/reviewer"）：全部隔离到子 Agent 折叠块，
         // 不混入主流程（文本/思考/工具调用/结果均隔离）。RequireUserConfirmEvent 除外，
@@ -1823,7 +1873,7 @@ public class AgentService {
             default -> {
                 // 非 delta 事件：先 flush 累积的 delta，保证事件顺序正确
                 batcher.flush();
-                handleNonDeltaEvent(event, onEvent, onError, onFinish, trace, sessionId, agent);
+                handleNonDeltaEvent(event, onEvent, onError, onFinish, trace, sessionId, effects);
             }
         }
     }
@@ -1844,7 +1894,7 @@ public class AgentService {
     /** 非 delta 事件的处理（tool_start/end/result, confirm, subagent 等） */
     private void handleNonDeltaEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
                                      Consumer<Throwable> onError, Runnable onFinish,
-                                     ToolTrace trace, String sessionId, HarnessAgent agent) {
+                                     ToolTrace trace, String sessionId, SideEffectSink effects) {
         switch (event.getType()) {
             case CUSTOM -> {
                 // middleware 经 AgentEventEmitter 注入的应用层扩展事件。
@@ -1897,7 +1947,7 @@ public class AgentService {
                 // 循环调度防护：参数已完整，此处才能取到真实的子 Agent 身份
                 if (st != null && st.toolName != null
                         && SUBAGENT_DISPATCH_TOOLS.contains(st.toolName.toLowerCase())) {
-                    guardSubagentLoop(sessionId, extractDispatchTarget(args), onEvent, agent);
+                    effects.onSubagentDispatched(extractDispatchTarget(args));
                 }
             }
             case TOOL_RESULT_START -> {
@@ -1927,8 +1977,7 @@ public class AgentService {
                 // 该子 Agent 已交付结果 → 之后再派同一个才可能是「串行重派」
                 if (st != null && toolName != null
                         && SUBAGENT_DISPATCH_TOOLS.contains(toolName.toLowerCase())) {
-                    sessions.markSubagentDelivered(sessionId,
-                            extractDispatchTarget(st.args.toString()));
+                    effects.onSubagentDelivered(extractDispatchTarget(st.args.toString()));
                 }
                 String state = event instanceof ToolResultEndEvent e
                         ? inferToolResultState(
@@ -1953,10 +2002,7 @@ public class AgentService {
                 // 拒绝时由框架回 "Permission denied by user" 工具结果给 LLM（有感）。
                 if (event instanceof RequireUserConfirmEvent e) {
                     List<ToolUseBlock> tools = e.getToolCalls();
-                    // 登记待确认工具 + 确认截止时间：用户永不响应时由 sweepExpiredConfirmations
-                    // 兜底取消，否则 SSE 连接与会话 Map 条目会永久常驻（稳定的 OOM 路径）
-                    sessions.armPendingConfirm(sessionId, tools,
-                            agentScopeProperties.getAgent().getConfirmTimeoutMinutes());
+                    effects.onConfirmRequired(tools);
                     log.info("收到工具确认请求: session={}, tools={}",
                             sessionId,
                             tools.stream().map(ToolUseBlock::getName).toList());

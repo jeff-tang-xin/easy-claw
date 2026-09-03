@@ -91,7 +91,20 @@ class SubagentLoopGuardTest {
         Object batcher = bc.newInstance(sink);
         handleEvent.invoke(service, event, sink, (Consumer<Throwable>) t -> {
         }, (Runnable) () -> {
-        }, trace, SESSION_ID, agent, batcher);
+        }, trace, SESSION_ID, sideEffects(sink), batcher);
+    }
+
+    /**
+     * 构造生产实现 {@code AgentService$SessionSideEffects}，而不是伪造 SideEffectSink。
+     * <p>
+     * 本测试要验证的是「防护确实会 interrupt agent 并推 loop_warning」这条完整链路，
+     * 用假实现只能证明「接口被调到」，无法证明防护真的生效。
+     */
+    private Object sideEffects(Consumer<StreamEvent> sink) throws Exception {
+        Class<?> cls = Class.forName("com.xinl.easyclaw.agent.AgentService$SessionSideEffects");
+        Constructor<?> c = cls.getDeclaredConstructors()[0];
+        c.setAccessible(true);
+        return c.newInstance(service, SESSION_ID, agent, sink);
     }
 
     /**

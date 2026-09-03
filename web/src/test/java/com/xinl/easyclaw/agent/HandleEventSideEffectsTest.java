@@ -90,7 +90,20 @@ class HandleEventSideEffectsTest {
         Object batcher = bc.newInstance(sink);
         handleEvent.invoke(service, event, sink, (Consumer<Throwable>) t -> {
         }, (Runnable) () -> {
-        }, trace, "session-1", null, batcher);
+        }, trace, "session-1", sideEffects(sink), batcher);
+    }
+
+    /**
+     * 构造生产实现 {@code AgentService$SessionSideEffects}。
+     * <p>
+     * agent 传 null 是安全的：HITL 分支只走 onConfirmRequired → armPendingConfirm，
+     * 不触碰 agent（agent 仅被循环防护的 interrupt 使用）。
+     */
+    private Object sideEffects(Consumer<StreamEvent> sink) throws Exception {
+        Class<?> cls = Class.forName("com.xinl.easyclaw.agent.AgentService$SessionSideEffects");
+        Constructor<?> c = cls.getDeclaredConstructors()[0];
+        c.setAccessible(true);
+        return c.newInstance(service, "session-1", null, sink);
     }
 
     private static RequireUserConfirmEvent confirmEvent() {

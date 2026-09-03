@@ -82,7 +82,7 @@ class ConcurrentToolEventPairingTest {
         Object batcher = bc.newInstance(sink);
         handleEvent.invoke(service, event, sink, (Consumer<Throwable>) t -> {
         }, (Runnable) () -> {
-        }, trace, "session-1", null, batcher);
+        }, trace, "session-1", SideEffectSink.NOOP, batcher);
     }
 
     @Test
