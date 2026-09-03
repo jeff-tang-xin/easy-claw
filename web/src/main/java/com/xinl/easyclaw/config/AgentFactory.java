@@ -405,9 +405,23 @@ public class AgentFactory {
                 """;
     }
 
+    /**
+     * MCP 客户端注册的最长等待时间。
+     * <p>
+     * <b>为什么必须有超时</b>：本方法运行在 {@code WorkspaceManager.rebuildAgent} 的
+     * {@code ConcurrentHashMap.compute} lambda 内部，该 lambda 执行期间持有 map 的 bin 锁。
+     * 无超时的 {@code block()} 遇到无响应的 MCP server 会永久阻塞，
+     * 连带整个 workspace 的 getWorkspace / rebuildAgent 全部卡死。
+     * <p>
+     * 超时后抛 {@code IllegalStateException}，由调用方 {@code buildToolkit} 里
+     * 每个 client 各自的 try/catch 捕获 —— 效果是跳过这一个 MCP 服务，
+     * 其余工具与 Agent 构建不受影响。宁可少一个 MCP 服务，也不能让工作区起不来。
+     */
+    private static final java.time.Duration MCP_REGISTER_TIMEOUT = java.time.Duration.ofSeconds(15);
+
     private void registerMcpWithFilters(Toolkit toolkit, McpClientWrapper client, List<String> enableTools) {
         if (enableTools == null || enableTools.isEmpty()) {
-            toolkit.registerMcpClient(client).block();
+            toolkit.registerMcpClient(client).block(MCP_REGISTER_TIMEOUT);
             return;
         }
         try {
@@ -417,10 +431,16 @@ public class AgentFactory {
             java.lang.reflect.Method m = mcm.getClass().getDeclaredMethod(
                     "registerMcpClient", McpClientWrapper.class, List.class);
             m.setAccessible(true);
-            ((reactor.core.publisher.Mono<?>) m.invoke(mcm, client, enableTools)).block();
+            ((reactor.core.publisher.Mono<?>) m.invoke(mcm, client, enableTools))
+                    .block(MCP_REGISTER_TIMEOUT);
+        } catch (IllegalStateException e) {
+            // block(timeout) 超时抛的就是 IllegalStateException。
+            // 这里必须原样上抛：若跟反射失败一样退回全量注册，
+            // 等于把 15 秒阻塞变成 30 秒 —— 正是本次要消除的问题。
+            throw e;
         } catch (Exception e) {
             log.warn("反射注册 MCP 带 enableTools 失败，退回全量注册: {}", e.getMessage());
-            toolkit.registerMcpClient(client).block();
+            toolkit.registerMcpClient(client).block(MCP_REGISTER_TIMEOUT);
         }
     }
 }

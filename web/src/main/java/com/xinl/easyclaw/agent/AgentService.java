@@ -955,6 +955,7 @@ public class AgentService {
             // 两者作用的 id 集合天然不相交，不会出现「结果被删掉却仍被视为已配对」。
             Set<String> declaredToolIds = new HashSet<>();
             Set<String> resolvedToolIds = new HashSet<>();
+            boolean hasEmptyUserMsg = false;
             for (Msg m : original) {
                 for (ToolUseBlock tub : m.getContentBlocks(ToolUseBlock.class)) {
                     if (tub.getId() != null) {
@@ -966,20 +967,29 @@ public class AgentService {
                         resolvedToolIds.add(trb.getId());
                     }
                 }
+                if (!hasEmptyUserMsg && m.getRole() == MsgRole.USER && isEmptyUserMsg(m)) {
+                    hasEmptyUserMsg = true;
+                }
+            }
+            // 【快速退出】绝大多数回合上下文本就是干净的，此时下面那趟「重建 cleaned 列表」
+            // 纯属白做：它会逐消息、逐 content block 复制一遍，最后发现三个计数都是 0 再整个丢弃。
+            // 长会话上下文实测可达数百 KB，这趟无谓的分配直接体现为发消息后的卡顿。
+            // 判据必须与下方三个计数器的触发条件严格对应，漏一个都会让污染逃过清理：
+            //   orphanToolResults  → 存在 id 不在 declaredToolIds 里的 ToolResultBlock
+            //   emptyUserMsgs      → hasEmptyUserMsg
+            //   danglingToolCalls  → declaredToolIds 未被 resolvedToolIds 全覆盖
+            boolean hasOrphanResult = !resolvedToolIds.isEmpty()
+                    && !declaredToolIds.containsAll(resolvedToolIds);
+            boolean hasDangling = !resolvedToolIds.containsAll(declaredToolIds);
+            if (!hasOrphanResult && !hasDangling && !hasEmptyUserMsg) {
+                return false;
             }
             List<Msg> cleaned = new ArrayList<>();
             int orphanToolResults = 0;
             int emptyUserMsgs = 0;
             for (Msg m : original) {
                 if (m.getRole() == MsgRole.USER) {
-                    String text = m.getTextContent();
-                    boolean hasOnlyEmptyText = (text == null || text.isBlank())
-                            && m.getContent() != null
-                            && m.getContent().stream().allMatch(b -> b instanceof TextBlock tb
-                                    && (tb.getText() == null || tb.getText().isBlank()));
-                    boolean hasAttachments = m.getContent() != null && m.getContent().stream()
-                            .anyMatch(b -> !(b instanceof TextBlock));
-                    if (hasOnlyEmptyText && !hasAttachments) {
+                    if (isEmptyUserMsg(m)) {
                         emptyUserMsgs++;
                         continue;
                     }
@@ -1049,6 +1059,26 @@ public class AgentService {
             log.warn("上下文净化失败（忽略）: {}", e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * 判定是否为「空 user 消息」：文本为空/全空白，且不含任何非文本块（图片、附件）。
+     * <p>
+     * 这类消息是 {@code autoConfirmResume} 注入的残留，会让模型收到一条无意义的空输入。
+     * <p>
+     * 提取成方法是因为 {@link #purgePollutedContext} 里有两处需要同一判定
+     * （快速退出的预检 与 实际清理），写两份必然随维护漂移，
+     * 一旦两处不一致就会出现「预检说干净、清理却要删」的矛盾。
+     */
+    private boolean isEmptyUserMsg(Msg m) {
+        String text = m.getTextContent();
+        boolean hasOnlyEmptyText = (text == null || text.isBlank())
+                && m.getContent() != null
+                && m.getContent().stream().allMatch(b -> b instanceof TextBlock tb
+                        && (tb.getText() == null || tb.getText().isBlank()));
+        boolean hasAttachments = m.getContent() != null && m.getContent().stream()
+                .anyMatch(b -> !(b instanceof TextBlock));
+        return hasOnlyEmptyText && !hasAttachments;
     }
 
     /**
