@@ -131,18 +131,31 @@ type SubStepEvent = 'text' | 'reasoning' | 'tool' | 'toolArgs' | 'toolResult';
  *
  * 线性关键：连续同类的 text/reasoning 合并进最后一步，遇到不同类型就开新步，
  * 从而保留「思考 → 调工具 → 继续说」的真实时序，而不是把三者拍平成一坨。
+ *
+ * 定卡关键：有 subId 时按实例精确定位，只在没有 subId（历史转录）时才退回按 name 找。
+ * 并行派发的两个同角色子 Agent（如两个 code-expert）name 完全相同，仅按 name 归并会让
+ * 两路输出交错进同一张卡片。
  */
 function appendSubStep(
   segments: Segment[], name: string, kind: SubStepEvent, delta: string, state?: string,
+  subId?: string,
 ): Segment[] {
   const segs = [...segments];
-  // 找该子 Agent 最后一个段（同名可能被多次调度，只并入最近一次）
+  // 找该子 Agent 最后一个段：优先按实例 id 精确匹配，无 id 时退回按名字（只并入最近一次调度）
   let idx = -1;
   for (let i = segs.length - 1; i >= 0; i--) {
-    if (segs[i].type === 'subagent' && segs[i].name === name) { idx = i; break; }
+    const s = segs[i];
+    if (s.type !== 'subagent') continue;
+    if (subId) {
+      if (s.subId === subId) { idx = i; break; }
+    } else if (s.name === name && !s.subId) {
+      idx = i; break;
+    }
   }
   if (idx < 0) {
-    segs.push({ type: 'subagent', name, content: '', running: true, startedAt: Date.now(), steps: [] });
+    segs.push({
+      type: 'subagent', name, content: '', running: true, startedAt: Date.now(), steps: [], subId,
+    });
     idx = segs.length - 1;
   }
   const seg = segs[idx];
@@ -354,6 +367,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
     case 'subagent': {
       const seg: Segment = {
         type: 'subagent', name: evt.content, content: '', running: true, startedAt: Date.now(),
+        subId: evt.subId,
       };
       if (last && last.role === 'ai') {
         next[lastIdx] = { ...last, segments: [...last.segments, seg] };
@@ -366,17 +380,20 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       if (last && last.role === 'ai') {
         const segs = [...last.segments];
         const name = evt.content;
+        // 有 subId 时按实例精确关卡：并行同角色实例下，只按 name 找会关掉先起的那张，
+        // 让仍在运行的另一张永久停在「执行中」。无 subId（历史转录）时保持原就近匹配。
         for (let j = segs.length - 1; j >= 0; j--) {
-          if (segs[j].type === 'subagent' && segs[j].name === name && segs[j].running) {
-            segs[j] = { ...segs[j], running: false, endedAt: Date.now() };
+          const s = segs[j];
+          if (s.type !== 'subagent' || !s.running) continue;
+          if (evt.subId ? s.subId === evt.subId : s.name === name) {
+            segs[j] = { ...s, running: false, endedAt: Date.now() };
             break;
           }
         }
         next[lastIdx] = { ...last, segments: segs };
       }
       break;
-    }
-    case 'blackboard': {
+    }    case 'blackboard': {
       // 每条登记都是独立的不可变记录 → 追加新 segment，不合并进已有的
       let payload: { seq?: number; type?: string; author?: string; content?: string } = {};
       try {
@@ -404,7 +421,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
       const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
-        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'text', delta) };
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'text', delta, undefined, evt.subId) };
       }
       break;
     }
@@ -413,7 +430,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
       const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
-        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'reasoning', delta) };
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'reasoning', delta, undefined, evt.subId) };
       }
       break;
     }
@@ -422,7 +439,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
       const toolName = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
-        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'tool', toolName) };
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'tool', toolName, undefined, evt.subId) };
       }
       break;
     }
@@ -431,7 +448,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       const name = sep >= 0 ? evt.content.slice(0, sep) : '';
       const delta = sep >= 0 ? evt.content.slice(sep + 1) : evt.content;
       if (last && last.role === 'ai') {
-        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'toolArgs', delta) };
+        next[lastIdx] = { ...last, segments: appendSubStep(last.segments, name, 'toolArgs', delta, undefined, evt.subId) };
       }
       break;
     }
@@ -446,7 +463,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       if (last && last.role === 'ai') {
         next[lastIdx] = {
           ...last,
-          segments: appendSubStep(last.segments, name, 'toolResult', result, state),
+          segments: appendSubStep(last.segments, name, 'toolResult', result, state, evt.subId),
         };
       }
       break;

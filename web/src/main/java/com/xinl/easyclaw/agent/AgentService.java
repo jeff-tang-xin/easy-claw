@@ -1182,10 +1182,28 @@ public class AgentService {
     private static final class DeltaBatcher {
         private final StringBuilder textBuf = new StringBuilder();
         private final StringBuilder thinkBuf = new StringBuilder();
-        private final Map<String, StringBuilder> subagentBufs = new HashMap<>();
-        private final Map<String, StringBuilder> subagentThinkBufs = new HashMap<>();
+        private final Map<String, SubBuf> subagentBufs = new HashMap<>();
+        private final Map<String, SubBuf> subagentThinkBufs = new HashMap<>();
         private long lastEmitAt = 0;
         private final Consumer<StreamEvent> emitter;
+
+        /**
+         * 子 Agent 的一个累积桶：按实例键分桶，但外发时要用展示名。
+         * <p>
+         * 两者必须同时保存：实例键（agentInstanceId）保证并行同名实例互不串写，
+         * 展示名（角色名）是给用户看的标签。早先用展示名兼作桶键，导致并行两个
+         * 同角色子 Agent 的输出混进同一个 StringBuilder。
+         */
+        private static final class SubBuf {
+            final String displayName;
+            final String subId;
+            final StringBuilder sb = new StringBuilder();
+
+            SubBuf(String displayName, String subId) {
+                this.displayName = displayName;
+                this.subId = subId;
+            }
+        }
 
         DeltaBatcher(Consumer<StreamEvent> emitter) {
             this.emitter = emitter;
@@ -1211,22 +1229,24 @@ public class AgentService {
             }
         }
 
-        void onSubagentText(String subName, String delta) {
+        void onSubagentText(String subName, String subId, String instanceKey, String delta) {
             if (idle()) {
-                emitter.accept(StreamEvent.subagentText(subName, delta));
+                emitter.accept(StreamEvent.subagentText(subName, delta, subId));
                 lastEmitAt = System.currentTimeMillis();
             } else {
-                subagentBufs.computeIfAbsent(subName, k -> new StringBuilder()).append(delta);
+                subagentBufs.computeIfAbsent(instanceKey, k -> new SubBuf(subName, subId))
+                        .sb.append(delta);
                 tryBurstFlush();
             }
         }
 
-        void onSubagentReasoning(String subName, String delta) {
+        void onSubagentReasoning(String subName, String subId, String instanceKey, String delta) {
             if (idle()) {
-                emitter.accept(StreamEvent.subagentReasoning(subName, delta));
+                emitter.accept(StreamEvent.subagentReasoning(subName, delta, subId));
                 lastEmitAt = System.currentTimeMillis();
             } else {
-                subagentThinkBufs.computeIfAbsent(subName, k -> new StringBuilder()).append(delta);
+                subagentThinkBufs.computeIfAbsent(instanceKey, k -> new SubBuf(subName, subId))
+                        .sb.append(delta);
                 tryBurstFlush();
             }
         }
@@ -1248,17 +1268,17 @@ public class AgentService {
                 thinkBuf.setLength(0);
             }
             if (!subagentBufs.isEmpty()) {
-                for (Map.Entry<String, StringBuilder> e : subagentBufs.entrySet()) {
-                    if (e.getValue().length() > 0) {
-                        emitter.accept(StreamEvent.subagentText(e.getKey(), e.getValue().toString()));
+                for (SubBuf b : subagentBufs.values()) {
+                    if (b.sb.length() > 0) {
+                        emitter.accept(StreamEvent.subagentText(b.displayName, b.sb.toString(), b.subId));
                     }
                 }
                 subagentBufs.clear();
             }
             if (!subagentThinkBufs.isEmpty()) {
-                for (Map.Entry<String, StringBuilder> e : subagentThinkBufs.entrySet()) {
-                    if (e.getValue().length() > 0) {
-                        emitter.accept(StreamEvent.subagentReasoning(e.getKey(), e.getValue().toString()));
+                for (SubBuf b : subagentThinkBufs.values()) {
+                    if (b.sb.length() > 0) {
+                        emitter.accept(StreamEvent.subagentReasoning(b.displayName, b.sb.toString(), b.subId));
                     }
                 }
                 subagentThinkBufs.clear();
@@ -1279,11 +1299,11 @@ public class AgentService {
 
         private int subagentTotalChars() {
             int total = 0;
-            for (StringBuilder sb : subagentBufs.values()) {
-                total += sb.length();
+            for (SubBuf b : subagentBufs.values()) {
+                total += b.sb.length();
             }
-            for (StringBuilder sb : subagentThinkBufs.values()) {
-                total += sb.length();
+            for (SubBuf b : subagentThinkBufs.values()) {
+                total += b.sb.length();
             }
             return total;
         }
@@ -1648,10 +1668,13 @@ public class AgentService {
         // 实例键：source 形如 parentSessionId/角色名，不含实例身份 → 同名并行实例会串写。
         // 上游 spawn 事件已带 agentInstanceId，缺失时回退 source（与改前行为一致）。
         String instanceKey = resolveInstanceKey(event, source);
+        // subId 只在真拿到 agentInstanceId 时才外发：回退到 source 的场景下它不是稳定实例身份，
+        // 发给前端反而会让历史转录/远程路径按一个假 id 分卡，不如留 null 让前端退化为按名归并。
+        String subId = resolveSubId(event);
         if (event instanceof TextBlockDeltaEvent e) {
-            batcher.onSubagentText(subName, e.getDelta());
+            batcher.onSubagentText(subName, subId, instanceKey, e.getDelta());
         } else if (event instanceof ThinkingBlockDeltaEvent e) {
-            batcher.onSubagentReasoning(subName, e.getDelta());
+            batcher.onSubagentReasoning(subName, subId, instanceKey, e.getDelta());
         } else if (event.getType() == AgentEventType.EXCEED_MAX_ITERS) {
             // 子 Agent 迭代耗尽：这是「子 Agent 回复被截断」最常见的原因。
             // 声明文件的 steps（框架默认仅 10）用尽后框架强行结束，此前无任何提示。
@@ -1663,19 +1686,19 @@ public class AgentService {
             onEvent.accept(StreamEvent.subagentText(subName,
                     "\n⚠️ 已达迭代上限（" + cur + "/" + max + " 步），子 Agent 回复被强制结束。"
                             + "可在「Skills 与子 Agent」页面打开 " + subName
-                            + "，编辑 frontmatter 的 steps 后保存（保存即生效）。"));
+                            + "，编辑 frontmatter 的 steps 后保存（保存即生效）。", subId));
         } else if (event.getType() == AgentEventType.AGENT_END) {
             // 子 Agent 结束：先 flush 剩余 delta，再发 subagent_end 标记
             batcher.flush();
-            onEvent.accept(StreamEvent.subagentEnd(subName));
+            onEvent.accept(StreamEvent.subagentEnd(subName, subId));
         } else {
             // 非 delta 事件：先 flush 累积的 subagent delta，保证顺序正确
             batcher.flush();
             if (event instanceof ToolCallStartEvent e) {
                 sessions.clearSubagentResult(subagentBufKey(sessionId, instanceKey, e.getToolCallId()));
-                onEvent.accept(StreamEvent.subagentTool(subName, e.getToolCallName()));
+                onEvent.accept(StreamEvent.subagentTool(subName, e.getToolCallName(), subId));
             } else if (event instanceof ToolCallDeltaEvent e) {
-                onEvent.accept(StreamEvent.subagentToolArgs(subName, e.getDelta()));
+                onEvent.accept(StreamEvent.subagentToolArgs(subName, e.getDelta(), subId));
             } else if (event instanceof ToolResultTextDeltaEvent e) {
                 // 结果文本只累积不逐字外发：等 ToolResultEndEvent 带状态一次性下发，
                 // 避免工具原始输出混进子 Agent 的正文时间线。
@@ -1689,7 +1712,7 @@ public class AgentService {
                 String state = inferToolResultState(
                         e.getState() != null ? e.getState().name() : null,
                         result);
-                onEvent.accept(StreamEvent.subagentToolResult(subName, state, result));
+                onEvent.accept(StreamEvent.subagentToolResult(subName, state, result, subId));
             }
         }
         // 其余子 Agent 内部事件忽略（不进入主流程）
@@ -1703,6 +1726,21 @@ public class AgentService {
      * 保证旧路径与远程路径的行为与改动前完全一致，不引入回归。
      */
     private String resolveInstanceKey(AgentEvent event, String source) {
+        String subId = resolveSubId(event);
+        return subId != null ? subId : source;
+    }
+
+    /**
+     * 取框架事件里的子 Agent 实例标识（{@code agentInstanceId}），取不到返回 null。
+     * <p>
+     * 该 metadata 由 spawn 侧在 start / 中间 / end 全部事件上填充，是并行同名子 Agent 之间
+     * 唯一可靠的区分依据 —— {@code source} 只编码 parentSession/agentId，同名并行实例完全相同
+     * （框架 {@code AgentEvent} 的 Javadoc 对此有明确警告）。
+     * <p>
+     * 与 {@link #resolveInstanceKey} 的分工：本方法「拿不到就说拿不到」，用于决定是否给前端
+     * 下发 subId；后者在拿不到时回退 source，用于内部分桶（内部必须有个非 null 键）。
+     */
+    private String resolveSubId(AgentEvent event) {
         Map<String, Object> metadata = event.getMetadata();
         if (metadata != null) {
             Object v = metadata.get(AgentEvent.METADATA_AGENT_INSTANCE_ID);
@@ -1710,7 +1748,7 @@ public class AgentService {
                 return s;
             }
         }
-        return source;
+        return null;
     }
 
     /**

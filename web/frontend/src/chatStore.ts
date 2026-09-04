@@ -43,6 +43,13 @@ export interface Segment {
    * 历史转录回放（无 id）时为 undefined，此时退化为就近匹配。
    */
   toolCallId?: string;
+  /**
+   * 子 Agent 实例 id（type==='subagent'）。来自后端 StreamEvent.subId（框架 agentInstanceId），
+   * 用于把后续 subagent_* 增量精确归并到发起它的那张卡片：并行派发两个同角色子 Agent 时
+   * name 完全相同，只按 name 找卡会把两个实例的步骤全挤进同一张。
+   * 历史转录回放（无 subId）时为 undefined，此时退化为按 name 归并。
+   */
+  subId?: string;
   /** 工具调用参数（JSON 字符串） */
   args?: string;
   /** 工具执行结果（含状态前缀，如 "(SUCCESS) ..."） */
