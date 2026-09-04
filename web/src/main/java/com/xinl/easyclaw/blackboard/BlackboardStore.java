@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.stream.Stream;
 
 /**
  * 共享记录本（blackboard）存储：工作区内的 append-only JSONL。
@@ -145,10 +146,63 @@ public class BlackboardStore {
 
     /** 记录本文件路径；key 经 safe 化后作为文件名，防止越出 blackboard 目录 */
     private Path blackboardFile(WorkspaceContext workspace, String key) {
-        return workspace.getPath()
-                .resolve(".easyClaw").resolve("agent").resolve("blackboard")
+        return blackboardDir(workspace)
                 .resolve(safeKey(key) + ".jsonl")
                 .normalize();
+    }
+
+    /** 记录本根目录：{@code <workspace>/.easyClaw/agent/blackboard} */
+    private Path blackboardDir(WorkspaceContext workspace) {
+        return workspace.getPath()
+                .resolve(".easyClaw").resolve("agent").resolve("blackboard")
+                .normalize();
+    }
+
+    /**
+     * 列出该工作区下所有记录本的 key（即 jsonl 文件名去掉后缀），按最后修改时间倒序。
+     * <p>
+     * 供管理页面浏览用：{@link #read} 只能按已知 key 取单个记录本，而页面需要先知道
+     * 「这个工作区里有哪些记录本」。返回的是 safeKey 化后的名字（磁盘真实文件名），
+     * 可直接回传给 {@link #read} —— safeKey 是幂等的，二次处理不会变形。
+     *
+     * @return key 列表；目录不存在或读取失败时返回空列表（管理页面不应因此报错）
+     */
+    public List<BlackboardBook> listBooks(WorkspaceContext workspace) {
+        Path dir = blackboardDir(workspace);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        List<BlackboardBook> books = new ArrayList<>();
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".jsonl")).toList()) {
+                String fileName = p.getFileName().toString();
+                String key = fileName.substring(0, fileName.length() - ".jsonl".length());
+                long modified = 0L;
+                long entries = 0L;
+                try {
+                    modified = Files.getLastModifiedTime(p).toMillis();
+                    entries = countLines(p);
+                } catch (IOException ignore) {
+                    // 单个文件读不到不应让整个列表失败，保留 key 让用户至少看到它存在
+                }
+                books.add(new BlackboardBook(key, entries, modified));
+            }
+        } catch (IOException e) {
+            log.warn("列出记录本目录失败: {}, {}", dir, e.getMessage());
+            return List.of();
+        }
+        books.sort((a, b) -> Long.compare(b.lastModified(), a.lastModified()));
+        return List.copyOf(books);
+    }
+
+    /**
+     * 一个记录本的概要（管理页面列表用）。
+     *
+     * @param key          记录本键（磁盘文件名去后缀，通常是会话 id）
+     * @param entries      有效条目数
+     * @param lastModified 最后修改时间（epoch millis）
+     */
+    public record BlackboardBook(String key, long entries, long lastModified) {
     }
 
     /**

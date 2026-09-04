@@ -1964,10 +1964,12 @@ public class AgentService {
                     trace.toolCalled = true;
                     trace.calls.put(trace.resolveKeyForStart(callId), new ToolCallSlot(name));
                     if (name != null && SUBAGENT_DISPATCH_TOOLS.contains(name.toLowerCase())) {
-                        // 此刻工具参数尚在 TOOL_CALL_DELTA 流式拼接中，拿不到 agent_id →
-                        // 循环防护无法在此判定，已下移到 TOOL_CALL_END（参数已完整）。
-                        // 这里只负责渲染「子 Agent 执行」气泡。
-                        onEvent.accept(StreamEvent.subagent(extractSubagentName(name)));
+                        // 子 Agent 建卡推迟到 TOOL_CALL_END（参数完整时）或 handleSubagentEvent
+                        // （首个真实事件时自动建卡），因为 TOOL_CALL_START 只有工具名 "agent_spawn"
+                        // 而非真实角色名，且拿不到 subId —— 建出来的卡名字错误、与后续带 subId 的
+                        // delta 事件永远匹配不上，表现为「并行子 Agent 永久停在执行中」。
+                        // 实际内容流正常（handleEvent:1893 靠 source.contains("/") 路由），
+                        // 是卡片身份错位而非内容丢失。
                     } else {
                         onEvent.accept(StreamEvent.tool(name, callId));
                     }
@@ -1985,10 +1987,16 @@ public class AgentService {
                 String callId = event instanceof ToolCallEndEvent e ? e.getToolCallId() : null;
                 ToolCallSlot st = trace.get(callId);
                 String args = st == null ? "" : st.args.toString().trim();
-                onEvent.accept(StreamEvent.toolArgs(args.isEmpty() ? "(无参数)" : args, callId));
+                boolean dispatchTool = st != null && st.toolName != null
+                        && SUBAGENT_DISPATCH_TOOLS.contains(st.toolName.toLowerCase());
+                // 派发类工具不发 tool_args：它在 TOOL_CALL_START 未建工具卡（见该分支说明），
+                // 此处若照常下发，前端 patchTool 的兜底会把参数灌进「最后一个仍在执行的工具段」，
+                // 污染无关工具卡。子 Agent 的入参已由 subagent_tool_args 在其自己的折叠块内呈现。
+                if (!dispatchTool) {
+                    onEvent.accept(StreamEvent.toolArgs(args.isEmpty() ? "(无参数)" : args, callId));
+                }
                 // 循环调度防护：参数已完整，此处才能取到真实的子 Agent 身份
-                if (st != null && st.toolName != null
-                        && SUBAGENT_DISPATCH_TOOLS.contains(st.toolName.toLowerCase())) {
+                if (dispatchTool) {
                     effects.onSubagentDispatched(extractDispatchTarget(args));
                 }
             }
@@ -2026,8 +2034,15 @@ public class AgentService {
                                 e.getState() != null ? e.getState().name() : null,
                                 result)
                         : inferToolResultState(null, result);
-                onEvent.accept(StreamEvent.toolResult("(" + state + ") "
-                        + (result.isEmpty() ? "(空结果)" : result), callId));
+                boolean dispatchTool = st != null && st.toolName != null
+                        && SUBAGENT_DISPATCH_TOOLS.contains(st.toolName.toLowerCase());
+                // 派发类工具不发 toolResult/toolEnd：TOOL_CALL_START 未建工具卡（见该分支），
+                // 此处若照常下发，前端 patchTool 兜底会污染「最后一个仍在执行的工具段」。
+                // 子 Agent 的运行结果已由 subagent_tool_result 在折叠块内呈现。
+                if (!dispatchTool) {
+                    onEvent.accept(StreamEvent.toolResult("(" + state + ") "
+                            + (result.isEmpty() ? "(空结果)" : result), callId));
+                }
                 // 工具连续失败护栏与失败计数已迁移至 ToolFailGuard middleware，
                 // 它在 onActing 里统计并经 AgentEventEmitter 发 CustomEvent("tool_fail_guard")，
                 // 由本 switch 的 CUSTOM 分支翻译。此处不再重复统计与推送。
@@ -2035,7 +2050,9 @@ public class AgentService {
                     // 黑板登记成功 → 推送条目给 UI 实时展示（并行子 Agent 的结论对用户可见）
                     emitBlackboardIfAppend(toolName, st == null ? "" : st.args.toString(), result, onEvent);
                 }
-                onEvent.accept(StreamEvent.toolEnd(toolName, callId));
+                if (!dispatchTool) {
+                    onEvent.accept(StreamEvent.toolEnd(toolName, callId));
+                }
             }
             case REQUIRE_USER_CONFIRM -> {
                 // 工具执行前需用户确认：只有未被预授权规则覆盖的工具才会走到这里（弹窗）。
@@ -2052,7 +2069,12 @@ public class AgentService {
                 }
             }
             case SUBAGENT_EXPOSED -> {
-                onEvent.accept(StreamEvent.subagent(extractSubagentName(String.valueOf(event.getId()))));
+                // 取 source 尾段作为角色名（形如 "main/reviewer" → "reviewer"），
+                // 不可用 event.getId()：它返回的是 agent path 而非可读角色名。
+                String src = event.getSource();
+                String subName = src != null && src.contains("/")
+                        ? src.substring(src.lastIndexOf('/') + 1) : "子 Agent";
+                onEvent.accept(StreamEvent.subagent(subName));
             }
             default -> {
                 // 其他事件忽略
@@ -2165,14 +2187,6 @@ public class AgentService {
                             + " 次，每次均在拿到上一次结果后重派），已自动停止。"
                             + "请在后续指令中明确要求不要重复调度同一子 Agent。\"}"));
         }
-    }
-
-    private String extractSubagentName(String raw) {
-        if (raw == null || raw.isBlank()) {
-            return "子 Agent";
-        }
-        String s = raw.replace("subagent_", "").replace("subagent-", "");
-        return s.isBlank() ? "子 Agent" : s;
     }
 
     /**

@@ -6,6 +6,7 @@ import RolesPage from './pages/RolesPage';
 import ScenariosPage from './pages/ScenariosPage';
 import ToolsPage from './pages/ToolsPage';
 import McpPage from './pages/McpPage';
+import BlackboardPage from './pages/BlackboardPage';
 import SettingsPage from './pages/SettingsPage';
 import './chatSocket';
 
@@ -16,6 +17,7 @@ const menu = [
   { to: '/roles', icon: '🎭', label: '角色' },
   { to: '/tools', icon: '🔧', label: '工具' },
   { to: '/mcp', icon: '🔌', label: 'MCP' },
+  { to: '/blackboard', icon: '🗒️', label: '记录本' },
   { to: '/settings', icon: '⚙️', label: '设置' },
 ];
 
@@ -55,6 +57,7 @@ export default function App() {
           <Route path="/roles" element={<RolesPage />} />
           <Route path="/tools" element={<ToolsPage />} />
           <Route path="/mcp" element={<McpPage />} />
+          <Route path="/blackboard" element={<BlackboardPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </main>
