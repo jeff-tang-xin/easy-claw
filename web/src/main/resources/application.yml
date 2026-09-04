@@ -55,15 +55,11 @@ agentscope:
     #     多智能体编排的异步降级路径失效。原值 10min 与 600s 恰好相等 = 竞态，已修正。
     #  2) 必须 > shell-timeout-seconds（当前 300s），否则 shell 自身超时永远不生效。
     tool-timeout-minutes: 12
-    # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放 SSE 与会话状态
+    # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放会话状态
     confirm-timeout-minutes: ${AGENTSCOPE_CONFIRM_TIMEOUT_MINUTES:10}
-    # SSE 连接超时（分钟），需大于「单回合最长耗时 + confirm-timeout-minutes」
-    sse-timeout-minutes: ${AGENTSCOPE_SSE_TIMEOUT_MINUTES:60}
     # 单请求附件数量 / base64 总体积上限（防止超大附件直接打满堆）
     max-attachments: 20
     max-attachment-bytes: 33554432
-    # 同时活跃 SSE 连接数上限：每条连接背后挂一个 Agent 回合，防止被反复调用打满线程池
-    max-sse-connections: ${AGENTSCOPE_MAX_SSE_CONNECTIONS:64}
     # 循环护栏阈值（策略参数，原先硬编码在事件分发逻辑中）
     max-same-subagent-calls: 3
     max-consecutive-tool-failures: 2

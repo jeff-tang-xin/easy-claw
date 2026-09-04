@@ -326,23 +326,11 @@ public class AgentScopeProperties {
          */
         private int confirmTimeoutMinutes = 10;
 
-        /**
-         * SSE 连接超时（分钟）。0 表示永不超时（不推荐：存在「流已终止但连接不关」的路径，
-         * 会让异步请求与会话状态常驻）。应大于单回合最长耗时 + confirmTimeoutMinutes。
-         */
-        private int sseTimeoutMinutes = 60;
-
         /** 单次请求附件数量上限，入口即拒，避免超量 base64 进入内存 */
         private int maxAttachments = 20;
 
         /** 单次请求附件 base64 总长度上限（字节），默认 32MB */
         private long maxAttachmentBytes = 32L * 1024 * 1024;
-
-        /**
-         * 同时活跃的 SSE 连接数上限。每条连接背后挂着一个 Agent 回合与一份会话内存，
-         * 不限流则单个客户端反复调 /stream 即可耗尽容器工作线程。0 或负数表示不限制。
-         */
-        private int maxSseConnections = 64;
 
         /**
          * 同一会话内同一子 Agent 的最大调度次数。超过即视为循环调度并 interrupt。
@@ -437,14 +425,6 @@ public class AgentScopeProperties {
             this.confirmTimeoutMinutes = confirmTimeoutMinutes;
         }
 
-        public int getSseTimeoutMinutes() {
-            return sseTimeoutMinutes;
-        }
-
-        public void setSseTimeoutMinutes(int sseTimeoutMinutes) {
-            this.sseTimeoutMinutes = sseTimeoutMinutes;
-        }
-
         public int getMaxAttachments() {
             return maxAttachments;
         }
@@ -491,14 +471,6 @@ public class AgentScopeProperties {
 
         public void setWorkspaceIdleMinutes(int workspaceIdleMinutes) {
             this.workspaceIdleMinutes = workspaceIdleMinutes;
-        }
-
-        public int getMaxSseConnections() {
-            return maxSseConnections;
-        }
-
-        public void setMaxSseConnections(int maxSseConnections) {
-            this.maxSseConnections = maxSseConnections;
         }
 
         public int getShellTimeoutSeconds() {
