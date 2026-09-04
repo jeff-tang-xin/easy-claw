@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
+import com.xinl.easyclaw.agent.event.EventSerializer;
+import com.xinl.easyclaw.agent.event.LegacyEventSerializer;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -41,6 +43,11 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final AgentService agentService;
     private final WorkspaceManager workspaceManager;
     private final ObjectMapper mapper = new ObjectMapper();
+    /**
+     * 事件 → 前端 JSON 的唯一出口。取 legacy 实现即当前线上协议；
+     * 未来协议协商落地时只替换此处的实现，推送逻辑不变。
+     */
+    private final EventSerializer eventSerializer = new LegacyEventSerializer(mapper);
 
     /** WS 发送超时（ms）：超过即关闭慢客户端，避免慢消费者拖住事件推送线程 */
     private static final int SEND_TIME_LIMIT_MS = 5_000;
@@ -425,11 +432,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         String json;
         String workspaceId = sessionWorkspaceIds.getOrDefault(sessionId, "");
         try {
-            Map<String, Object> envelope = new LinkedHashMap<>();
-            envelope.put("workspaceId", workspaceId);
-            envelope.put("sessionId", sessionId);
-            envelope.put("event", evt);
-            json = mapper.writeValueAsString(envelope);
+            json = eventSerializer.serialize(workspaceId, sessionId, evt);
         } catch (Exception e) {
             log.warn("WS JSON 序列化失败: sessionId={}, err={}", sessionId, e.getMessage());
             return;
