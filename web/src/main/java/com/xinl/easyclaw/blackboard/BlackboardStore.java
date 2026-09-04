@@ -174,7 +174,8 @@ public class BlackboardStore {
         }
         List<BlackboardBook> books = new ArrayList<>();
         try (Stream<Path> files = Files.list(dir)) {
-            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".jsonl")).toList()) {
+            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".jsonl")
+                            && !f.getFileName().toString().contains(".archived-")).toList()) {
                 String fileName = p.getFileName().toString();
                 String key = fileName.substring(0, fileName.length() - ".jsonl".length());
                 long modified = 0L;
@@ -203,6 +204,46 @@ public class BlackboardStore {
      * @param lastModified 最后修改时间（epoch millis）
      */
     public record BlackboardBook(String key, long entries, long lastModified) {
+    }
+
+    /**
+     * 归档指定记录本：把当前 jsonl 改名为 {@code <key>.archived-<时间戳>.jsonl}，
+     * 记录本随之归零（下次 append 会新建空文件）。
+     * <p>
+     * <b>为什么是归档而不是删除：</b>blackboard 的核心价值是「不可抵赖的 append-only 轨迹」，
+     * 真删除会破坏这一性质。改名保留了全部历史，出问题仍可回溯，
+     * 同时达到「下次任务从干净的黑板开始」的目的。
+     * <p>
+     * <b>为什么不提供 AI 工具：</b>并行子 Agent 场景下，若 AI 能自行清空黑板，
+     * 可能在「觉得记录太乱」时把同伴正在依赖的结论抹掉 —— 这是灾难性的。
+     * 故归档仅由人工经管理页面触发。
+     *
+     * @return 归档后的文件名；记录本不存在时返回 null
+     */
+    public String archiveBook(WorkspaceContext workspace, String key) {
+        Path file = blackboardFile(workspace, key);
+        ReentrantLock lock = locks.computeIfAbsent(fileKey(file), k -> new ReentrantLock());
+        lock.lock();
+        try {
+            if (!Files.exists(file)) {
+                return null;
+            }
+            String stamp = OffsetDateTime.now()
+                    .format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
+            String archivedName = safeKey(key) + ".archived-" + stamp + ".jsonl";
+            Path target = file.getParent().resolve(archivedName);
+            Files.move(file, target);
+            // 发号器必须重置：否则新记录本的 seq 会从旧值接着涨，
+            // 用户看到「清空后第一条是 #106」会非常困惑。
+            sequences.remove(fileKey(file));
+            log.info("记录本已归档: {} → {}", file.getFileName(), archivedName);
+            return archivedName;
+        } catch (IOException e) {
+            log.warn("归档记录本失败: {}, {}", file, e.getMessage());
+            throw new IllegalStateException("归档失败：" + e.getMessage(), e);
+        } finally {
+            lock.unlock();
+        }
     }
 
     /**

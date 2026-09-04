@@ -6,6 +6,7 @@ import com.xinl.easyclaw.tool.service.ToolRegistryService;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.BlackboardTools;
+import com.xinl.easyclaw.tools.KnowledgeTools;
 import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
 import io.agentscope.core.tool.AgentTool;
@@ -39,6 +40,7 @@ public class AgentFactory {
     private final CodeGenerationTools codeTools;
     private final SkillScriptTools skillScriptTools;
     private final BlackboardTools blackboardTools;
+    private final KnowledgeTools knowledgeTools;
     private final McpConnectionService mcpConnectionService;
     private final ToolRegistryService toolRegistryService;
     private final ToolManagementService toolManagementService;
@@ -50,6 +52,7 @@ public class AgentFactory {
                         CodeGenerationTools codeTools,
                         SkillScriptTools skillScriptTools,
                         BlackboardTools blackboardTools,
+                        KnowledgeTools knowledgeTools,
                         McpConnectionService mcpConnectionService,
                         ToolRegistryService toolRegistryService,
                         ToolManagementService toolManagementService) {
@@ -60,6 +63,7 @@ public class AgentFactory {
         this.codeTools = codeTools;
         this.skillScriptTools = skillScriptTools;
         this.blackboardTools = blackboardTools;
+        this.knowledgeTools = knowledgeTools;
         this.mcpConnectionService = mcpConnectionService;
         this.toolRegistryService = toolRegistryService;
         this.toolManagementService = toolManagementService;
@@ -120,6 +124,7 @@ public class AgentFactory {
         registration.tool(codeTools);
         registration.tool(skillScriptTools);
         registration.tool(blackboardTools);
+        registration.tool(knowledgeTools);
         // 按工具管理页的启用状态过滤（disableTools 按 @Tool 名称）
         List<String> disabled = toolRegistryService.disabledToolNames();
         if (!disabled.isEmpty()) {

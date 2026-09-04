@@ -1,5 +1,5 @@
 import {useEffect, useState} from 'react';
-import {getJson} from '../api';
+import {getJson, postJson} from '../api';
 
 interface WorkspaceSummary {
   workspaceId: string;
@@ -45,6 +45,9 @@ export default function BlackboardPage() {
   const [limit, setLimit] = useState(100);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [confirmArchive, setConfirmArchive] = useState(false);
+  const [archiving, setArchiving] = useState(false);
+  const [notice, setNotice] = useState('');
 
   // 工作区列表：进入页面即加载，并默认选中第一个
   useEffect(() => {
@@ -75,6 +78,9 @@ export default function BlackboardPage() {
   // 选中记录本 / 调整条数上限 → 拉条目
   useEffect(() => {
     if (!wsId || !activeKey) return;
+    // 切换记录本时收起归档确认，避免确认框指向的其实是上一本
+    setConfirmArchive(false);
+    setNotice('');
     setLoading(true);
     const url = `/api/blackboard/entries?workspaceId=${encodeURIComponent(wsId)}`
       + `&key=${encodeURIComponent(activeKey)}&limit=${limit}`;
@@ -107,6 +113,31 @@ export default function BlackboardPage() {
       .finally(() => setLoading(false));
   };
 
+  // 归档并清空：把整本移走（不删除），让新会话从空白开始
+  // 二次确认刻意用独立状态而非 window.confirm —— 需要在弹窗里说清「归档不是删除」
+  const archive = () => {
+    if (!wsId || !activeKey) return;
+    setArchiving(true);
+    const url = `/api/blackboard/archive?workspaceId=${encodeURIComponent(wsId)}`
+      + `&key=${encodeURIComponent(activeKey)}`;
+    postJson<{ archivedAs: string }>(url, {})
+      .then((res) => {
+        setConfirmArchive(false);
+        setNotice(`已归档为 ${res.archivedAs}，原记录本已清空（历史内容仍保留在磁盘上）。`);
+        setActiveKey('');
+        setEntries([]);
+        return getJson<BlackboardBook[]>(
+          `/api/blackboard/books?workspaceId=${encodeURIComponent(wsId)}`);
+      })
+      .then((list) => {
+        if (!list) return;
+        setBooks(list);
+        setError('');
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setArchiving(false));
+  };
+
   const kw = keyword.trim().toLowerCase();
   const shown = entries.filter((e) => {
     if (typeFilter !== 'all' && (e.type || 'note') !== typeFilter) return false;
@@ -126,9 +157,10 @@ export default function BlackboardPage() {
     <div className="page">
       <h1 className="page-title">🗒️ 共享记录本</h1>
       <p className="hint" style={{ marginTop: -8 }}>
-        主 Agent 与并行子 Agent 的共享结论区，只读（仅 AI 可经 blackboard_append 工具写入）。
+        主 Agent 与并行子 Agent 的共享结论区。条目只读（仅 AI 可经 blackboard_append 工具写入），管理员可整本归档清空。
       </p>
       {error && <div className="error-box">{error}</div>}
+      {notice && <div className="card" style={{ marginBottom: 12, borderLeft: '3px solid #16a34a' }}>{notice}</div>}
 
       <div className="card" style={{ marginBottom: 16 }}>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -157,7 +189,38 @@ export default function BlackboardPage() {
           <button className="btn small" onClick={refresh} disabled={loading}>
             {loading ? '加载中…' : '刷新'}
           </button>
+          <button
+            className="btn small"
+            onClick={() => { setConfirmArchive(true); setNotice(''); }}
+            disabled={!activeKey || loading || archiving || confirmArchive}
+            title={activeKey ? `归档并清空「${activeKey}」` : '请先选择一个记录本'}
+          >
+            🗄️ 归档并清空
+          </button>
         </div>
+
+        {confirmArchive && activeKey && (
+          <div className="card" style={{ marginTop: 12, marginBottom: 0, borderLeft: '3px solid #f59e0b' }}>
+            <div style={{ marginBottom: 8 }}>
+              确认归档记录本 <strong style={{ wordBreak: 'break-all' }}>{activeKey}</strong>
+              （{entries.length} 条）？
+            </div>
+            <div className="hint" style={{ marginBottom: 10 }}>
+              归档 <strong>不是删除</strong>：整本会被改名为 <code>{activeKey}.archived-&lt;时间戳&gt;.jsonl</code> 留在磁盘上，
+              随后记录本归零、序号从 #1 重新开始。
+              <br />
+              请确认正在运行的 Agent 已不再需要这些结论 —— 归档后它们读不到旧条目。
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn small primary" onClick={archive} disabled={archiving}>
+                {archiving ? '归档中…' : '确认归档'}
+              </button>
+              <button className="btn small" onClick={() => setConfirmArchive(false)} disabled={archiving}>
+                取消
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       <div style={{ display: 'flex', gap: 16, alignItems: 'flex-start' }}>
