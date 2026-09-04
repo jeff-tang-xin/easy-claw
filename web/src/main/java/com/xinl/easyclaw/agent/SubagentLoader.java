@@ -230,6 +230,11 @@ public class SubagentLoader {
         int steps = effectiveStepFloor(binding);
         List<String> tools = null;
         List<String> skills = null;
+        // 会话复用：默认开启，让同一子 Agent 被返工重派时不必从零重读代码。
+        // 框架侧 key 由 deterministicHash(parentSessionId, agentId, label) 推导
+        // （AgentSpawnTool:371），与非复用分支的 UUID 随机 key 相对。
+        // 声明可用 persistSession: false 显式关闭。
+        boolean persistSession = true;
 
         String body = content;
         if (content.trim().startsWith("---")) {
@@ -262,6 +267,8 @@ public class SubagentLoader {
                         }
                         case "tools" -> tools = parseNameList(value);
                         case "skills" -> skills = parseNameList(value);
+                        case "persistSession", "persist-session" ->
+                                persistSession = Boolean.parseBoolean(value);
                         default -> {
                             // 忽略未知字段
                         }
@@ -314,7 +321,8 @@ public class SubagentLoader {
                 .name(agentId)
                 .description(description.isBlank() ? "子 Agent: " + agentId : description)
                 .inlineAgentsBody(prompt)
-                .steps(steps);
+                .steps(steps)
+                .persistSession(persistSession);
         // 模型：frontmatter 显式指定优先；否则取关联角色的模型配置（团队模式按角色模型运行）。
         // 注：角色的 baseUrl/apiKey 无法经 SubagentDeclaration 传递（声明层只有 model 字符串），
         // 故角色私有端点在子 Agent 上不生效 —— 现有角色 model 均留空跟随全局，暂无影响。
