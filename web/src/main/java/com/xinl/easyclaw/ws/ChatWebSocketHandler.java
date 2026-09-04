@@ -76,14 +76,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
      */
     private final com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard;
     private final com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator;
+    private final com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties;
 
     public ChatWebSocketHandler(AgentService agentService, WorkspaceManager workspaceManager,
                                 com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard,
-                                com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator) {
+                                com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator,
+                                com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
         this.accessGuard = accessGuard;
         this.toolConfirmValidator = toolConfirmValidator;
+        this.agentScopeProperties = agentScopeProperties;
     }
 
     /**
@@ -102,6 +105,33 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             sendJson(sessionId, StreamEvent.end());
             return false;
         }
+    }
+
+    /**
+     * 校验附件数量与总体积。
+     *
+     * @return null 表示通过，否则为面向用户的错误文案
+     */
+    private String validateAttachments(List<UserAttachment> atts) {
+        if (atts.isEmpty()) {
+            return null;
+        }
+        int maxCount = agentScopeProperties.getAgent().getMaxAttachments();
+        long maxBytes = agentScopeProperties.getAgent().getMaxAttachmentBytes();
+        if (maxCount > 0 && atts.size() > maxCount) {
+            return "附件数量超限：" + atts.size() + " > " + maxCount;
+        }
+        if (maxBytes > 0) {
+            long total = 0L;
+            for (UserAttachment a : atts) {
+                total += a.base64Data() == null ? 0L : a.base64Data().length();
+                // 边累加边判定：避免遍历完才发现超限（此时数据已在内存中）
+                if (total > maxBytes) {
+                    return "附件总体积超限（上限 " + (maxBytes / 1024 / 1024) + "MB）";
+                }
+            }
+        }
+        return null;
     }
 
     private static final class PendingBuffer {
@@ -299,6 +329,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         log.info("WS chat 收到: workspaceId={}, sessionId={}, skill={}, msgLen={}, atts={}",
                 workspaceId, sessionId, skillName, msg.length(), atts.size());
         if (!guardOk(workspaceId, sessionId)) {
+            return;
+        }
+        // 入口即拒超量附件：base64 会整体进内存并拼入消息，放过去等于把堆交给调用方支配
+        String attErr = validateAttachments(atts);
+        if (attErr != null) {
+            log.warn("WS chat 附件校验失败: sessionId={}, reason={}", sessionId, attErr);
+            sendJson(sessionId, StreamEvent.error(attErr));
+            sendJson(sessionId, StreamEvent.end());
             return;
         }
         final int[] counter = {0};
