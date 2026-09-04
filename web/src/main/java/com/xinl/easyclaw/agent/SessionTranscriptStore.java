@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.agent;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import org.slf4j.Logger;
@@ -31,8 +32,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class SessionTranscriptStore {
 
     private static final Logger log = LoggerFactory.getLogger(SessionTranscriptStore.class);
-    private static final ObjectMapper MAPPER = new ObjectMapper();
+    private static final ObjectMapper MAPPER = new ObjectMapper()
+            .configure(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_AS_NULL, true);
     public static final String FILE_NAME = "transcript.jsonl";
+
+    /** 单次 {@link #read} 最多打印多少条坏行明细，其余只计入结尾汇总（避免刷爆日志）。 */
+    private static final int BAD_LINE_WARN_LIMIT = 5;
 
     /**
      * 按会话分段的写锁：此前所有方法都是 {@code static synchronized}，用的是
@@ -88,6 +93,10 @@ public final class SessionTranscriptStore {
 
     /**
      * 读取全部转录消息；文件不存在/解析失败返回空列表（逐行容错，坏行跳过）。
+     * <p>
+     * 坏行会限流告警：每次读取最多打印 {@link #BAD_LINE_WARN_LIMIT} 条明细，
+     * 结尾再补一条总数汇总。此前这里是静默 {@code catch}，一旦落盘格式改错，
+     * 现象只是「历史消息悄悄变少」而无任何日志，几乎无法定位。
      */
     public static List<BoxMessage> read(Path sessionDir) {
         List<BoxMessage> out = new ArrayList<>();
@@ -96,19 +105,29 @@ public final class SessionTranscriptStore {
             return out;
         }
         synchronized (lockFor(sessionDir)) {
+            int badLines = 0;
+            int lineNo = 0;
             try {
                 for (String line : Files.readAllLines(file, StandardCharsets.UTF_8)) {
+                    lineNo++;
                     if (line == null || line.isBlank()) {
                         continue;
                     }
                     try {
                         out.add(MAPPER.readValue(line, BoxMessage.class));
-                    } catch (Exception ignore) {
-                        // 坏行（如写一半崩溃）跳过，保住其余历史
+                    } catch (Exception e) {
+                        // 坏行（如写一半崩溃）跳过，保住其余历史；但必须留下痕迹
+                        badLines++;
+                        if (badLines <= BAD_LINE_WARN_LIMIT) {
+                            log.warn("会话转录第 {} 行解析失败（已跳过）: {}, {}", lineNo, file, e.getMessage());
+                        }
                     }
                 }
             } catch (Exception e) {
                 log.warn("读取会话转录失败: {}, {}", file, e.getMessage());
+            }
+            if (badLines > 0) {
+                log.warn("会话转录共跳过 {} 个坏行（已读出 {} 条）: {}", badLines, out.size(), file);
             }
         }
         return out;

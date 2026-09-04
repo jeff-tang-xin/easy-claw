@@ -1,5 +1,7 @@
 package com.xinl.easyclaw.agent.domain;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -8,7 +10,16 @@ import java.util.UUID;
  * 消息盒子中的一条时序消息。
  * 一次对话的所有输出（用户问题、AI 正式输出、思考、工具调用/结果、子代理活动、确认请求、系统提示）
  * 都统一进盒子，按 seq 有序排列，可整体 JSON 序列化到磁盘（box.json）。
+ * <p>
+ * <b>持久化兼容性</b>：本类是 transcript.jsonl 的落盘格式（存量已达 90MB 级），
+ * 新旧版本必须能互读。{@code ignoreUnknown = true} 保证旧版本代码读到新版本
+ * 写出的、含新增字段的行时不抛 {@code UnrecognizedPropertyException}
+ * ——否则整行会在 {@code SessionTranscriptStore.read} 里被跳过，
+ * 表现为「历史消息悄悄变少」。未知枚举值的容错在读侧 mapper 上配置
+ * （见 {@code SessionTranscriptStore.MAPPER}）。
+ * 现有字段名与枚举名一律不可改，改名等于让存量数据失去对应字段。
  */
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class BoxMessage {
 
     public enum Type {

@@ -60,11 +60,41 @@
 
 ### ⛔ P4 / P5 按原计划不可执行（三项硬阻断，逐行核实）
 
-1. **SSE 通道未收敛**：`ChatController` 的 `POST /api/chat/stream` 走 `safeSend` 交给 Spring `SseEmitter` 自行序列化，**信封结构与 WS 不同**，是 v2 的第二个出口。注：前端 `api.ts:69` 的 `streamChat` 全仓零调用点（死路径），但后端端点仍暴露。
+1. ~~**SSE 通道未收敛**~~ → **已解除（`a7798c2`）**。原状：`ChatController` 的 `POST /api/chat/stream` 走 `safeSend` 交给 Spring `SseEmitter` 自行序列化，信封结构与 WS 不同，是 v2 的第二个出口。经四路取证（黑板 #79/#80）确认零消费者后整段删除，详见下方「Phase 3c」。
 2. **`TranscriptRecorder` 绑定 legacy 形状**（计划完全未提）：`implements Consumer<StreamEvent>`，用 `private static final char SEP = '\u0001'` 解析 `subagent_text`，按 legacy type 字符串 switch 聚合成 `BoxMessage` 写 `transcript.jsonl`，被 `GET /api/chat/history` 直接读取——这是**已落盘的持久化格式**，不是内存结构。建议 P5 把「线上协议」与「转录持久化格式」显式分离，legacy 序列化器永久保留作转录内部格式，而非随协议一起删。
 3. **6 个测试类反射硬绑私有内部结构**：`Class.forName("AgentService$ToolTrace")`、`getDeclaredMethod("handleEvent")`（`ConcurrentToolEventPairingTest`/`HandleEventSideEffectsTest`/`SubagentLoopGuardTest`/`ToolTraceStateTest`/`ParallelSubagentIsolationTest`）。删翻译层后**编译期查不出、运行时才炸**。且 `ToolTrace`/`handleEvent` 本身因 `guardSubagentLoop`、`closeInFlightTool` 依赖而不能直接删。
 
 详见 `docs/refactor-plan-ph4-5-revised.md` 与黑板 #70–#78。
+
+---
+
+### ✅ Phase 3c：删除 SSE 死通道 + 附件校验迁移（2026-09-04）
+
+| # | 内容 | commit | 判定依据 |
+|---|------|--------|----------|
+| 14 | **删除 `POST /api/chat/stream` 及其配套** | `a7798c2` | 解除硬阻断 #1。四路取证证明零消费者：① 前端 `api.ts` 的 `streamChat` 全仓零调用点，且已被 Vite tree-shaking 从构建产物 `index-CWQKO1AW.js` 中完全消除（findstr 无命中）；② 仓库无 .http/.rest/Postman/脚本引用；③ `README.md:36` 明文「WebSocket 流式输出（替代传统 SSE）」；④ 无 ChatController 测试。删除范围：`stream`/`confirm`/`pending`/`stop` 四端点 + `emitters` 表 + `safeSend`/`safeComplete` + `sseTimeoutMs` + 4 个请求 record + 死字段 `objectMapper`。WS 侧 confirm/pending/stop 分支功能等价（同一 `rejectUnknown` 白名单、同一 `resumeChat`/`allowTurn`/`allowPermanently`）。`/history`、`/status` 前端在用故保留 |
+
+**该 commit 的关键不是删除，而是删除前的迁移**：`validateAttachments` 是 `maxAttachments`/`maxAttachmentBytes` 两配置项的**全仓唯一使用者**，而其唯一调用点在即将删除的死路径上（`stream():122`）；真正在用的 WS `handleChat` 只过滤 base64 空串，**无数量与体积上限**。纯删会让附件限额从「隐蔽失效」变成「彻底无防护」。故先把该校验逐行迁到 `ChatWebSocketHandler`（判定语义、错误文案、边累加边短路的行为均未改动），再删 SSE。教训见黑板 #84：**任何「删死代码」任务都要先查被删代码里有没有唯一在生效的校验/防护**。
+
+净变更 3 files +44/−286。验证：真编译 web 126 主 + 56 测试 BUILD SUCCESS；10 个回归类 43 例全绿（条数与基线一致）；`tsc --noEmit` 零错误。
+
+**遗留待决**：`sseTimeoutMinutes`(`AgentScopeProperties:333`) 与 `maxSseConnections`(`:345`) 现已成完全死配置（除自身 getter/setter 外零读取点），但暴露在 `application.yml:61/:66` 并绑定环境变量 `AGENTSCOPE_SSE_TIMEOUT_MINUTES`/`AGENTSCOPE_MAX_SSE_CONNECTIONS`，属用户可见配置面，未擅自删除（黑板 #86）。
+
+---
+
+### 📌 v2 协议地基（已取证，实现时直接引用）
+
+读 vendored 框架源码确认的事实，不是推断：
+
+| 事实 | 证据 | 对 v2 的含义 |
+|------|------|-------------|
+| 原生 `AgentEvent` 的自描述形状 | `AgentEvent.java:33-35`：`@JsonIgnoreProperties(ignoreUnknown=true)` + `@JsonInclude(NON_NULL)` + `@JsonTypeInfo(use=Id.NAME, include=As.PROPERTY, property="type")` | 判别字段名**就叫 `type`**，与 legacy 同名但取值风格不同（原生大写蛇形 `TEXT_BLOCK_DELTA`，legacy 小写 `text`）→ 前端可用同一 `raw.type` 分流后再判风格，**信封无需改动** |
+| 注册了 29 个子类型 | `AgentEvent.java:36-71` `@JsonSubTypes` | 含 AGENT_START/END/RESULT、MODEL_CALL_*、TEXT\|THINKING\|DATA_BLOCK_*、TOOL_CALL_*、TOOL_RESULT_*、EXCEED_MAX_ITERS、REQUIRE_USER_CONFIRM、REQUEST_STOP、SUBAGENT_EXPOSED、HINT_BLOCK、ALL_TOOLS_DENIED、**CUSTOM** |
+| 基类自带 `metadata` + 实例身份常量 | `AgentEvent.java:100-103` `@JsonInclude(NON_EMPTY) Map<String,Object> metadata`；`:86` `METADATA_PARENT_SESSION_ID`、`:96` `METADATA_AGENT_INSTANCE_ID` | **legacy 用 `\u0001` 打包 subagent 身份的问题，框架已有一等公民解法**。其 Javadoc(:89-95) 明说 `source` 对并行同名 subagent 完全相同，消费者必须靠 `agentInstanceId` 隔离 per-instance 状态——与本项目 `DeltaBatcher` 桶隔离、`ParallelSubagentIsolationTest` 保护的是同一问题 |
+| `CustomEvent` 契约 | `CustomEvent.java:38-57`：仅 `name` + `value:Map`，value 为 null 时兜底 `Map.of()` | 应用层扩展 type（file_changed/blackboard/context/status/pending_info/auto_confirm，原生 29 类型中无对应）统一走此通道，**无需新增自定义事件类、无需改 vendored 源码** |
+| 未知 name 静默跳过是**框架规定的前端义务** | `CustomEvent.java:28-29` Javadoc 明文 "Front-end implementations should handle unknown getName() values gracefully — skip with no error" | 前端 v2 解析器必须实现未知 name 容错，这不是可选优化 |
+
+**由此得出的 v2 设计要点**：① subagent 类事件改用「原生事件 + `metadata.agentInstanceId`」结构化承载，废弃 `\u0001` 字符串打包，同时消除 `TranscriptRecorder` 的 `SEP` 与线上协议的隐式耦合；② 原生自带 `ignoreUnknown` 的前向兼容性优于自研 `StreamEvent`。
 
 ---
 
