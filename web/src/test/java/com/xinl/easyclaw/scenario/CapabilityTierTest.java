@@ -76,15 +76,17 @@ class CapabilityTierTest {
         }
     }
 
-    /** 反射扫描本项目所有 @Tool 注解的工具名（与 Toolkit 实际注册来源保持一致） */
+    /**
+     * 扫描本项目所有 @Tool 注解的工具名（与 Toolkit 实际注册来源保持一致）。
+     * <p>
+     * <b>持有类列表由 classpath 扫描得出，不手工枚举</b>：{@code AgentFactory} 注册的工具持有类
+     * 都是 {@code com.xinl.easyclaw.tools} 包下的 {@code @Component}，这里按同样口径发现它们。
+     * 早先这里硬编码了 4 个类，新增 {@code BlackboardTools} 后忘记同步，导致
+     * {@code blackboard_append} 被误判成「不存在的工具名」——正是本方法注释想避免的腐烂。
+     */
     private static Set<String> scanCustomToolNames() {
         Set<String> names = new java.util.LinkedHashSet<>();
-        List<Class<?>> holders = List.of(
-                com.xinl.easyclaw.tools.FileOperationTools.class,
-                com.xinl.easyclaw.tools.WebSearchTools.class,
-                com.xinl.easyclaw.tools.CodeGenerationTools.class,
-                com.xinl.easyclaw.tools.SkillScriptTools.class);
-        for (Class<?> holder : holders) {
+        for (Class<?> holder : discoverToolHolders()) {
             for (java.lang.reflect.Method m : holder.getMethods()) {
                 io.agentscope.core.tool.Tool tool =
                         m.getAnnotation(io.agentscope.core.tool.Tool.class);
@@ -94,6 +96,28 @@ class CapabilityTierTest {
             }
         }
         return names;
+    }
+
+    /**
+     * 扫描 {@code com.xinl.easyclaw.tools} 包下所有 {@code @Component} 工具持有类。
+     * <p>
+     * 用 Spring 的 classpath 扫描器（不启动容器，仅做字节码扫描，开销可忽略），
+     * 口径与 {@code AgentFactory} 注入 {@code @Component} 的方式一致：
+     * 新增工具持有类后本用例自动覆盖，无需记得改测试。
+     */
+    private static List<Class<?>> discoverToolHolders() {
+        var scanner = new org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider(false);
+        scanner.addIncludeFilter(new org.springframework.core.type.filter.AnnotationTypeFilter(
+                org.springframework.stereotype.Component.class));
+        List<Class<?>> holders = new java.util.ArrayList<>();
+        for (var bd : scanner.findCandidateComponents("com.xinl.easyclaw.tools")) {
+            try {
+                holders.add(Class.forName(bd.getBeanClassName()));
+            } catch (ClassNotFoundException e) {
+                throw new IllegalStateException("扫描到工具持有类但无法加载: " + bd.getBeanClassName(), e);
+            }
+        }
+        return holders;
     }
 
     @Test

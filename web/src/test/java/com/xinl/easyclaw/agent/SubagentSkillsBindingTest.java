@@ -90,7 +90,8 @@ class SubagentSkillsBindingTest {
                 正文。
                 """);
 
-        assertThat(decl.getTools()).containsExactly("read_file", "grep_files");
+        assertThat(decl.getTools())
+                .containsExactly("read_file", "grep_files", "blackboard_append", "blackboard_read");
         assertThat(decl.getSkills()).containsExactly("clean-code");
     }
 

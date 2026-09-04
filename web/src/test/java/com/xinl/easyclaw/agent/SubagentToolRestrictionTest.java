@@ -56,7 +56,10 @@ class SubagentToolRestrictionTest {
                 正文。
                 """, binding(null, null));
 
-        assertThat(decl.getTools()).containsExactly("read_file", "execute", "write_file");
+        // blackboard_* 由 SubagentLoader.withBlackboardTools 无条件补齐（子 Agent 间唯一通道），
+        // 故凡是「白名单非 null」的用例，期望值都要带上这两个名字。
+        assertThat(decl.getTools())
+                .containsExactly("read_file", "execute", "write_file", "blackboard_append", "blackboard_read");
     }
 
     /** 未声明 tools 且档位未配置 —— 必须保持 null（继承父 toolkit 全部工具），不能变成空集 */
@@ -130,7 +133,8 @@ class SubagentToolRestrictionTest {
                 正文。
                 """, b);
 
-        assertThat(decl.getTools()).containsExactly("read_file", "mcp_fs_write");
+        assertThat(decl.getTools())
+                .containsExactly("read_file", "mcp_fs_write", "blackboard_append", "blackboard_read");
     }
 
     /** NONE 档位且无 MCP：白名单为空会被 harness 反向解读成「不限制」，只能保留声明值 */
@@ -144,6 +148,7 @@ class SubagentToolRestrictionTest {
                 正文。
                 """, binding("none", null));
 
-        assertThat(decl.getTools()).containsExactly("read_file", "execute");
+        assertThat(decl.getTools())
+                .containsExactly("read_file", "execute", "blackboard_append", "blackboard_read");
     }
 }
