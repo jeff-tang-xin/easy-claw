@@ -1,6 +1,5 @@
 package com.xinl.easyclaw.agent;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -8,14 +7,13 @@ import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.ChatResponse;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
+import com.xinl.easyclaw.agent.event.CustomEventTranslator;
 import com.xinl.easyclaw.blackboard.BlackboardKeys;
 import com.xinl.easyclaw.agent.orchestrator.OrchestrationAuditVerifier;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.config.RetryScope;
-import com.xinl.easyclaw.middleware.FileChangeMiddleware;
-import com.xinl.easyclaw.middleware.ToolFailGuard;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
@@ -59,6 +57,12 @@ public class AgentService {
 
     private static final Logger log = LoggerFactory.getLogger(AgentService.class);
     private static final ObjectMapper mapper = new ObjectMapper();
+
+    /**
+     * 应用层 {@code CustomEvent} 的翻译出口（Phase 3b 从本类迁出）。
+     * 无状态，故与 {@link #mapper} 一样按 static 共享。
+     */
+    private static final CustomEventTranslator customEventTranslator = new CustomEventTranslator(mapper);
 
     private final WorkspaceManager workspaceManager;
     private final AgentFactory agentFactory;
@@ -1901,7 +1905,7 @@ public class AgentService {
                 // 框架 CustomEvent 的 Javadoc 要求「消费端对未知 name 静默跳过」，
                 // 故这里只翻译已知 name，其余不记错误日志、不影响主流程。
                 if (event instanceof CustomEvent e) {
-                    translateCustomEvent(e, onEvent);
+                    customEventTranslator.translate(e, onEvent);
                 }
             }
             case EXCEED_MAX_ITERS -> {
@@ -2014,45 +2018,6 @@ public class AgentService {
             }
             default -> {
                 // 其他事件忽略
-            }
-        }
-    }
-
-    /**
-     * 把 middleware 发来的 {@link CustomEvent} 翻译为前端协议的 {@link StreamEvent}。
-     *
-     * <p>只处理已知 name。框架的 {@code CustomEvent} Javadoc 明确要求消费端对未知 name
-     * 静默跳过（这是协议演进的兼容策略：新版 middleware 发的事件不能让旧消费端报错），
-     * 所以这里的 default 分支不记日志、不抛异常。
-     */
-    private void translateCustomEvent(CustomEvent event, Consumer<StreamEvent> onEvent) {
-        String name = event.getName();
-        if (name == null) {
-            return;
-        }
-        Map<String, Object> value = event.getValue();
-        switch (name) {
-            case FileChangeMiddleware.EVENT_NAME -> {
-                Object path = value.get("path");
-                // 空串是有效载荷（shell 类工具「有变更但位置未知」），不能当无效值过滤
-                onEvent.accept(StreamEvent.fileChanged(path == null ? "" : path.toString()));
-            }
-            case ToolFailGuard.EVENT_NAME -> {
-                // 保持与旧实现完全一致的 JSON 形状：前端按 type 字段路由，
-                // 改字段名会让已上线的前端静默丢弃该提示。
-                try {
-                    ObjectNode payload = mapper.createObjectNode();
-                    payload.put("type", ToolFailGuard.EVENT_NAME);
-                    payload.put("tool", String.valueOf(value.get("tool")));
-                    payload.put("fails", value.get("fails") instanceof Number n ? n.intValue() : 0);
-                    payload.put("message", String.valueOf(value.get("message")));
-                    onEvent.accept(StreamEvent.context(mapper.writeValueAsString(payload)));
-                } catch (JsonProcessingException ex) {
-                    log.debug("tool_fail_guard 事件序列化失败，跳过: {}", ex.getMessage());
-                }
-            }
-            default -> {
-                // 未知 name：按框架约定静默跳过
             }
         }
     }
