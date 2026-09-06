@@ -29,6 +29,7 @@ import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.PlanModeContextState;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.bus.MessageBus;
+import io.agentscope.harness.agent.tool.AgentSpawnTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -1933,6 +1934,17 @@ public class AgentService {
      */
     private static final Set<String> SUBAGENT_DISPATCH_TOOLS = Set.of("agent_spawn", "agent_send");
 
+    /**
+     * team 模式下子 Agent 强制同步派发的等待上限（秒），取框架允许的最大值 600。
+     * <p>
+     * 取满不是随意为之：force-sync 下超时<b>不会</b>降级为后台任务，而是直接中断子 Agent 并返回
+     * {@code status: timeout}，工作成果全部丢失。编排型子任务（实现一个模块、评审一批文件）
+     * 耗时数分钟很常见，给小值等于把正常任务判死。
+     * <p>
+     * 600s 是 {@code AgentSpawnTool.MAX_TIMEOUT_SECONDS} 的上限，传更大的值会被框架静默截断。
+     */
+    private static final int TEAM_SYNC_TIMEOUT_SECONDS = 600;
+
     /** 非 delta 事件的处理（tool_start/end/result, confirm, subagent 等） */
     private void handleNonDeltaEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
                                      Consumer<Throwable> onError, Runnable onFinish,
@@ -2105,7 +2117,7 @@ public class AgentService {
 
     private RuntimeContext buildContext(WorkspaceContext workspace, String sessionId) {
         String userId = workspace.getUserId() == null ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
-        return RuntimeContext.builder()
+        RuntimeContext.Builder builder = RuntimeContext.builder()
                 .userId(userId)
                 .sessionId(sessionId)
                 // 注入 Workspace 上下文给文件工具（沙箱校验），不暴露给 LLM
@@ -2113,8 +2125,51 @@ public class AgentService {
                 // 黑板隔离键取「父会话 id」：子 Agent 由 RuntimeContext.builder(parentRc) 创建，
                 // Builder.from 会复制 stringAttributes，故子 Agent 虽自带 sub-<UUID> 会话，
                 // 仍继承同一 key → 同一轮协作的主/子 Agent 共用一块黑板。
-                .put(BlackboardKeys.CTX_KEY, sessionId)
-                .build();
+                .put(BlackboardKeys.CTX_KEY, sessionId);
+        applyTeamModeForceSync(builder, workspace.getWorkspaceId());
+        return builder.build();
+    }
+
+    /**
+     * team 模式下强制子 Agent 同步派发，让其事件能实时回流到前端。
+     * <p>
+     * <b>为什么必须强制</b>：{@code agent_spawn(timeout_seconds=0)} 走
+     * {@code AgentSpawnTool.execSpawnTask} 的后台分支，把任务包成 {@code LocalTaskRunSpec}
+     * 交给 TaskRepository，内部用 {@code .block()} 独立订阅 —— Reactor Context 丢失，
+     * 拿不到 {@code AgentEventEmitter}，子 Agent 的 text/tool 事件<b>一个都不转发</b>；
+     * 且此时 {@code agent_spawn} 已立即返回，父回合的事件流已收尾，即便转发也写进已关闭的 sink。
+     * 叠加 {@code TOOL_CALL_START} 对派发类工具刻意不建卡（见 {@link #SUBAGENT_DISPATCH_TOOLS}
+     * 处说明），最终表现为「team 模式下子 Agent 完全不显示流程与进度」。
+     * <p>
+     * 开启 force-sync 后 {@code timeout_seconds=0} 被框架矫正为同步等待，走
+     * {@code execWithTimeoutPromotion → execLocalSync} 这条<b>事件转发完好</b>的路径：
+     * 它显式 {@code contextWrite(Context.of(parentCtx))} 续接父上下文，
+     * 并主动发 AgentStart/AgentEnd，前端因此能建卡并实时刷新。
+     * <p>
+     * 只对 team 模式生效：single 场景不编排子 Agent，保持框架默认（含后台任务能力）不变。
+     * 场景查询失败时 {@code activeBinding} 已按「无绑定」降级（isTeamMode=false），
+     * 故这里无需额外兜底 —— 脏数据不应让对话起不来。
+     * <p>
+     * <b>会被子 Agent 继承</b>：子 Agent 经 {@code RuntimeContext.Builder.from(parentRc)} 创建，
+     * 该方法复制 stringAttributes（{@code RuntimeContext.java:388}），机制与黑板 key 相同。
+     * 即子 Agent 自己再派发孙 Agent 时同样是同步的 —— 这符合预期：
+     * 嵌套派发的事件同样需要沿链路实时回流才能显示。
+     * <p>
+     * 配套的提示词约定见 {@code WorkspaceAgentBuilder} 团队协作规则第 2、4 条：
+     * 已明确告知模型「派发一律同步、不要传 timeout_seconds=0、不要调 wait_async_results」。
+     * <b>改动本方法时必须同步核对那两条文案</b>，否则模型行为与运行时语义会脱节。
+     */
+    private void applyTeamModeForceSync(RuntimeContext.Builder builder, String workspaceId) {
+        if (workspaceId == null) {
+            return;
+        }
+        if (!scenarioResolver.activeBinding(workspaceId).isTeamMode()) {
+            return;
+        }
+        builder.put(AgentSpawnTool.CTX_FORCE_SYNC, true)
+                .put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, TEAM_SYNC_TIMEOUT_SECONDS);
+        log.info("team 模式已启用子 Agent 强制同步派发（{}s），确保进度实时可见: workspace={}",
+                TEAM_SYNC_TIMEOUT_SECONDS, workspaceId);
     }
 
     /**
