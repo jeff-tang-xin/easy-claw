@@ -53,3 +53,5 @@ run-compile.ps1
 # 正常情况下已由 WorkspaceAgentBuilder 显式注入 .easyClaw/agent/transcripts，此处仅防污染 git。
 /default/
 /default_old_backup/
+*.txt
+*.log
