@@ -38,6 +38,18 @@ public class SubagentLoader {
     private static final Logger log = LoggerFactory.getLogger(SubagentLoader.class);
 
     /**
+     * 子 Agent 迭代步数的<b>绝对下限</b>，任何配置与声明都不得低于此值。
+     * <p>
+     * 30 步是「读若干文件 + 分析 + 产出结论」的经验底线。低于它时，
+     * {@code ReActAgent} 在 {@code iter >= maxIters} 处进入 summarizing 分支：
+     * 未完成的工具调用被塞进错误块，并追加提示让模型「就现有信息总结」——
+     * 于是子 Agent 会返回一段<b>读起来像正常完成</b>的结论，而 {@code ExceedMaxItersEvent}
+     * 只走事件流、不进 {@code agent_spawn} 的返回字符串。编排者因此无从分辨半成品，
+     * 会把残缺产出当成品汇总。这类故障不报错、不留痕，故设为不可被配置突破的硬下限。
+     */
+    private static final int ABSOLUTE_STEP_FLOOR = 30;
+
+    /**
      * 共享黑板的工具名。与 {@code BlackboardTools} 上 {@code @Tool} 注解的名字必须一致 ——
      * 改了那边一定要同步改这里，否则白名单补齐会失效（且不报错，只是子 Agent 又调不到黑板）。
      */
@@ -357,13 +369,17 @@ public class SubagentLoader {
      * 而非报错，编排者还会把这份残缺产出当成成品汇总，故障非常隐蔽。
      * <p>
      * 若配置里 maxIters 反而小于 subagentSteps，取较大者，避免「开了 team 反而更短」。
+     * <p>
+     * 最终结果再与 {@link #ABSOLUTE_STEP_FLOOR} 取大：配置项是可被外部 yml 覆盖的，
+     * 一旦被调到 30 以下，子 Agent 连「读几个文件 + 分析 + 写结论」都跑不完，
+     * 截断故障会以「交付半成品」的形式静默扩散。这是产品下限，不接受配置突破。
      */
     private int effectiveStepFloor(ScenarioBinding binding) {
         int base = properties.getAgent().getSubagentSteps();
-        if (binding == null || !binding.isTeamMode()) {
-            return base;
-        }
-        return Math.max(base, properties.getAgent().getMaxIters());
+        int floor = (binding == null || !binding.isTeamMode())
+                ? base
+                : Math.max(base, properties.getAgent().getMaxIters());
+        return Math.max(floor, ABSOLUTE_STEP_FLOOR);
     }
 
     /**

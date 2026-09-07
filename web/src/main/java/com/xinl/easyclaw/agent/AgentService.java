@@ -2155,9 +2155,11 @@ public class AgentService {
      * 即子 Agent 自己再派发孙 Agent 时同样是同步的 —— 这符合预期：
      * 嵌套派发的事件同样需要沿链路实时回流才能显示。
      * <p>
-     * 配套的提示词约定见 {@code WorkspaceAgentBuilder} 团队协作规则第 2、4 条：
+     * 配套的提示词约定见 {@code WorkspaceAgentBuilder#subagentRoster} 派发机制约束中的
+     * 「同一阶段一次性全部派发」与「不要调用屏障/轮询工具」两条：
      * 已明确告知模型「派发一律同步、不要传 timeout_seconds=0、不要调 wait_async_results」。
      * <b>改动本方法时必须同步核对那两条文案</b>，否则模型行为与运行时语义会脱节。
+     * （此处刻意不写条目编号——编号会随提示词增删而漂移，按标题定位更稳。）
      */
     private void applyTeamModeForceSync(RuntimeContext.Builder builder, String workspaceId) {
         if (workspaceId == null) {
