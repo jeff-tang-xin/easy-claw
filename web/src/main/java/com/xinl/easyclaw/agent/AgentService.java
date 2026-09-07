@@ -1942,6 +1942,12 @@ public class AgentService {
      * 耗时数分钟很常见，给小值等于把正常任务判死。
      * <p>
      * 600s 是 {@code AgentSpawnTool.MAX_TIMEOUT_SECONDS} 的上限，传更大的值会被框架静默截断。
+     * <p>
+     * <b>本值只作兜底，不再注入 {@code CTX_FORCE_SYNC_TIMEOUT_SECONDS}</b>：该上下文键在框架里是
+     * <i>absolute app override</i>（见 {@code AgentSpawnTool.resolveEffectiveTimeoutMs} 的
+     * 优先级说明），一旦注入，主控在 {@code agent_spawn} 里传的 {@code timeout_seconds} 会被
+     * <b>完全忽略且不报错</b> —— 主控以为自己在给子任务分配时间预算，实际每次都是 600s。
+     * 去掉注入后，未显式传值时框架自身的默认同步超时生效，主控传值即生效，语义与提示词一致。
      */
     private static final int TEAM_SYNC_TIMEOUT_SECONDS = 600;
 
@@ -2168,9 +2174,9 @@ public class AgentService {
         if (!scenarioResolver.activeBinding(workspaceId).isTeamMode()) {
             return;
         }
-        builder.put(AgentSpawnTool.CTX_FORCE_SYNC, true)
-                .put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, TEAM_SYNC_TIMEOUT_SECONDS);
-        log.info("team 模式已启用子 Agent 强制同步派发（{}s），确保进度实时可见: workspace={}",
+        builder.put(AgentSpawnTool.CTX_FORCE_SYNC, true);
+        log.info("team 模式已启用子 Agent 强制同步派发（超时由主控按任务规模自定，上限 {}s），"
+                        + "确保进度实时可见: workspace={}",
                 TEAM_SYNC_TIMEOUT_SECONDS, workspaceId);
     }
 

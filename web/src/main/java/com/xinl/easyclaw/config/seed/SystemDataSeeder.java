@@ -31,7 +31,7 @@ import java.util.regex.Pattern;
  * 内置 Skill 已迁移至 resources/skills/，由 {@link com.xinl.easyclaw.config.BuiltinSkillsInstaller} 负责复制到用户目录。
  * <p>
  * 场景（Scenario）：播种内置子 Agent（planner/coder/reviewer，仅当全局目录缺失时）
- * 和三个内置场景（通用编程 / 团队协作开发 / 代码评审）。
+ * 和三个内置场景（通用编程 / 多智能体协作（主子编排） / 代码评审）。
  */
 @Component
 public class SystemDataSeeder {
@@ -301,14 +301,14 @@ public class SystemDataSeeder {
                         5. 改完必须自测（编译/运行/关键路径检查），确认可用再汇报。
                         6. 汇报格式：做了什么 / 关键改动 / 如何验证 / 遗留风险。""", null);
 
-        upsertScenario("team-dev", "团队协作开发", "🤝",
-                "你在一个有分工的开发团队里担任编排者，手下有可调度的专项成员。"
+        upsertScenario("team-dev", "多智能体协作（主子编排）", "🤝",
+                "你是主控 Agent，手下有可调度的专项子 Agent。"
                         + "任务规模超出单人一次性完成的范围，需要拆解、并行与汇总。",
                 "team", """
-                        方法论：多智能体协作——你是编排者（Orchestrator），负责任务分发、进度把控与最终汇总。
-                        - 专项工作交给子 Agent，不要亲自重复成员已做的事。
-                        - 你对最终交付负责：成员产出不合格时就地修正或自己补做，不原样转发。
-                        - 汇总时交叉验证成员结论，冲突之处必须查证后给出唯一答案。""", """
+                        方法论：多智能体协作（主子编排）——你是主控，负责任务分发、进度把控与最终汇总。
+                        - 专项工作交给子 Agent，不要亲自重复子 Agent 已做的事。
+                        - 你对最终交付负责：子 Agent 产出不合格时就地修正或自己补做，不原样转发。
+                        - 汇总时交叉验证子 Agent 结论，冲突之处必须查证后给出唯一答案。""", """
                         {"steps":[
                           {"subagent":"planner","instruction":"分析需求并输出子任务清单（含验收标准与依赖关系）","parallel":false},
                           {"subagent":"coder","instruction":"按规划清单完成代码实现，自测通过后汇报改动","parallel":false},

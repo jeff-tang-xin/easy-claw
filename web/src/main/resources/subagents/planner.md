@@ -1,7 +1,7 @@
----
+﻿---
 description: 任务规划专家：把复杂需求拆解为清晰、可执行的子任务清单
 role: planner
-steps: 15
+steps: 30
 tools: [read_file, search_files, grep_files, glob_files]
 ---
 
