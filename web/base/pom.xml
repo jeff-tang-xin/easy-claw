@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-base</artifactId>
+    <name>Easy Claw - Base（契约层）</name>
+    <description>
+        智能体契约层：定义 7 个平级智能体共同实现的 EasyClawAgent SPI、
+        调度它们的 AgentOrchestrator SPI，以及两者依赖的纯值对象。
+
+        本模块的边界纪律（务必守住，否则分层白拆）：
+        - 不依赖 spring-boot-starter-web（无 Controller / 无 MVC）
+        - 不依赖 spring-boot-starter-data-jpa（无 Entity / 无 Repository）
+        - 只允许依赖 spring-context（为了 @ConfigurationProperties 等纯装配注解）
+        实体（AgentRoleEntity / ScenarioEntity）通过 implements 本模块的
+        RoleProfile / ScenarioProfile 接口完成依赖倒置，方向恒为 api → base。
+    </description>
+
+    <dependencies>
+        <!-- JSON：WorkflowParser 下沉至此，需要 Jackson 做工作流解析 -->
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <!-- 日志门面：契约层只用 slf4j，不绑定实现 -->
+        <dependency>
+            <groupId>org.slf4j</groupId>
+            <artifactId>slf4j-api</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>org.projectlombok</groupId>
+            <artifactId>lombok</artifactId>
+            <version>${lombok.version}</version>
+            <scope>provided</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-test</artifactId>
+            <scope>test</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-compiler-plugin</artifactId>
+                <configuration>
+                    <source>${java.version}</source>
+                    <target>${java.version}</target>
+                    <annotationProcessorPaths>
+                        <path>
+                            <groupId>org.projectlombok</groupId>
+                            <artifactId>lombok</artifactId>
+                            <version>${lombok.version}</version>
+                        </path>
+                    </annotationProcessorPaths>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
+</project>
