@@ -4,6 +4,7 @@ import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
 import com.xinl.easyclaw.base.orchestration.ExecutionContext;
+import com.xinl.easyclaw.base.orchestration.OrchestrationModes;
 import com.xinl.easyclaw.base.orchestration.OrchestrationPlan;
 import com.xinl.easyclaw.base.orchestration.StepExecutor;
 import com.xinl.easyclaw.base.orchestration.StepResult;
@@ -55,23 +56,50 @@ public class StreamingStepExecutor implements StepExecutor {
     private final List<UserAttachment> attachments;
     /** 用户本回合指定的 skill；同样仅第一个步骤消费 */
     private final String skillName;
+    /**
+     * 确定性 team 流水线开关（T1 地基）。
+     * <p>
+     * <b>默认 false</b>：关闭时所有步骤（含 team workflow 里的子角色步骤）一律走主控
+     * {@code executeStep}，线上 single/team 行为与历史<b>逐字节一致</b>。这是刻意的安全边界——
+     * 内置场景 {@code team-dev} / {@code code-review} 的 workflow 每步都带 planner/coder/reviewer，
+     * 一旦无条件启用，线上 team 重启后立刻从「主控跑全部步骤」切到「真子智能体逐步骤直派」，
+     * 而该路径要等 T2 配齐黑板唯一通信 / 审核门禁 / 返工上限 / 中止并完成 E2E 后才允许生效。
+     * <p>
+     * <b>这是临时开关</b>：T2 完成确定性 team 编排后，生产构造点改为 true 并删除本开关与
+     * 4 参重载，使直派成为 team 的唯一行为。用实例字段而非静态开关，避免并行测试互相污染。
+     */
+    private final boolean deterministicDispatchEnabled;
     /** 步骤序号：用于判定「是否首个步骤」，决定附件/skill 是否透传 */
     private final AtomicInteger stepSeq = new AtomicInteger(0);
 
     /**
-     * @param agentService 真正干活的对话服务
-     * @param attachments  用户本回合附件，可为 null
-     * @param skillName    用户本回合指定的 skill，可为 null
-     * @param eventSink    事件出口，通常是 WebSocket 推送；每个 delta 实时转发
+     * 历史 4 参构造：确定性直派默认关闭，保持线上行为零变化。
+     * 既有调用方与单测无需改动；T2 启用后本重载随开关一并删除。
      */
     public StreamingStepExecutor(AgentService agentService,
                                  List<UserAttachment> attachments,
                                  String skillName,
                                  Consumer<StreamEvent> eventSink) {
+        this(agentService, attachments, skillName, eventSink, false);
+    }
+
+    /**
+     * @param agentService                真正干活的对话服务
+     * @param attachments                 用户本回合附件，可为 null
+     * @param skillName                   用户本回合指定的 skill，可为 null
+     * @param eventSink                   事件出口，通常是 WebSocket 推送；每个 delta 实时转发
+     * @param deterministicDispatchEnabled 是否启用 team 子角色步骤确定性直派（T1 默认关，T2 打开）
+     */
+    public StreamingStepExecutor(AgentService agentService,
+                                 List<UserAttachment> attachments,
+                                 String skillName,
+                                 Consumer<StreamEvent> eventSink,
+                                 boolean deterministicDispatchEnabled) {
         this.agentService = agentService;
         this.attachments = attachments;
         this.skillName = skillName;
         this.eventSink = eventSink;
+        this.deterministicDispatchEnabled = deterministicDispatchEnabled;
     }
 
     @Override
@@ -88,9 +116,19 @@ public class StreamingStepExecutor implements StepExecutor {
                 ? ctx.task()
                 : step.instruction();
 
-        // 附件与 skill 属于「用户这次输入」，只归属首个步骤。多步计划里若每步都带，
-        // 会把同一张图重复喂进上下文，且让后续步骤误以为用户又选了一次 skill。
+        // 附件与 skill 属于「用户这次输入」，只归属首个步骤。序号自增放在路由之前，
+        // 保证「主控步 + 子智能体步」混合计划里 firstStep 判定不因分支提前 return 而错位。
+        // （T1 直派子智能体暂不透传附件/skill，见 invokeSubagentStep。）
         boolean firstStep = stepSeq.getAndIncrement() == 0;
+
+        // T1 确定性 team 编排路由：仅当开关开启且处于编排型模式（team）、步骤显式指定了
+        // 非主控子智能体时，才直派该 SPI 子智能体；开关关闭（T1 默认）/ single /
+        // 未绑定场景（modeId=null）/ 未指定 agentId / 指定 main 一律走原主控路径，
+        // 行为与历史完全一致。详见 resolveSubagent 的说明。
+        String routedAgent = resolveSubagent(step, ctx);
+        if (routedAgent != null) {
+            return invokeSubagentStep(step, ctx, routedAgent, instruction);
+        }
 
         try {
             agentService.executeStep(
@@ -121,6 +159,82 @@ public class StreamingStepExecutor implements StepExecutor {
             completeOnce(done, future, StepResult.failure(step.agentId(), describe(e)));
         }
         return future;
+    }
+
+    /**
+     * 把一个编排步骤直派给指定的 SPI 子智能体（T1 确定性 team 流水线地基）。
+     * <p>
+     * 事件全部经 {@code eventSink} 实时转发（子智能体的文本/思考/工具已由
+     * {@code AgentService.invokeSubagent} 折叠成 subagent_* 协议事件，这里只透传，
+     * <b>不</b>再累积 {@code text}——子智能体正文不是主控正文，混进 output 会双重计算）；
+     * 本步产出取子智能体的最终回复（{@code onFinish} 回传的文本），作为下一步的
+     * {@code previousOutput}。失败/未注册统一表达为 {@code ok=false} 的正常完成，
+     * 交给编排器决定返工或中止（T2 消费）。
+     */
+    private CompletableFuture<StepResult> invokeSubagentStep(OrchestrationPlan.PlanStep step,
+                                                             ExecutionContext ctx,
+                                                             String agentId,
+                                                             String instruction) {
+        CompletableFuture<StepResult> future = new CompletableFuture<>();
+        AtomicBoolean done = new AtomicBoolean(false);
+        try {
+            agentService.invokeSubagent(
+                    ctx.workspaceId(),
+                    ctx.sessionId(),
+                    agentId,
+                    instruction,
+                    eventSink::accept,
+                    err -> {
+                        log.warn("[编排] 子智能体步骤出错: agent={}, session={}, err={}",
+                                agentId, ctx.sessionId(), String.valueOf(err));
+                        completeOnce(done, future, StepResult.failure(agentId, describe(err)));
+                    },
+                    resultText -> completeOnce(done, future,
+                            StepResult.success(agentId, resultText))
+            );
+        } catch (RuntimeException e) {
+            // 同步派发阶段抛错（工作区不存在 / 主控未装配管理器 / 未注册子智能体由内部回调兜，
+            // 这里只兜未预期的同步异常）
+            log.warn("[编排] 子智能体步骤派发失败: agent={}, err={}", agentId, e.toString());
+            completeOnce(done, future, StepResult.failure(agentId, describe(e)));
+        }
+        return future;
+    }
+
+    /**
+     * 判定某步骤是否应直派子智能体，返回其 agentId；不满足返回 {@code null}（走主控）。
+     * <p>
+     * 四个条件缺一不可，刻意从严：
+     * <ol>
+     *   <li><b>确定性直派开关已打开</b>（{@link #deterministicDispatchEnabled}）：T1 默认关，
+     *       关闭时直接返回 null，线上 team 维持「主控跑全部步骤」的历史行为；</li>
+     *   <li><b>必须是编排型模式</b>：用 {@link OrchestrationModes#isOrchestrated(String)} 判定，
+     *       不硬编码 "team"，未来 schedule 等编排模式自动适用；single / modeId 为 null（未绑定
+     *       场景，既有单测与非编排调用）一律 false，<b>线上 single 行为零变化</b>；</li>
+     *   <li>步骤必须显式指定非空 agentId（空串/null 表示「主控/未指定」）；</li>
+     *   <li>agentId 不等于主控 id {@code "main"}（忽略大小写）。</li>
+     * </ol>
+     * 这里<b>不</b>校验 agentId 是否真已注册——注册校验在
+     * {@link AgentService#invokeSubagent} 经 {@code createAgentIfPresent} 完成，
+     * 未注册会以明确的 {@code ok=false} 结束该步，而非静默回退主控（静默回退会掩盖
+     * workflow 配置错误，让「配了子智能体却跑了主控」这种故障无声发生）。
+     */
+    private String resolveSubagent(OrchestrationPlan.PlanStep step, ExecutionContext ctx) {
+        if (!deterministicDispatchEnabled) {
+            return null;
+        }
+        if (!OrchestrationModes.isOrchestrated(ctx.modeId())) {
+            return null;
+        }
+        String agentId = step.agentId();
+        if (agentId == null || agentId.isBlank()) {
+            return null;
+        }
+        agentId = agentId.trim();
+        if ("main".equalsIgnoreCase(agentId)) {
+            return null;
+        }
+        return agentId;
     }
 
     /**

@@ -33,6 +33,7 @@ import io.agentscope.core.state.AgentState;
 import io.agentscope.core.state.PlanModeContextState;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.bus.MessageBus;
+import io.agentscope.harness.agent.subagent.DefaultAgentManager;
 import io.agentscope.harness.agent.tool.AgentSpawnTool;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -46,6 +47,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -778,6 +780,144 @@ public class AgentService {
         Msg userMsg = buildUserMessage(workspace, sessionId,
                 skillHint + (instruction == null ? "" : instruction), attachments);
         startStream(agent, context, userMsg, sessionId, true, false, onEvent, onError, onFinish);
+    }
+
+    /**
+     * 确定性编排（team 模式）下，把一个 workflow 步骤<b>直接派给指定的子智能体</b>执行。
+     * <p>
+     * 与 {@link #executeStep} 的本质区别：{@code executeStep} 永远跑工作区主控（HarnessAgent），
+     * 步骤的 {@code agentId} 仅用于结果标注；本方法则经主控内部的 {@code DefaultAgentManager}
+     * 实例化并调用 agentId 对应的 SPI 子智能体（coder / reviewer …），让 workflow 配置真正生效。
+     *
+     * <h3>三条已坐实的机制（改动前请先读，勿凭猜测重构）</h3>
+     * <ol>
+     *   <li><b>事件回流复用 {@code agent_spawn} 的已验证路径</b>：{@code invokeAgent} 走的是
+     *       非流式 {@code call()} 入口；在 Reactor Context 注入 {@code FORWARDING_CONTEXT_KEY}
+     *       后，子智能体的每个 {@code AgentEvent} 都会交给该转发 emitter（见
+     *       {@code ReActAgent.doCall}：eventSink 为 null 时才用 externalEventEmitter）。
+     *       我们在 emitter 里给事件打上 {@code parentSession/agentId} 的 source，再喂给现有
+     *       {@link #handleEvent} —— source 含 {@code "/"} 会自动走 {@code handleSubagentEvent}，
+     *       前端的子智能体折叠卡片协议因此零改动即可用。<b>不能改用 {@code invokeAgentStream}</b>：
+     *       那条是 deprecated v1 路径，且会设置 eventSink 使转发 emitter 失效。</li>
+     *   <li><b>上下文隔离 + 黑板共享天然成立</b>：{@code invokeAgent} 内部用
+     *       {@code RuntimeContext.builder(parentRc).sessionId(subSessionId).userId(userId)}
+     *       重建上下文——只换 sessionId，黑板隔离键（=父会话 id，见 {@link #buildContext}）、
+     *       工作区、权限、force-sync 全部继承。子智能体用独立 {@code sub-<UUID>} 会话落盘，
+     *       不污染父会话转录；又因黑板键相同，主/子共用同一块团队黑板（唯一通信通道）。</li>
+     *   <li><b>同步阻塞、回调收尾</b>：与 {@code executeStep} 一样是 fire-and-forget 回调式，
+     *       由 {@code StreamingStepExecutor} 用 {@code onFinish}/{@code onError} 完成其 future。
+     *       不在此 block，避免与 Reactor 线程模型耦合。</li>
+     * </ol>
+     *
+     * <h3>当前已知限制（留待后续阶段）</h3>
+     * 子智能体运行的取消句柄未注册进 {@link com.xinl.easyclaw.agent.SessionRegistry}，
+     * 用户点「停止」时本步要跑到子智能体结束、编排器在 stage 边界检测到取消信号才中止；
+     * 中途即时中断在 team 改造后续阶段补齐。HITL 工具确认走主控统一弹窗（RequireUserConfirmEvent
+     * 不被当子事件隔离，见 {@link #handleEvent}）。
+     *
+     * @param agentId     要派遣的 SPI 子智能体 id（须已在主控的子智能体注册表中）
+     * @param instruction 本步骤指令（调用方已处理「空串回退任务原文」）
+     */
+    public void invokeSubagent(String workspaceId, String parentSessionId, String agentId,
+                               String instruction,
+                               Consumer<StreamEvent> onEvent,
+                               Consumer<Throwable> onError,
+                               Consumer<String> onFinish) {
+        WorkspaceContext workspace = workspaceManager.getWorkspace(workspaceId);
+        if (workspace == null || workspace.getAgent() == null) {
+            onError.accept(new RuntimeException("❌ 工作区未找到: " + workspaceId));
+            onFinish.accept("");
+            return;
+        }
+        HarnessAgent parent = workspace.getAgent();
+        DefaultAgentManager manager = parent.getSubagentAgentManager();
+        if (manager == null) {
+            onError.accept(new RuntimeException("主控未装配子智能体管理器，无法派遣: " + agentId));
+            onFinish.accept("");
+            return;
+        }
+        // parentRc 复用 buildContext：黑板隔离键取父会话 id，子智能体经 builder(parentRc) 继承同一键
+        RuntimeContext parentRc = buildContext(workspace, parentSessionId);
+        Optional<io.agentscope.core.agent.Agent> childOpt =
+                manager.createAgentIfPresent(agentId, parentRc);
+        if (childOpt.isEmpty()) {
+            // 与 DefaultAgentManager 的语义对齐：PRIMARY-only 给更明确的提示
+            String reason = manager.isPrimaryOnly(agentId)
+                    ? "该智能体仅可作为主控，不能被派遣"
+                    : "未注册的子智能体 id";
+            onError.accept(new RuntimeException("❌ 无法派遣子智能体 [" + agentId + "]：" + reason));
+            onFinish.accept("");
+            return;
+        }
+
+        String userId = workspace.getUserId() == null
+                ? AppConstants.DEFAULT_USER_ID : workspace.getUserId();
+        String subSessionId = "sub-" + UUID.randomUUID();
+        String sourcePath = (parentSessionId == null || parentSessionId.isBlank()
+                ? "main" : parentSessionId) + "/" + agentId;
+        // 实例键：T1 每步新建独立实例，直接用 subSessionId 作为全局唯一名义身份，
+        // 供前端折叠卡片分卡与工具结果缓冲隔离。
+        String instanceKey = subSessionId;
+
+        // 与 executeStep 同构的翻译现场：子事件经 handleEvent 翻译，复用同一套 batcher/trace。
+        // sessionId 传子会话 id：handleSubagentEvent 的工具结果缓冲按「会话::实例::调用」三维隔离。
+        final ToolTrace trace = new ToolTrace();
+        final DeltaBatcher batcher = new DeltaBatcher(onEvent);
+        // 程序化派遣不经主控工具调用，循环防护 / 交付登记 / 待确认登记在此无对应主控动作；
+        // RequireUserConfirmEvent 由 handleEvent 排除隔离后，仍走主控统一 HITL 流程（NOOP 足够）。
+        final SideEffectSink effects = SideEffectSink.NOOP;
+
+        // 转发 emitter：复刻 AgentSpawnTool.execLocalSync Path 1 的打标逻辑。
+        // 子智能体发布的事件 source 原本为 null，这里统一打 source + 实例 metadata。
+        // 注意 withSource / withMetadataEntry 均返回【新对象】而非原地修改，必须用返回值，
+        // 否则打标丢失，handleEvent 会把子事件当主事件混入主流程。
+        // handleEvent 的 onError/onFinish 两个回调在子事件分支（source 含 "/"）里提前 return，
+        // 根本不会被调用，故传 NOOP；本方法的收尾只由下面 subscribe 的 success/error 负责。
+        AgentEventEmitter taggedEmitter = raw -> {
+            if (raw == null) {
+                return;
+            }
+            AgentEvent event = raw.withSource(sourcePath)
+                    .withMetadataEntry(AgentEvent.METADATA_AGENT_INSTANCE_ID, instanceKey);
+            try {
+                handleEvent(event, onEvent, err -> { }, () -> { },
+                        trace, subSessionId, effects, batcher);
+            } catch (RuntimeException ex) {
+                // 单个事件翻译失败不能炸掉整条子智能体执行链
+                log.warn("[编排] 子智能体事件处理异常: agent={}, event={}, err={}",
+                        agentId, event.getType(), ex.toString());
+            }
+        };
+
+        // 建卡锚点：不手动发 AGENT_START——子智能体经 call() 发出的第一个事件
+        // （通常即 AgentStartEvent，带 source）进入 handleSubagentEvent 时自动建卡。
+        // 结束锚点 AGENT_END 由子智能体自身发出，收到后 flush 并下发 subagent_end。
+
+        AtomicBoolean done = new AtomicBoolean(false);
+
+        manager.invokeAgent(childOpt.get(), subSessionId, userId, instruction, parentRc)
+                .contextWrite(ctx -> ctx.put(AgentEventEmitter.FORWARDING_CONTEXT_KEY, taggedEmitter))
+                .subscribe(
+                        resultMsg -> {
+                            if (done.compareAndSet(false, true)) {
+                                // 结束锚点：子智能体的 AGENT_END 已被 handleSubagentEvent 处理
+                                // （flush 并下发 subagent_end），这里不再重复发卡结束事件。
+                                batcher.flush();
+                                // 结果文本即本步骤产出，交给编排器（T1 直接回传；
+                                // T2 将改为「执行体只写黑板、主控只从黑板读」）。
+                                String output = resultMsg == null ? "" : resultMsg.getTextContent();
+                                onFinish.accept(output);
+                            }
+                        },
+                        err -> {
+                            log.warn("[编排] 子智能体执行出错: agent={}, session={}, err={}",
+                                    agentId, subSessionId, err.toString());
+                            if (done.compareAndSet(false, true)) {
+                                batcher.flush();
+                                onError.accept(err);
+                                onFinish.accept("");
+                            }
+                        });
     }
 
     /**
