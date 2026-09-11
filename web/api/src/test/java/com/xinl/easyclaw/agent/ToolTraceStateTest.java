@@ -55,7 +55,8 @@ class ToolTraceStateTest {
                 new AgentScopeProperties(),
                 new SessionRegistry(),
                 mock(ScenarioResolver.class),
-                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
 
         traceClass = Class.forName("com.xinl.easyclaw.agent.AgentService$ToolTrace");
         Constructor<?> ctor = traceClass.getDeclaredConstructor();

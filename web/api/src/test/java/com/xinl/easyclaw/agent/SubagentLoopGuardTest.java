@@ -66,7 +66,8 @@ class SubagentLoopGuardTest {
                 props,
                 new SessionRegistry(),
                 mock(ScenarioResolver.class),
-                new WorkspaceFileLayout());
+                new WorkspaceFileLayout(),
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
 
         Class<?> traceClass = Class.forName("com.xinl.easyclaw.agent.AgentService$ToolTrace");
         Constructor<?> ctor = traceClass.getDeclaredConstructor();

@@ -100,7 +100,7 @@ class OrchestrationPromptBuilderTest {
                 e, List.of(decl("planner", "规划")), null);
 
         int method = out.indexOf("### 工作方法论");
-        int plan = out.indexOf("角色编排工作流");
+        int plan = out.indexOf("智能体编排工作流");
         assertTrue(plan > method, "编排计划应位于方法论段之内");
         assertTrue(out.contains("planner"));
         assertFalse(out.contains("无专属执行体"),
@@ -132,7 +132,7 @@ class OrchestrationPromptBuilderTest {
 
         String out = OrchestrationPromptBuilder.build(
                 e, List.of(decl("coder", "实现"), decl("reviewer", "评审")), null);
-        assertTrue(out.contains("2 个角色必须在同一轮同时派发"),
+        assertTrue(out.contains("2 个智能体必须在同一轮同时派发"),
                 "并行阶段应显式给出角色数与并发要求，实际输出:\n" + out);
     }
 
@@ -156,7 +156,7 @@ class OrchestrationPromptBuilderTest {
 
         String out = OrchestrationPromptBuilder.build(e, List.of(), null);
         assertTrue(out.contains("你是编排者"), "场景方法论文本应保留");
-        assertFalse(out.contains("角色编排工作流"), "非法工作流不应渲染计划");
+        assertFalse(out.contains("智能体编排工作流"), "非法工作流不应渲染计划");
     }
 
     @Test

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-agent-planner</artifactId>
+    <name>Easy Claw - Agent: Planner</name>
+    <description>
+        任务规划专家 —— 分析任务需求，把复杂需求拆解为清晰、可执行的子任务清单。
+        只做规划与拆解，不执行任务本身，因此工具集限定为只读探查类。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-base</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</project>

@@ -50,10 +50,13 @@ public class WorkspaceController {
     }
 
     /**
+     * @param type         工作区形态分类 single / team / schedule；缺省 single。
+     *                     决定可绑定的场景类型（必须一致）。
      * @param scenarioName 场景标识名；前端为必填项，缺省时回退内置「通用编程」，
      *                     保证任何工作区创建后都处于明确的场景约束下
      */
-    public record CreateWorkspaceRequest(String name, String description, String path, String scenarioName) {
+    public record CreateWorkspaceRequest(String name, String description, String path,
+                                         String scenarioName, String type) {
     }
 
     public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
@@ -102,10 +105,17 @@ public class WorkspaceController {
 
     @PostMapping
     public WorkspaceContext create(@RequestBody CreateWorkspaceRequest req) {
+        String type = WorkspaceManager.normalizeType(req.type());
+        String target = (req.scenarioName() == null || req.scenarioName().isBlank())
+                ? DEFAULT_SCENARIO_NAME : req.scenarioName().trim();
+        // 建工作区前先校验「场景存在 + 类型匹配」：不满足直接 400，避免先落库一个
+        // 半成品工作区再静默回退到错误类型的场景
+        assertScenarioCompatible(target, type);
+
         WorkspaceContext ctx = workspaceManager.createWorkspace(
                 com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID,
-                req.name(), req.description(), req.path());
-        bindScenario(ctx.getWorkspaceId(), req.scenarioName());
+                req.name(), req.description(), req.path(), type);
+        scenarioService.activateByName(ctx.getWorkspaceId(), target);
         return ctx;
     }
 
@@ -114,30 +124,26 @@ public class WorkspaceController {
         WorkspaceSummary summary = workspaceManager.updateWorkspace(id, req.name(), req.description());
         // 编辑时未传场景 = 该表单没带这个字段（老客户端），保持原绑定不动
         if (req.scenarioName() != null && !req.scenarioName().isBlank()) {
-            bindScenario(id, req.scenarioName());
+            String target = req.scenarioName().trim();
+            // 工作区类型创建后不可变，切换场景只能在同类型内切换
+            assertScenarioCompatible(target, summary.getType());
+            scenarioService.activateByName(id, target);
         }
         return summary;
     }
 
     /**
-     * 绑定工作区场景。场景是「能做什么、怎么做」的约束来源，缺省一律回退
-     * 内置「通用编程」，避免出现无场景的裸工作区。
-     * <p>
-     * 绑定失败不影响工作区本身 —— 工作区已创建成功，此时抛错会让前端以为
-     * 整体失败并重试，反而产生重复工作区。
+     * 校验目标场景存在/启用，且其模式与工作区类型一致（single↔SOLO、team↔团队、schedule↔定时）。
+     * 任一不满足抛 {@link IllegalArgumentException}（由控制器统一转 400）。
      */
-    private void bindScenario(String workspaceId, String scenarioName) {
-        String target = (scenarioName == null || scenarioName.isBlank())
-                ? DEFAULT_SCENARIO_NAME : scenarioName.trim();
-        try {
-            if (scenarioService.activateByName(workspaceId, target).isEmpty()
-                    && !DEFAULT_SCENARIO_NAME.equals(target)) {
-                log.warn("场景[{}] 不存在或已停用，回退默认场景: workspace={}", target, workspaceId);
-                scenarioService.activateByName(workspaceId, DEFAULT_SCENARIO_NAME);
-            }
-        } catch (Exception e) {
-            log.warn("绑定场景失败（工作区已创建，可稍后手动切换）: workspace={}, scenario={}, {}",
-                    workspaceId, target, e.getMessage());
+    private void assertScenarioCompatible(String scenarioName, String workspaceType) {
+        var scenario = scenarioService.findActiveByName(scenarioName)
+                .orElseThrow(() -> new IllegalArgumentException("场景不存在或已停用: " + scenarioName));
+        String mode = scenario.getMode() == null ? "single" : scenario.getMode();
+        if (!mode.equals(workspaceType)) {
+            throw new IllegalArgumentException(
+                    "场景类型与工作区类型不匹配：工作区为 " + workspaceType
+                            + "，不能绑定 " + mode + " 类型的场景「" + scenario.getDisplayName() + "」");
         }
     }
 

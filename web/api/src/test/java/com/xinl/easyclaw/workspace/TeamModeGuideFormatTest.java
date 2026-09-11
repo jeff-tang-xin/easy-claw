@@ -63,7 +63,7 @@ class TeamModeGuideFormatTest {
             assertTrue(guide.contains("任务最小化"), "应包含任务最小化规则");
             assertTrue(guide.contains("【交付物】"), "应包含交付物模板");
             assertTrue(guide.contains("load_skill_through_path"), "应包含 skill 指定规则");
-            assertTrue(guide.contains("角色名-阶段号"), "应包含 label 命名约定");
+            assertTrue(guide.contains("agentId-阶段号"), "应包含 label 命名约定");
             // 编排类规则已下沉到 OrchestrationPromptBuilder，名册层不得再出现，
             // 否则 team 模式下模型会同时收到两套自称最终准则的行为规范而摇摆。
             assertFalse(guide.contains("动态组建团队"), "编排规则不应出现在名册层");

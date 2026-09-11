@@ -13,7 +13,9 @@ import java.nio.file.StandardOpenOption;
 import java.time.OffsetDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
@@ -53,6 +55,10 @@ public class LocalKnowledgeService implements KnowledgeService {
     private static final String KNOWLEDGE_MD = "KNOWLEDGE.md";
     /** 单条内容上限（字符）：超出截断 */
     private static final int MAX_CONTENT_CHARS = 50_000;
+    /** 搜索默认返回条数：limit ≤ 0 时启用 */
+    private static final int DEFAULT_SEARCH_LIMIT = 10;
+    /** 搜索片段上限（字符）：超出截断 */
+    private static final int SNIPPET_MAX_CHARS = 200;
 
     /** topic → 写锁（同 JVM 内串行化同一 topic 的写入） */
     private final Map<String, ReentrantLock> locks = new ConcurrentHashMap<>();
@@ -155,6 +161,48 @@ public class LocalKnowledgeService implements KnowledgeService {
         }
         String safeTopic = safeTopic(topic);
         return Files.exists(knowledgeDir(workspace).resolve(safeTopic + ".md"));
+    }
+
+    @Override
+    public List<KnowledgeSearchHit> search(String query, int limit, WorkspaceContext workspace) {
+        if (query == null || query.isBlank()) {
+            return List.of();
+        }
+        int effectiveLimit = limit > 0 ? limit : DEFAULT_SEARCH_LIMIT;
+        List<String> terms = Arrays.stream(query.trim().split("\\s+"))
+                .map(t -> t.toLowerCase(Locale.ROOT))
+                .toList();
+        if (terms.isEmpty()) {
+            return List.of();
+        }
+        Path dir = knowledgeDir(workspace);
+        if (!Files.isDirectory(dir)) {
+            return List.of();
+        }
+        List<SearchCandidate> candidates = new ArrayList<>();
+        try (Stream<Path> files = Files.list(dir)) {
+            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".md")
+                            && !f.getFileName().toString().equals(KNOWLEDGE_MD)).toList()) {
+                try {
+                    SearchCandidate c = matchFile(p, terms);
+                    if (c != null) {
+                        candidates.add(c);
+                    }
+                } catch (IOException e) {
+                    // 单个文件异常不应让整个搜索失败
+                    log.warn("搜索跳过无法读取的知识文件: {}, {}", p.getFileName(), e.getMessage());
+                }
+            }
+        } catch (IOException e) {
+            log.warn("搜索知识库目录失败: {}, {}", dir, e.getMessage());
+            return List.of();
+        }
+        // List.sort 稳定：同权重保持文件遍历序
+        candidates.sort((a, b) -> Integer.compare(b.weight(), a.weight()));
+        return candidates.stream()
+                .limit(effectiveLimit)
+                .map(c -> new KnowledgeSearchHit(c.topic(), c.summary(), c.snippet()))
+                .toList();
     }
 
     // =============== 内部方法 ===============
@@ -273,6 +321,99 @@ public class LocalKnowledgeService implements KnowledgeService {
             return content;
         }
         return content.substring(0, MAX_CONTENT_CHARS) + "\n\n…[truncated]";
+    }
+
+    /**
+     * 对单个知识文件做 AND 子串匹配，返回命中候选；任一词在条目名/摘要/正文中都不出现则返回 null。
+     * <p>
+     * 权重：条目名命中 = 3 &gt; 摘要命中 = 2 &gt; 仅正文命中 = 1。
+     * 正文 = 去掉 YAML front matter 后的部分，避免 front matter 里的
+     * {@code topic:}/{@code summary:} 行被重复计入正文命中。
+     */
+    private SearchCandidate matchFile(Path file, List<String> terms) throws IOException {
+        String fileName = file.getFileName().toString();
+        String topic = fileName.substring(0, fileName.length() - ".md".length());
+        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
+
+        // 拆 front matter：首行为 --- 时，到下一个 --- 为止
+        String summary = "";
+        int bodyStart = 0;
+        if (!lines.isEmpty() && lines.get(0).trim().equals("---")) {
+            for (int i = 1; i < lines.size(); i++) {
+                if (lines.get(i).trim().equals("---")) {
+                    bodyStart = i + 1;
+                    break;
+                }
+                if (lines.get(i).startsWith("summary:")) {
+                    summary = lines.get(i).substring("summary:".length()).trim();
+                }
+            }
+        }
+        List<String> bodyLines = lines.subList(Math.min(bodyStart, lines.size()), lines.size());
+
+        String topicLower = topic.toLowerCase(Locale.ROOT);
+        String summaryLower = summary.toLowerCase(Locale.ROOT);
+        boolean topicHit = false;
+        boolean summaryHit = false;
+        boolean[] termMatched = new boolean[terms.size()];
+        for (int t = 0; t < terms.size(); t++) {
+            if (topicLower.contains(terms.get(t))) {
+                termMatched[t] = true;
+                topicHit = true;
+            }
+            if (summaryLower.contains(terms.get(t))) {
+                termMatched[t] = true;
+                summaryHit = true;
+            }
+        }
+
+        int anchor = -1;
+        for (int i = 0; i < bodyLines.size(); i++) {
+            String lower = bodyLines.get(i).toLowerCase(Locale.ROOT);
+            boolean anyHit = false;
+            for (int t = 0; t < terms.size(); t++) {
+                if (lower.contains(terms.get(t))) {
+                    termMatched[t] = true;
+                    anyHit = true;
+                }
+            }
+            if (anyHit && anchor < 0) {
+                anchor = i;
+            }
+        }
+
+        for (boolean matched : termMatched) {
+            if (!matched) {
+                return null; // AND 语义：任一词不命中即整文件不命中
+            }
+        }
+
+        int weight = topicHit ? 3 : (summaryHit ? 2 : 1);
+        String snippet = anchor >= 0 ? buildSnippet(bodyLines, anchor) : summary;
+        return new SearchCandidate(topic, summary, snippet, weight);
+    }
+
+    /** 命中片段：首个正文命中行及其上下各 1 行（跳过空行），约 200 字符截断 */
+    private String buildSnippet(List<String> bodyLines, int anchor) {
+        int from = Math.max(0, anchor - 1);
+        int to = Math.min(bodyLines.size(), anchor + 2); // exclusive
+        StringBuilder sb = new StringBuilder();
+        for (int i = from; i < to; i++) {
+            String line = bodyLines.get(i).trim();
+            if (line.isEmpty()) {
+                continue;
+            }
+            if (sb.length() > 0) {
+                sb.append(" ⏎ ");
+            }
+            sb.append(line);
+        }
+        String s = sb.toString();
+        return s.length() <= SNIPPET_MAX_CHARS ? s : s.substring(0, SNIPPET_MAX_CHARS) + "…";
+    }
+
+    /** 搜索候选（内部辅助，带排序权重） */
+    private record SearchCandidate(String topic, String summary, String snippet, int weight) {
     }
 
     /** 索引条目（内部辅助） */

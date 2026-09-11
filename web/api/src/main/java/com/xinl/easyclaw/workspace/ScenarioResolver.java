@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.base.orchestration.OrchestrationModes;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.scenario.repository.ScenarioRepository;
@@ -56,13 +57,13 @@ public class ScenarioResolver {
     }
 
     /**
-     * 当前激活场景的工作流 JSON（非 team 模式或未激活时返回 null）
+     * 当前激活场景的工作流 JSON（非编排模式或未激活时返回 null）
      * <p>
      * 供编排审计使用：把「计划」与主智能体自报的「实际执行」做比对。
      */
     public String activeWorkflowJson(String workspaceId) {
         ScenarioEntity scenario = activeScenario(workspaceId);
-        if (scenario == null || !"team".equals(scenario.getMode())) {
+        if (scenario == null || !OrchestrationModes.isOrchestrated(scenario.getMode())) {
             return null;
         }
         return scenario.getWorkflow();

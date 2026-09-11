@@ -7,7 +7,7 @@ export interface StreamEvent {
   toolCallId?: string;
   /**
    * 子 Agent 实例 id（subagent_* 事件）。来自框架的 agentInstanceId，
-   * 用于区分并行派发的同名子 Agent —— content 里的名字是角色名，两个实例完全相同。
+   * 用于区分并行派发的同名子 Agent —— content 里的名字是智能体名（agentId），两个实例完全相同。
    * 历史转录回放时为 undefined，此时退化为按名字归并。
    */
   subId?: string;

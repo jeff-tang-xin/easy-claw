@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.scenario.service;
 
+import com.xinl.easyclaw.agent.spi.AgentRegistry;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.scenario.repository.ScenarioRepository;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
@@ -58,13 +59,13 @@ class ScenarioServiceActivateByNameTest {
             }
             default -> throw new AssertionError("非预期调用: " + inv.method());
         });
-        WorkspaceManager wm = new WorkspaceManager(null, null, null, null, null, null, null, null) {
+        WorkspaceManager wm = new WorkspaceManager(null, null, null, null, null, null, null, null, null) {
             @Override
             public void rebuildAgent(String workspaceId) {
                 rebuilds++;
             }
         };
-        return new ScenarioService(scenarioRepo, actRepo, wm);
+        return new ScenarioService(scenarioRepo, actRepo, wm, new AgentRegistry());
     }
 
     private void seed(String name, long id, boolean active) {
@@ -123,6 +124,31 @@ class ScenarioServiceActivateByNameTest {
 
         assertTrue(newService().activateByName(WS, "  code-review  ").isPresent());
         assertEquals(5L, saved.get(WS));
+    }
+
+    @Test
+    @DisplayName("按名查询（不激活）：命中启用场景但不写绑定、不重建 Agent")
+    void findActiveByNameDoesNotActivate() {
+        seed("general-coding", 3L, true);
+
+        Optional<ScenarioEntity> got = newService().findActiveByName("general-coding");
+
+        assertTrue(got.isPresent());
+        assertEquals(3L, got.get().getId());
+        assertNull(saved.get(WS), "查询不应产生激活绑定");
+        assertEquals(0, rebuilds, "查询不应触发 Agent 重建");
+    }
+
+    @Test
+    @DisplayName("按名查询（不激活）：停用场景与空白名称返回空")
+    void findActiveByNameFiltersInactiveAndBlank() {
+        seed("archived", 9L, false);
+        ScenarioService svc = newService();
+
+        assertTrue(svc.findActiveByName("archived").isEmpty());
+        assertTrue(svc.findActiveByName("missing").isEmpty());
+        assertTrue(svc.findActiveByName("  ").isEmpty());
+        assertTrue(svc.findActiveByName(null).isEmpty());
     }
 
     // ---------- 动态代理 stub 支持 ----------

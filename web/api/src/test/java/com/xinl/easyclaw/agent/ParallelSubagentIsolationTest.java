@@ -60,7 +60,8 @@ class ParallelSubagentIsolationTest {
                 new AgentScopeProperties(),
                 new SessionRegistry(),
                 mock(ScenarioResolver.class),
-                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
 
         for (Method m : AgentService.class.getDeclaredMethods()) {
             if (m.getName().equals("handleSubagentEvent")) {

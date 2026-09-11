@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
+import com.xinl.easyclaw.middleware.CompactionNoticeMiddleware;
 import com.xinl.easyclaw.middleware.FileChangeMiddleware;
 import com.xinl.easyclaw.middleware.ToolFailGuard;
 import io.agentscope.core.event.CustomEvent;
@@ -75,6 +76,24 @@ public final class CustomEventTranslator {
                     onEvent.accept(StreamEvent.context(mapper.writeValueAsString(payload)));
                 } catch (JsonProcessingException ex) {
                     log.debug("tool_fail_guard 事件序列化失败，跳过: {}", ex.getMessage());
+                }
+            }
+            case CompactionNoticeMiddleware.EVENT_NAME -> {
+                // 压缩提示与 tool_fail_guard 同构：JSON 经 context 事件下发，前端按 type 路由。
+                // 文案在后端组装（前端不拼数字），message 同时是转录落盘的内容。
+                try {
+                    ObjectNode payload = mapper.createObjectNode();
+                    payload.put("type", CompactionNoticeMiddleware.EVENT_NAME);
+                    Object keeping = value == null ? null : value.get("keeping");
+                    int kept = keeping instanceof Number n ? n.intValue() : 0;
+                    payload.put("keeping", kept);
+                    payload.put("message", kept > 0
+                            ? "上下文已压缩为摘要（当前上下文保留 " + kept
+                                    + " 条消息）；更早的完整对话仍保存在会话转录中"
+                            : "上下文已压缩为摘要；更早的完整对话仍保存在会话转录中");
+                    onEvent.accept(StreamEvent.context(mapper.writeValueAsString(payload)));
+                } catch (JsonProcessingException ex) {
+                    log.debug("compaction 事件序列化失败，跳过: {}", ex.getMessage());
                 }
             }
             default -> {

@@ -8,7 +8,8 @@ interface Scenario {
   displayName: string;
   icon: string;
   description: string;
-  mode: 'single' | 'team';
+  /** 编排模式：single=单智能体 / team=团队编排 / schedule=定时工作流 */
+  mode: 'single' | 'team' | 'schedule';
   systemPrompt: string;
   workflow: string | null;
   active: boolean;
@@ -21,21 +22,22 @@ interface Scenario {
   mcpServices?: string;
   /** 基础能力档位：none / readonly / standard / full；"" = 未配置（继承默认） */
   capabilityTier?: string;
-  /** 绑定的主角色名；"" = 解绑（回退默认主角色 main） */
+  /** 绑定的主控智能体 agentId；"" = 解绑（回退默认主控 main） */
   roleName?: string;
 }
 
 interface Step {
-  /** 执行该步骤的角色名（编排主键）——角色自带人格与模型，是完整的执行单元 */
+  /** 执行该步骤的智能体 agentId（编排主键）——智能体内置人格、工具策略与模型，是完整的执行单元 */
   role: string;
   instruction: string;
   parallel: boolean;
 }
 
-/** /api/roles 返回项（仅取下拉所需字段） */
-interface RoleOption {
-  name: string;
+/** /api/scenarios/agents 返回项（仅取下拉所需字段） */
+interface AgentOption {
+  agentId: string;
   displayName?: string;
+  description?: string;
 }
 
 interface WorkspaceSummary {
@@ -148,6 +150,10 @@ function BindingPicker({label, hint, options, selected, onToggle, empty}: {
 /** 序列化绑定字段：空选择序列化为 ""（后端语义：""=清空绑定，null=不修改） */
 const serializeNames = (names: string[]): string => (names.length ? JSON.stringify(names) : '');
 
+/** 编排模式中文标签（single=单体 / team=团队 / schedule=定时） */
+const modeLabel = (mode: string): string =>
+  mode === 'team' ? '团队编排' : mode === 'schedule' ? '定时工作流' : '单智能体';
+
 const emptyScenario = (): Scenario => ({
   id: 0, name: '', displayName: '', icon: '🎬', description: '',
   mode: 'single', systemPrompt: '', workflow: null, active: true, builtin: false,
@@ -200,7 +206,7 @@ export default function ScenariosPage() {
   const [skillOptions, setSkillOptions] = useState<SkillOption[]>([]);
   const [subagentOptions, setSubagentOptions] = useState<SubagentOption[]>([]);
   const [mcpOptions, setMcpOptions] = useState<McpOption[]>([]);
-  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
+  const [agentOptions, setAgentOptions] = useState<AgentOption[]>([]);
   const [bindSkills, setBindSkills] = useState<string[]>([]);
   const [bindSubagents, setBindSubagents] = useState<string[]>([]);
   const [bindMcp, setBindMcp] = useState<string[]>([]);
@@ -243,11 +249,11 @@ export default function ScenariosPage() {
     setBindLoading(true);
     const wsQuery = selectedWs ? `?workspaceId=${encodeURIComponent(selectedWs)}` : '';
     try {
-      const [sk, subs, mcp, roles] = await Promise.all([
+      const [sk, subs, mcp, agents] = await Promise.all([
         getJson<SkillOption[]>(`/api/skills${wsQuery}`).catch(() => [] as SkillOption[]),
         getJson<SubagentOption[]>(`/api/scenarios/subagents${wsQuery}`).catch(() => [] as SubagentOption[]),
         getJson<McpOption[]>('/api/mcp').catch(() => [] as McpOption[]),
-        getJson<RoleOption[]>('/api/roles').catch(() => [] as RoleOption[]),
+        getJson<AgentOption[]>('/api/scenarios/agents').catch(() => [] as AgentOption[]),
       ]);
       // 只保留 skill 作用域：scope 为 global / workspace。
       // 排除 *-subagent（global-subagent / workspace-subagent）—— 那是子 Agent 声明文件，
@@ -255,7 +261,7 @@ export default function ScenariosPage() {
       setSkillOptions(sk.filter((s) => !String(s.scope || '').endsWith('-subagent')));
       setSubagentOptions(subs);
       setMcpOptions(mcp.filter((m) => !m.isTemplate));
-      setRoleOptions(roles);
+      setAgentOptions(agents);
     } finally {
       setBindLoading(false);
     }
@@ -293,7 +299,8 @@ export default function ScenariosPage() {
     if (!editing) return;
     const body = {
       ...editing,
-      workflow: editing.mode === 'team' && steps.length
+      // team / schedule 都是编排型模式，都需要工作流步骤
+      workflow: editing.mode !== 'single' && steps.length
         ? JSON.stringify({steps})
         : null,
       // 全部显式提交：未勾选任何项时传 ""（后端 blankToNull 会归一为 null=清空绑定），
@@ -302,7 +309,7 @@ export default function ScenariosPage() {
       subagents: serializeNames(bindSubagents),
       mcpServices: serializeNames(bindMcp),
       capabilityTier: bindTier,
-      // 与能力绑定同理：显式传 ""（而非 null）才能解绑回默认主角色
+      // 与能力绑定同理：显式传 ""（而非 null）才能解绑回默认主控 main
       roleName: (editing.roleName || '').trim(),
     };
     try {
@@ -377,7 +384,7 @@ export default function ScenariosPage() {
           {activeScenario ? (
             <>
               <span className="badge green">{activeScenario.icon} {activeScenario.displayName || activeScenario.name}</span>
-              <span className="badge gray">{activeScenario.mode === 'team' ? '多智能体编排' : '单智能体'}</span>
+              <span className="badge gray">{modeLabel(activeScenario.mode)}</span>
               <button className="btn small" onClick={deactivate}>停用</button>
             </>
           ) : (
@@ -401,8 +408,8 @@ export default function ScenariosPage() {
                 <div style={{fontWeight: 600, fontSize: 15}}>
                   <span style={{marginRight: 6}}>{s.icon || '🎬'}</span>{s.displayName || s.name}
                 </div>
-                <span className={`badge ${s.mode === 'team' ? 'blue' : 'gray'}`}>
-                  {s.mode === 'team' ? '🤝 编排' : '👤 单体'}
+                <span className={`badge ${s.mode === 'single' ? 'gray' : 'blue'}`}>
+                  {s.mode === 'team' ? '🤝 编排' : s.mode === 'schedule' ? '⏰ 定时' : '👤 单体'}
                 </span>
               </div>
               <div className="hint" style={{minHeight: 32}}>{s.description || '（无描述）'}</div>
@@ -424,7 +431,7 @@ export default function ScenariosPage() {
                   </div>
                 );
               })()}
-              {s.mode === 'team' && parseSteps(s.workflow).length > 0 && (
+              {s.mode !== 'single' && parseSteps(s.workflow).length > 0 && (
                 <div style={{fontSize: 12, color: 'var(--text-dim, #888)', lineHeight: 1.7}}>
                   {parseSteps(s.workflow).map((st, i) => (
                     <div key={i}>
@@ -452,8 +459,8 @@ export default function ScenariosPage() {
       </div>
       <p className="hint" style={{marginTop: 12}}>
         场景激活后立即重建该工作区的 Agent 并注入 system prompt；team 模式下主智能体作为
-        <strong>常驻协调者</strong>——只做分发与验收（决定质量与走向），按工作流阶段把各角色派发出去执行，
-        同一阶段的多个角色并发激活。角色在「角色」页管理（人格与模型随角色走）。
+        <strong>常驻协调者</strong>——只做分发与验收（决定质量与走向），按工作流阶段把各成员智能体派发出去执行，
+        同一阶段的多个成员并发激活。各智能体的人格由 SPI 内置、模型在 application.yml 按智能体配置。
       </p>
 
       {editing && (
@@ -485,25 +492,26 @@ export default function ScenariosPage() {
               <label>模式</label>
               <select
                 value={editing.mode}
-                onChange={(e) => setEditing({...editing, mode: e.target.value as 'single' | 'team'})}
+                onChange={(e) => setEditing({...editing, mode: e.target.value as Scenario['mode']})}
               >
                 <option value="single">single 单智能体</option>
-                <option value="team">team 多智能体</option>
+                <option value="team">team 团队编排</option>
+                <option value="schedule">schedule 定时工作流</option>
               </select>
             </div>
             <div className="field" style={{width: 160}}>
-              <label>主角色</label>
+              <label>主控智能体</label>
               <select
                 value={editing.roleName || ''}
-                title="本场景下主智能体扮演的角色；留空则使用默认主角色"
+                title="本场景下绑定的主控智能体；留空则使用默认主控 main"
                 onChange={(e) => setEditing({...editing, roleName: e.target.value})}
               >
-                <option value="">默认主角色</option>
-                {roleOptions.map((r) => (
-                  <option key={r.name} value={r.name}>{r.displayName || r.name}</option>
+                <option value="">默认主控 main</option>
+                {agentOptions.map((r) => (
+                  <option key={r.agentId} value={r.agentId}>{r.displayName || r.agentId}</option>
                 ))}
-                {editing.roleName && !roleOptions.some((r) => r.name === editing.roleName) && (
-                  <option value={editing.roleName}>{editing.roleName}（已删除）</option>
+                {editing.roleName && !agentOptions.some((r) => r.agentId === editing.roleName) && (
+                  <option value={editing.roleName}>{editing.roleName}（未注册）</option>
                 )}
               </select>
             </div>
@@ -522,10 +530,14 @@ export default function ScenariosPage() {
             />
           </div>
 
-          {editing.mode === 'team' && (
+          {editing.mode !== 'single' && (
             <div className="field">
               <label>
-                编排工作流步骤（<strong>自上而下按顺序执行</strong>；勾选「并行」表示与上一步同时执行；用 ↑↓ 调整顺序）
+                {editing.mode === 'schedule' ? (
+                  <>定时工作流步骤（定时触发能力规划中，当前工作流可被手动执行；自上而下按顺序执行，勾选「并行」表示与上一步同时执行，用 ↑↓ 调整顺序）</>
+                ) : (
+                  <>编排工作流步骤（<strong>自上而下按顺序执行</strong>；勾选「并行」表示与上一步同时执行；用 ↑↓ 调整顺序）</>
+                )}
               </label>
               {steps.map((st, i) => (
                 <div key={i} style={{display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center'}}>
@@ -549,21 +561,21 @@ export default function ScenariosPage() {
                   <select
                     value={st.role}
                     style={{width: 150}}
-                    title="执行本步骤的角色——角色自带人格与模型，是完整的执行单元"
+                    title="执行本步骤的智能体——内置人格、工具策略与模型，是完整的执行单元"
                     onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, role: e.target.value} : s))}
                   >
-                    <option value="">选择角色…</option>
-                    {roleOptions.map((r) => (
-                      <option key={r.name} value={r.name}>{r.displayName || r.name}</option>
+                    <option value="">选择智能体…</option>
+                    {agentOptions.map((r) => (
+                      <option key={r.agentId} value={r.agentId}>{r.displayName || r.agentId}</option>
                     ))}
-                    {st.role && !roleOptions.some((r) => r.name === st.role) && (
-                      <option value={st.role}>{st.role}（已删除）</option>
+                    {st.role && !agentOptions.some((r) => r.agentId === st.role) && (
+                      <option value={st.role}>{st.role}（未注册）</option>
                     )}
                   </select>
                   <input
                     style={{flex: 1}}
                     value={st.instruction}
-                    placeholder="任务指令（派发给该角色的具体任务）"
+                    placeholder="任务指令（派发给该智能体的具体任务）"
                     onChange={(e) => setSteps(steps.map((s, j) => j === i ? {...s, instruction: e.target.value} : s))}
                   />
                   <label style={{display: 'flex', gap: 4, alignItems: 'center', fontSize: 12, whiteSpace: 'nowrap'}}>

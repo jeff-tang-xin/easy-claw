@@ -1,13 +1,14 @@
 package com.xinl.easyclaw.api;
 
+import com.xinl.easyclaw.agent.SubagentLoader;
+import com.xinl.easyclaw.agent.spi.AgentRegistry;
+import com.xinl.easyclaw.base.agent.EasyClawAgent;
 import com.xinl.easyclaw.config.SettingsService;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
-import com.xinl.easyclaw.memory.entity.PropositionEntity;
-import com.xinl.easyclaw.memory.service.MemoryService;
-import com.xinl.easyclaw.role.entity.AgentRoleEntity;
-import com.xinl.easyclaw.role.service.RoleManagementService;
+import com.xinl.easyclaw.memory.settings.MemorySettingsEntity;
+import com.xinl.easyclaw.memory.settings.MemorySettingsService;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tool.service.ToolManagementService;
 import com.xinl.easyclaw.tool.service.ToolRegistryService;
@@ -31,38 +32,34 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 管理类 API：Skills / 子 Agent、角色、工具、MCP、设置、记忆
+ * 管理类 API：Skills / 子 Agent、智能体、工具、MCP、设置、记忆
  */
 @RestController
 @RequestMapping("/api")
 public class ManageController {
 
-    /** 内置子 Agent 名单，复用播种端的单一来源，避免两处漂移。 */
-    private static final java.util.Set<String> BUNDLED_SUBAGENTS =
-            java.util.Set.copyOf(com.xinl.easyclaw.AiAssistantApplication.BUNDLED_SUBAGENTS);
-
-    private final RoleManagementService roleService;
+    private final AgentRegistry agentRegistry;
     private final ToolManagementService toolService;
     private final ToolRegistryService toolRegistryService;
     private final McpConnectionService mcpService;
-    private final MemoryService memoryService;
+    private final MemorySettingsService memorySettingsService;
     private final WorkspaceManager workspaceManager;
     private final SettingsService settingsService;
     private final SkillScriptTools skillScriptTools;
 
-    public ManageController(RoleManagementService roleService,
+    public ManageController(AgentRegistry agentRegistry,
                             ToolManagementService toolService,
                             ToolRegistryService toolRegistryService,
                             McpConnectionService mcpService,
-                            MemoryService memoryService,
+                            MemorySettingsService memorySettingsService,
                             WorkspaceManager workspaceManager,
                             SettingsService settingsService,
                             SkillScriptTools skillScriptTools) {
-        this.roleService = roleService;
+        this.agentRegistry = agentRegistry;
         this.toolService = toolService;
         this.toolRegistryService = toolRegistryService;
         this.mcpService = mcpService;
-        this.memoryService = memoryService;
+        this.memorySettingsService = memorySettingsService;
         this.workspaceManager = workspaceManager;
         this.settingsService = settingsService;
         this.skillScriptTools = skillScriptTools;
@@ -85,13 +82,11 @@ public class ManageController {
     public List<SkillFileDto> listSkills(@RequestParam(required = false) String workspaceId) {
         List<SkillFileDto> result = new ArrayList<>();
         collectMd(SystemHomePaths.globalSkillsDir(), "global", result);
-        collectMd(SystemHomePaths.globalSubagentsDir(), "global-subagent", result);
         if (workspaceId != null) {
             WorkspaceContext ws = workspaceManager.getWorkspace(workspaceId);
             if (ws != null) {
                 Path agentRoot = ws.getPath().resolve(".easyClaw/agent");
                 collectMd(agentRoot.resolve("skills"), "workspace", result);
-                collectMd(agentRoot.resolve("subagents"), "workspace-subagent", result);
             }
         }
         return result;
@@ -328,11 +323,7 @@ public class ManageController {
     public record SkillUpdateRequest(String path, String content, String workspaceId) {}
 
     /**
-     * 更新已存在的 skill / 子 Agent 声明文件内容。
-     *
-     * <p>为什么需要这个端点：内置子 Agent 由 {@code seedBundledSubagents} 在启动时释放为
-     * {@code ~/.easyClaw/subagents/*.md} 真实文件（且不覆盖已存在的），本就允许用户修改，
-     * 但此前只有「创建」与「删除」端点，页面无法回写 → 用户想调 {@code steps} 却无处可改。
+     * 更新已存在的 skill 声明文件内容。
      *
      * <p>只接受 {@code path}（列表接口已返回绝对路径）而不是 scope+name，避免在这里重算落点
      * 与 {@link #collectMd} 的扫描规则产生分歧。
@@ -398,41 +389,6 @@ public class ManageController {
 
     public record SkillResetRequest(String name, String workspaceId) {}
 
-    /**
-     * 把内置子 Agent 声明恢复为 JAR 内置的出厂版本。
-     *
-     * <p>与 {@code AiAssistantApplication.seedBundledSubagents} 的差别：那里是「文件不存在才写」
-     * 的播种语义，这里是**显式覆盖**——用户主动要求丢弃自己的修改。
-     *
-     * <p>只允许恢复 {@link #BUNDLED_SUBAGENTS} 名单内的名字，且落点固定为全局 subagents 目录：
-     * 名字来自请求体，不做白名单就会变成「用任意 JAR 资源覆盖任意文件」。
-     */
-    @PostMapping("/skills/reset")
-    public SkillFileDto resetBundledSubagent(@RequestBody SkillResetRequest req) {
-        String name = req.name() == null ? "" : req.name().trim();
-        if (!BUNDLED_SUBAGENTS.contains(name)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                    "不是内置子 Agent，无法恢复默认: " + name);
-        }
-        Path target = SystemHomePaths.globalSubagentsDir().resolve(name + ".md");
-        try (InputStream in = getClass().getResourceAsStream("/subagents/" + name + ".md")) {
-            if (in == null) {
-                throw new ResponseStatusException(HttpStatus.NOT_FOUND,
-                        "内置模板缺失: " + name);
-            }
-            Files.createDirectories(target.getParent());
-            Files.copy(in, target, StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException e) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
-                    "恢复默认失败: " + e.getMessage());
-        }
-        if (req.workspaceId() != null && !req.workspaceId().isBlank()) {
-            workspaceManager.rebuildAgent(req.workspaceId());
-        }
-        return new SkillFileDto("global-subagent", name, readDescription(target),
-                target.toAbsolutePath().toString(), readAllSafe(target), "file", List.of());
-    }
-
     @DeleteMapping("/skills")
     public void deleteSkill(@RequestParam String path) {
         try {
@@ -452,41 +408,29 @@ public class ManageController {
         }
     }
 
-    // ================= 角色 =================
+    // ================= 智能体 =================
 
-    @GetMapping("/roles")
-    public List<AgentRoleEntity> roles() {
-        return roleService.findAll();
-    }
+    /** 可派遣智能体的展示信息：前端场景/工作流下拉的数据源（方案 C 后取代原角色列表） */
+    public record AgentDto(String agentId, String displayName, String description) {}
 
-    @PostMapping("/roles")
-    public AgentRoleEntity createRole(@RequestBody AgentRoleEntity role) {
-        role.setId(null);
-        AgentRoleEntity created = roleService.create(role);
-        // 角色变更影响主智能体模型/提示词，重建所有 Workspace Agent
-        workspaceManager.rebuildAllAgents();
-        return created;
-    }
-
-    @PutMapping("/roles/{id}")
-    public AgentRoleEntity updateRole(@PathVariable Long id, @RequestBody AgentRoleEntity role) {
-        AgentRoleEntity updated = roleService.update(id, role);
-        // 角色变更影响主智能体模型/提示词，重建所有 Workspace Agent
-        workspaceManager.rebuildAllAgents();
-        return updated;
-    }
-
-    @DeleteMapping("/roles/{id}")
-    public void deleteRole(@PathVariable Long id) {
-        roleService.delete(id);
-        workspaceManager.rebuildAllAgents();
-    }
-
-    @PostMapping("/roles/{id}/active/{active}")
-    public AgentRoleEntity setRoleActive(@PathVariable Long id, @PathVariable boolean active) {
-        AgentRoleEntity updated = roleService.setActive(id, active);
-        workspaceManager.rebuildAllAgents();
-        return updated;
+    /**
+     * 列出可派遣的内置智能体（排除主控 main，避免把主控自己选作工作流执行节点）。
+     * <p>名单与显示名均来自 SPI 注册表，是场景/工作流绑定 agentId 的权威可选项；
+     * 与 {@code ScenarioService.availableSubagents} 同一口径（不含 main），
+     * 但额外提供展示名与职责描述供下拉渲染。
+     */
+    @GetMapping("/agents")
+    public List<AgentDto> agents() {
+        List<AgentDto> result = new ArrayList<>();
+        for (EasyClawAgent agent : agentRegistry.all()) {
+            String agentId = agent.agentId();
+            if (SubagentLoader.MAIN_AGENT_ID.equals(agentId)) {
+                continue;
+            }
+            result.add(new AgentDto(agentId,
+                    agent.profile().displayName(), agent.profile().description()));
+        }
+        return result;
     }
 
     // ================= 工具 =================
@@ -645,15 +589,30 @@ public class ManageController {
         return settings();
     }
 
-    // ================= 记忆 =================
+    // ================= 记忆设置 =================
 
-    @GetMapping("/memory")
-    public List<PropositionEntity> memory(@RequestParam String userId) {
-        return memoryService.findByUserId(userId);
+    /**
+     * 读取本地用户的记忆账簿设置（不存在则按默认值落库返回）。
+     * 旋钮语义见 {@link MemorySettingsEntity} 字段注释。
+     */
+    @GetMapping("/memory/settings")
+    public MemorySettingsEntity memorySettings() {
+        return memorySettingsService.getOrCreate();
     }
 
-    @DeleteMapping("/memory/{id}")
-    public void deleteMemory(@PathVariable Long id) {
-        memoryService.deleteById(id);
+    /**
+     * 部分更新记忆设置（仅覆盖非 null 字段）；flushMode 非法值返回 400。
+     * 保存后重建全部工作区 Agent——装配层在 build 时读取设置，不重建不生效。
+     */
+    @PutMapping("/memory/settings")
+    public MemorySettingsEntity updateMemorySettings(@RequestBody MemorySettingsEntity patch) {
+        MemorySettingsEntity saved;
+        try {
+            saved = memorySettingsService.update(MemorySettingsService.LOCAL_USER_ID, patch);
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, ex.getMessage());
+        }
+        workspaceManager.rebuildAllAgents();
+        return saved;
     }
 }

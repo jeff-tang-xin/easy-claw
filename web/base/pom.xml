@@ -38,6 +38,16 @@
             <artifactId>slf4j-api</artifactId>
         </dependency>
 
+        <!--
+            仅为 AgentScopeProperties 的 @ConfigurationProperties 注解而引入。
+            注意：这是 spring-boot 而非 spring-boot-starter-web/data-jpa，
+            不会把 MVC / JPA 带进契约层，边界纪律依然成立。
+        -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot</artifactId>
+        </dependency>
+
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

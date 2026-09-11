@@ -49,4 +49,22 @@ public interface KnowledgeService {
      * 是否存在指定 topic 的条目。
      */
     boolean exists(String topic, WorkspaceContext workspace);
+
+    /**
+     * 全文搜索知识库（子串匹配档）。
+     * <p>
+     * query 按空白拆词，所有词必须全部命中（AND 语义），匹配不区分大小写；
+     * 匹配范围 = 条目名 + 摘要（md 文件的 YAML front matter）+ 正文。
+     * 结果按权重排序：条目名命中 &gt; 摘要命中 &gt; 正文命中（同权重内保持文件遍历序）。
+     * <p>
+     * 单个文件读取异常不会导致整体搜索失败（仿 {@link #list} 的容错）。
+     * <p>
+     * 远程模式（向量数据库/外部 RAG）可改写本方法为语义检索，签名不变。
+     *
+     * @param query     搜索词，多个词用空白分隔；空或全空白时返回空列表
+     * @param limit     最多返回条数；≤0 时按默认值 10 处理
+     * @param workspace 当前工作区
+     * @return 命中清单，按权重降序
+     */
+    List<KnowledgeSearchHit> search(String query, int limit, WorkspaceContext workspace);
 }

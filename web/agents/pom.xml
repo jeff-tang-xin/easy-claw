@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-agents</artifactId>
+    <packaging>pom</packaging>
+    <name>Easy Claw - Agents（聚合）</name>
+    <description>
+        7 个平级智能体，每个一个独立模块。
+
+        边界纪律：每个 agent 模块只依赖 base（契约层），
+        不依赖 agent-core、不依赖 api、彼此之间也不互相依赖。
+        由 agent-core 在运行时通过 ServiceLoader 按 agentId 发现并装配。
+
+        新增智能体 = 新建一个模块 + implements EasyClawAgent
+        + 注册 META-INF/services 文件，公共代码零改动。
+    </description>
+
+    <modules>
+        <module>agent-main</module>
+        <module>agent-coder</module>
+        <module>agent-reviewer</module>
+        <module>agent-planner</module>
+        <module>agent-researcher</module>
+        <module>agent-code-expert</module>
+        <module>agent-file-expert</module>
+    </modules>
+</project>

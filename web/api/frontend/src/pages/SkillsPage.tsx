@@ -10,12 +10,9 @@ const scopeLabel: Record<string, string> = {
   system: '内置',
   global: '全局',
   workspace: '工作区',
-  'global-subagent': '全局子Agent',
-  'workspace-subagent': '工作区子Agent',
 };
 
 export default function SkillsPage() {
-  const [tab, setTab] = useState<'skills' | 'subagents'>('skills');
   const [items, setItems] = useState<SkillFile[]>([]);
   const [workspaces, setWorkspaces] = useState<WorkspaceRef[]>([]);
   const [error, setError] = useState('');
@@ -50,11 +47,9 @@ export default function SkillsPage() {
   useEffect(() => { load(); loadWorkspaces(); }, []);
 
   const skills = items.filter((s) => s.scope === 'global' || s.scope === 'workspace' || s.scope === 'system');
-  const subagents = items.filter((s) => s.scope === 'global-subagent' || s.scope === 'workspace-subagent');
 
-  const openCreate = (t: 'skills' | 'subagents') => {
-    setTab(t);
-    setScope(t === 'skills' ? 'global' : 'global-subagent');
+  const openCreate = () => {
+    setScope('global');
     setWorkspaceId('');
     setName('');
     setDescription('');
@@ -66,7 +61,7 @@ export default function SkillsPage() {
 
   const create = async () => {
     if (!name.trim()) { alert('请输入名称'); return; }
-    const isWs = scope === 'workspace' || scope === 'workspace-subagent';
+    const isWs = scope === 'workspace';
     if (isWs && !workspaceId) { alert('请选择目标工作区'); return; }
     try {
       const body: any = { scope, name: name.trim(), description, content, type: skillType };
@@ -139,27 +134,6 @@ export default function SkillsPage() {
     }
   };
 
-  /** 恢复内置默认：后端用 JAR 模板覆盖磁盘文件，会丢弃本地修改，故需二次确认。 */
-  const resetToDefault = async () => {
-    if (!viewing) return;
-    if (!confirm(`确定把「${viewing.name}」恢复为内置默认版本？当前修改将被覆盖且无法撤销。`)) return;
-    setSaving(true);
-    try {
-      const fresh = await postJson<SkillFile>('/api/skills/reset', {
-        name: viewing.name,
-        workspaceId: viewing.scope.startsWith('workspace') ? workspaceId : undefined,
-      });
-      setViewing(fresh);
-      setDraft(fresh.content || '');
-      setEditing(false);
-      await load();
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
-
   const remove = async (path: string) => {    if (!confirm('删除该项？')) return;
     try {
       await del(`/api/skills?path=${encodeURIComponent(path)}`);
@@ -169,25 +143,15 @@ export default function SkillsPage() {
     }
   };
 
-  const list = tab === 'skills' ? skills : subagents;
-  const isAgent = tab === 'subagents';
+  const list = skills;
 
   return (
     <div className="page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 className="page-title">📚 Skills 与子 Agent</h1>
-        <button className="btn primary" onClick={() => openCreate(tab)}>＋ 新建{isAgent ? '子 Agent' : 'Skill'}</button>
+        <h1 className="page-title">📚 Skills</h1>
+        <button className="btn primary" onClick={() => openCreate()}>＋ 新建Skill</button>
       </div>
       {error && <div className="error-box">{error}</div>}
-
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16 }}>
-        <button className={`btn ${tab === 'skills' ? 'primary' : ''}`} onClick={() => setTab('skills')}>
-          📚 Skills（{skills.length}）
-        </button>
-        <button className={`btn ${tab === 'subagents' ? 'primary' : ''}`} onClick={() => setTab('subagents')}>
-          🤖 子 Agent（{subagents.length}）
-        </button>
-      </div>
 
       <div className="card">
         <table>
@@ -196,7 +160,7 @@ export default function SkillsPage() {
           </thead>
           <tbody>
             {list.length === 0 && (
-              <tr><td colSpan={5} className="empty">暂无{isAgent ? '子 Agent' : 'Skills'}</td></tr>
+              <tr><td colSpan={5} className="empty">暂无Skills</td></tr>
             )}
             {list.map((s, i) => (
               <tr key={i}>
@@ -219,25 +183,16 @@ export default function SkillsPage() {
       </div>
 
       {creating && (
-        <Modal title={isAgent ? '🤖 新建子 Agent' : '📚 新建 Skill'} onClose={() => setCreating(false)} width={680}>
+        <Modal title="📚 新建 Skill" onClose={() => setCreating(false)} width={680}>
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <div className="field" style={{ flex: 1, minWidth: 180 }}>
               <label>作用域</label>
               <select value={scope} onChange={(e) => { setScope(e.target.value); setWorkspaceId(''); }}>
-                {isAgent ? (
-                  <>
-                    <option value="global-subagent">全局（~/.easyClaw/subagents）</option>
-                    <option value="workspace-subagent">工作区（.easyClaw/agent/subagents）</option>
-                  </>
-                ) : (
-                  <>
-                    <option value="global">全局（~/.easyClaw/skills）</option>
-                    <option value="workspace">工作区（.easyClaw/agent/skills）</option>
-                  </>
-                )}
+                <option value="global">全局（~/.easyClaw/skills）</option>
+                <option value="workspace">工作区（.easyClaw/agent/skills）</option>
               </select>
             </div>
-            {(scope === 'workspace' || scope === 'workspace-subagent') && (
+            {scope === 'workspace' && (
               <div className="field" style={{ flex: 1, minWidth: 180 }}>
                 <label>目标工作区 *</label>
                 <select value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
@@ -250,22 +205,20 @@ export default function SkillsPage() {
                 </select>
               </div>
             )}
-            {!isAgent && (
-              <div className="field" style={{ flex: 1, minWidth: 150 }}>
-                <label>结构</label>
-                <select value={skillType} onChange={(e) => setSkillType(e.target.value as 'file' | 'dir')}>
-                  <option value="file">📄 单文件（skill.md）</option>
-                  <option value="dir">📁 目录（SKILL.md + 子规则）</option>
-                </select>
-              </div>
-            )}
+            <div className="field" style={{ flex: 1, minWidth: 150 }}>
+              <label>结构</label>
+              <select value={skillType} onChange={(e) => setSkillType(e.target.value as 'file' | 'dir')}>
+                <option value="file">📄 单文件（skill.md）</option>
+                <option value="dir">📁 目录（SKILL.md + 子规则）</option>
+              </select>
+            </div>
           </div>
 
           <div style={{ display: 'flex', gap: 12 }}>
             <div className="field" style={{ flex: 1 }}>
               <label>名称（英文标识）{skillType === 'dir' && '，即目录名'}</label>
               <input value={name} onChange={(e) => setName(e.target.value)}
-                placeholder={isAgent ? '如：code-expert' : skillType === 'dir' ? '如：frontend-quality' : '如：code-review'} />
+                placeholder={skillType === 'dir' ? '如：frontend-quality' : '如：code-review'} />
             </div>
           </div>
           <div className="field">
@@ -273,13 +226,11 @@ export default function SkillsPage() {
             <input value={description} onChange={(e) => setDescription(e.target.value)} />
           </div>
           <div className="field">
-            <label>{isAgent ? '子 Agent 内容（Markdown，frontmatter 支持 role/model/steps）' : (skillType === 'dir' ? '📌 主入口内容 (SKILL.md)' : '内容（Markdown）')}</label>
+            <label>{skillType === 'dir' ? '📌 主入口内容 (SKILL.md)' : '内容（Markdown）'}</label>
             <textarea value={content} onChange={(e) => setContent(e.target.value)} rows={6}
-              placeholder={isAgent
-                ? '---\ndescription: 资深软件架构师\nrole: code-expert\nsteps: 12\n---\n\n你是名为 code-expert 的子智能体...'
-                : skillType === 'dir'
-                  ? '---\ndescription: 前端质量标准集\n---\n\n你是前端专家，遵循以下最佳实践...'
-                  : '---\ndescription: ...\n---\n\n你的提示词...'} />
+              placeholder={skillType === 'dir'
+                ? '---\ndescription: 前端质量标准集\n---\n\n你是前端专家，遵循以下最佳实践...'
+                : '---\ndescription: ...\n---\n\n你的提示词...'} />
           </div>
 
           {skillType === 'dir' && (
@@ -335,7 +286,7 @@ export default function SkillsPage() {
 
       {viewing && (
         <Modal
-          title={`${viewing.scope.includes('subagent') ? '🤖' : viewing.type === 'dir' ? '📁' : '📚'} ${viewing.name}`}
+          title={`${viewing.type === 'dir' ? '📁' : '📚'} ${viewing.name}`}
           onClose={() => { setViewing(null); setEditing(false); setDraft(''); }}
           width={760}
         >
@@ -365,11 +316,6 @@ export default function SkillsPage() {
                 {viewing.scope !== 'system' && !editing && (
                   <button className="btn small" onClick={startEdit}>✏️ 编辑</button>
                 )}
-                {viewing.scope === 'global-subagent' && !editing && (
-                  <button className="btn small" disabled={saving} onClick={resetToDefault}>
-                    ↩️ 恢复默认
-                  </button>
-                )}
                 {editing && (
                   <>
                     <button className="btn small primary" disabled={saving} onClick={saveEdit}>
@@ -383,12 +329,6 @@ export default function SkillsPage() {
                 )}
               </div>
             </div>
-            {editing && (
-              <div className="hint" style={{ fontSize: 11, marginBottom: 6, color: '#e65100' }}>
-                提示：子 Agent 的迭代步数由 frontmatter 的 <code>steps:</code> 决定；
-                低于全局下限（30）会被自动抬升到 30，高于则按你写的值生效。保存后立即生效。
-              </div>
-            )}
             {editing ? (
               <textarea
                 value={draft}
@@ -503,9 +443,7 @@ export default function SkillsPage() {
       )}
 
       <p className="hint" style={{ marginTop: 12 }}>
-        {isAgent
-          ? '子 Agent 的 frontmatter 支持 <code>role: 角色名</code>（按角色模型运行）、<code>model: provider:model</code>（显式指定）、<code>steps</code>；全局与工作区同名时工作区覆盖。'
-          : 'Skill 是给 Agent 的操作指南（Markdown）；全局与工作区同名时工作区覆盖。'}
+        Skill 是给 Agent 的操作指南（Markdown）；全局与工作区同名时工作区覆盖。
       </p>
     </div>
   );

@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-modes</artifactId>
+    <packaging>pom</packaging>
+    <name>Easy Claw - Modes（聚合）</name>
+    <description>
+        调度模式模块。模式不是智能体，只决定「这次任务派哪些智能体、以什么顺序跑」，
+        执行单元始终是 agents/ 下那 7 个平级智能体。
+
+        - mode-single：用户在场景中自选一个智能体，未选时默认 main（AI-CLAW）
+        - mode-team  ：按场景配置的 workflow 编排多个智能体，支持顺序与并行
+
+        边界纪律：只依赖 base，不依赖 api。新增模式（如未来的 pipeline / debate）
+        = 新建模块 + implements AgentOrchestrator + 注册 services，公共代码零改动。
+
+        DB 兼容红线：modeId() 必须继续返回 "single" / "team" 字面量 ——
+        ScenarioEntity.mode 存量数据用的就是它们，而 SQLite ddl-auto:update 不迁移历史值。
+    </description>
+
+    <modules>
+        <module>mode-single</module>
+        <module>mode-team</module>
+        <module>mode-schedule</module>
+    </modules>
+</project>

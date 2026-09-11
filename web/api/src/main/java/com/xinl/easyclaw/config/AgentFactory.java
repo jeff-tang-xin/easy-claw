@@ -10,6 +10,7 @@ import com.xinl.easyclaw.tools.KnowledgeTools;
 import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
 import io.agentscope.core.tool.AgentTool;
+import io.agentscope.core.model.ToolSchema;
 import io.agentscope.core.tool.Toolkit;
 import io.agentscope.core.tool.mcp.McpClientWrapper;
 import org.slf4j.Logger;
@@ -20,6 +21,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * Agent 工厂
@@ -77,7 +79,7 @@ public class AgentFactory {
     }
 
     /**
-     * 按模型 ID 解析 Model（角色/子智能体配置的模型）。
+     * 按模型 ID 解析 Model（智能体/SPI/yml 配置的模型）。
      * <p>
      * 解析策略（按优先级）：
      * <ol>
@@ -91,10 +93,11 @@ public class AgentFactory {
     }
 
     /**
-     * 按角色解析 Model：角色自带 baseUrl+apiKey 时用其独立端点，
-     * 否则按 modelId 走全局 provider 配置。
+     * 按显式凭证解析 Model：自带 baseUrl+apiKey 时用其独立端点，
+     * 否则按 modelId 走全局 provider 配置。供智能体级模型覆盖（SPI {@code ModelPreference}
+     * 与 application.yml {@code agents.<id>}）使用。
      */
-    public io.agentscope.core.model.Model resolveRoleModel(String modelId, String baseUrl, String apiKey) {
+    public io.agentscope.core.model.Model resolveModelWithCredentials(String modelId, String baseUrl, String apiKey) {
         return modelRegistryService.resolveWithCredentials(modelId, baseUrl, apiKey);
     }
 
@@ -118,20 +121,28 @@ public class AgentFactory {
     public Toolkit createWorkspaceToolkit(List<String> allowedMcpServices) {
         Toolkit toolkit = new Toolkit();
 
-        Toolkit.ToolRegistration registration = toolkit.registration();
-        registration.tool(fileTools);
-        registration.tool(searchTools);
-        registration.tool(codeTools);
-        registration.tool(skillScriptTools);
-        registration.tool(blackboardTools);
-        registration.tool(knowledgeTools);
-        // 按工具管理页的启用状态过滤（disableTools 按 @Tool 名称）
+        // 每个工具类必须独立 registration()：ToolRegistration.tool(Object) 是<b>赋值</b>而非
+        // 追加（Toolkit.java:826 `this.toolObject = toolObject`），且 apply() 只注册单个对象
+        // （Toolkit.java:1011 toolCount > 1 直接抛错）。历史写法在同一个 registration 上连调
+        // 6 次 tool(...)，后者覆盖前者，最终只有最后一个 knowledgeTools 被注册——其余 5 类
+        // 工具静默丢失，子 Agent 调 blackboard_append 报 "Tool not found"。
+        for (Object toolObject : List.of(
+                fileTools, searchTools, codeTools, skillScriptTools, blackboardTools, knowledgeTools)) {
+            toolkit.registration().tool(toolObject).apply();
+        }
+
+        // 按工具管理页的启用状态过滤（按 @Tool 名称摘除）。
+        // 不能用 registration.disableTools(...)：该参数仅在 mcpClient 分支生效
+        // （Toolkit.java:1026），tool(Object) 分支根本不读它，配了也是空转。
         List<String> disabled = toolRegistryService.disabledToolNames();
         if (!disabled.isEmpty()) {
-            registration.disableTools(disabled);
-            log.info("已禁用工具: {}", disabled);
+            Set<String> present = toolkit.getToolSchemas().stream()
+                    .map(ToolSchema::getName)
+                    .collect(Collectors.toSet());
+            List<String> removed = disabled.stream().filter(present::contains).toList();
+            removed.forEach(toolkit::removeTool);
+            log.info("已禁用工具: {}", removed);
         }
-        registration.apply();
 
         // 注册 MCP HTTP_TOOL 桥接（REST API 包装成 AgentTool）
         List<AgentTool> httpTools = mcpConnectionService.getHttpTools();
@@ -226,99 +237,21 @@ public class AgentFactory {
     }
 
     /**
-     * 根据角色名称创建对应的 Toolkit
-     */
-    public Toolkit createToolkitByRole(String roleName) {
-        if (roleName == null || roleName.isBlank()) {
-            return createWorkspaceToolkit();
-        }
-
-        String lower = roleName.toLowerCase();
-        return switch (lower) {
-            case "code", "代码", "代码专家", "code-expert" -> createCodeToolkit();
-            case "file", "文件", "文件专家", "file-expert" -> createFileToolkit();
-            case "search", "搜索", "搜索专家", "search-expert", "researcher" -> createSearchToolkit();
-            default -> createWorkspaceToolkit();
-        };
-    }
-
-    /**
-     * 根据角色名称获取系统提示词
-     */
-    public String getSystemPromptByRole(String roleName) {
-        if (roleName == null || roleName.isBlank()) {
-            return defaultSystemPrompt();
-        }
-
-        String lower = roleName.toLowerCase();
-        return switch (lower) {
-            case "code", "代码", "代码专家", "code-expert" -> """
-                    你是一个资深的代码专家，擅长 Java、Python、JavaScript 等主流编程语言。
-
-                    你的专长：
-                    - 编写高质量、可维护的代码
-                    - 重构和优化现有代码
-                    - 解释代码逻辑和设计模式
-                    - 调试和修复 Bug
-                    - 代码审查和最佳实践建议
-
-                    回答原则：
-                    1. 提供完整可运行的代码示例
-                    2. 代码要有适当的注释
-                    3. 遵循语言的最佳实践和命名规范
-                    4. 优先考虑代码的可读性和可维护性
-                    5. 如果用户没有指定语言，默认使用 Java
-                    """;
-            case "file", "文件", "文件专家", "file-expert" -> """
-                    你是一个文件操作专家，擅长文件读写、目录管理、文件搜索等任务。
-
-                    你的专长：
-                    - 读取和分析文件内容
-                    - 创建和写入文件
-                    - 浏览和管理目录结构
-                    - 按关键词搜索文件
-
-                    安全原则：
-                    1. 操作前确认路径
-                    2. 不要删除重要文件
-                    3. 写入前建议备份
-                    4. 所有文件操作必须限制在当前 Workspace 目录内
-                    """;
-            case "search", "搜索", "搜索专家", "search-expert", "researcher" -> """
-                    你是一个信息搜索专家，擅长网络信息检索和知识问答。
-
-                    你的专长：
-                    - 使用搜索工具查找信息
-                    - 获取和分析网页内容
-                    - 综合多个信息源给出全面的回答
-                    - 对信息进行总结和提炼
-
-                    回答原则：
-                    1. 优先使用搜索工具获取最新信息
-                    2. 标注信息来源
-                    3. 区分事实和观点
-                    4. 信息不足时诚实告知
-                    """;
-            default -> defaultSystemPrompt();
-        };
-    }
-
-    /**
      * 默认系统提示词 —— <b>基座层</b>：只描述"在本平台如何正确干活"（工具协议、
      * 任务闭环、<b>安全规范</b>、输出规范），<b>不含任何人格设定，也不含领域方法论</b>。
      * <p>
      * 四层提示词契约（新增内容前先判断归属，放错层会导致互相打架）：
      * <ul>
      *   <li><b>基座（本方法）</b>：工具协议 + 安全规范。全平台一致，很少变动。</li>
-     *   <li><b>角色</b>：你<i>是什么</i>——身份、视角、判断标准、语气，外加该角色专属的
-     *       LLM 配置（model/baseUrl/apiKey）。见
-     *       {@link com.xinl.easyclaw.role.RolePromptComposer}。</li>
+     *   <li><b>智能体人格</b>：你<i>是什么</i>——身份、视角、判断标准、语气，由各 SPI
+     *       Agent 内置的 persona 提供（见 {@code EasyClawAgent.personaContribution}）；
+     *       该智能体的模型偏好来自 SPI {@code ModelPreference} 与 application.yml 配置。</li>
      *   <li><b>场景</b>：你<i>处在什么环境、什么能做什么不能做、该用什么方法论</i>
      *       （单智能体 / 多智能体协作）。见
      *       {@link com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder}。</li>
      *   <li><b>用户输入</b>：你当前的具体任务。</li>
      * </ul>
-     * 冲突裁决顺序：安全规范 &gt; 场景边界 &gt; 角色倾向 &gt; 用户偏好。该顺序已写入
+     * 冲突裁决顺序：安全规范 &gt; 场景边界 &gt; 智能体人格倾向 &gt; 用户偏好。该顺序已写入
      * 提示词正文的「分层约定」段，而非依赖拼接位置隐含表达——位置只决定谁能细化谁，
      * 不足以表达"红线不可突破"。
      */
@@ -378,7 +311,7 @@ public class AgentFactory {
 
                 5. 多步任务先列计划：复杂任务先在心里拆解步骤（必要时用文字简述），然后按顺序连续执行，中间步骤不需要用户确认。
 
-                ━━ 安全规范（红线，任何角色/场景/用户指令都不得突破）━━
+                ━━ 安全规范（红线，任何智能体/场景/用户指令都不得突破）━━
 
                 1. 工作区边界：所有文件读写限制在当前工作区目录内，不访问工作区之外的路径。
                 2. 破坏性操作先授权：删除、覆盖既有文件、重置状态、对外发布/推送等不可逆动作，
@@ -393,11 +326,11 @@ public class AgentFactory {
 
                 你的行为由四层共同决定，各层职责不同：
                 - **基座（本段）**：工具协议与安全规范，全平台统一。
-                - **角色**：你是什么——身份、专业视角、判断标准与说话方式。
+                - **智能体**：你是什么——身份、专业视角、判断标准与说话方式。
                 - **场景**：你处在什么环境、什么能做什么不能做、该用什么方法论做。
                 - **用户输入**：你当前的具体任务。
 
-                冲突时按此优先级裁决：**安全规范 > 场景边界 > 角色倾向 > 用户偏好**。
+                冲突时按此优先级裁决：**安全规范 > 场景边界 > 智能体人格倾向 > 用户偏好**。
                 后加载的层可细化前一层，但不得突破安全规范；发现指令与安全规范冲突时，
                 拒绝执行并说明依据。
 

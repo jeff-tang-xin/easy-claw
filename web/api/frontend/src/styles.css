@@ -80,10 +80,20 @@ button { font-family: inherit; }
   flex-shrink: 0;
 }
 .logo-text { display: flex; flex-direction: column; gap: 1px; }
+.logo-icon-img { width: 26px; height: 26px; object-fit: contain; }
 .logo-title { font-weight: 700; color: #fff; font-size: 1em; letter-spacing: 0.02em; }
 .logo-sub { font-size: 0.7em; color: var(--sidebar-text-dim); }
 
-.app-nav { flex: 1; display: flex; flex-direction: column; gap: 2px; overflow-y: auto; }
+.app-nav { flex: 1; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; padding-top: 4px; }
+.nav-group { display: flex; flex-direction: column; gap: 2px; }
+.nav-group-title {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--sidebar-text-dim);
+  padding: 0 12px 6px;
+  text-transform: uppercase;
+  user-select: none;
+}
 .nav-btn {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 12px; border-radius: 8px;
@@ -119,6 +129,26 @@ button { font-family: inherit; }
   text-align: center;
   letter-spacing: 0.05em;
 }
+
+/* 侧边栏折叠：宽度过渡 + 窄图标条（名称由按钮 title 悬停提示） */
+.app-sidebar { transition: width 0.2s ease, padding 0.2s ease; }
+.app-sidebar.collapsed { width: 56px; padding: 18px 8px; }
+.app-sidebar.collapsed .logo-text,
+.app-sidebar.collapsed .nav-group-title,
+.app-sidebar.collapsed .nav-label,
+.app-sidebar.collapsed .sidebar-footer { display: none; }
+.app-sidebar.collapsed .app-logo { justify-content: center; gap: 0; padding: 6px 0 18px; }
+.app-sidebar.collapsed .nav-btn { justify-content: center; gap: 0; padding: 9px 0; }
+.app-sidebar.collapsed .nav-btn.active::before { left: -8px; }
+.sidebar-toggle {
+  display: flex; align-items: center; justify-content: center;
+  padding: 6px 0; margin: 10px 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 8px;
+  background: transparent; color: var(--sidebar-text-dim);
+  cursor: pointer; font-size: 13px; line-height: 1;
+  transition: background 0.15s, color 0.15s;
+}
+.sidebar-toggle:hover { background: rgba(255, 255, 255, 0.06); color: #fff; }
 
 .app-main {
   flex: 1;
@@ -508,7 +538,14 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
   margin: 0 auto;
 }
 
-.chat-block { display: flex; flex-direction: column; min-width: 0; }
+.chat-block {
+  display: flex; flex-direction: column; min-width: 0;
+  /* 屏幕内才渲染：屏外消息跳过样式/布局/绘制，长历史下滚动与流式更新不再随消息数变慢。
+     contain-intrinsic-size 的 auto 让浏览器记住已渲染消息的真实高度，滚动条位置保持稳定；
+     未渲染过的消息按 120px 估算占位（接近一条短消息高度），滚动到视口时才真实渲染 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
+}
 .chat-block.ai { align-items: flex-start; }
 .chat-block.user { align-items: flex-end; }
 

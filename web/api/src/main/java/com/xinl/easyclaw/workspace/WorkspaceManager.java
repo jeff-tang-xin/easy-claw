@@ -4,9 +4,9 @@ import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
 import com.xinl.easyclaw.config.SystemHomePaths;
+import com.xinl.easyclaw.config.seed.WorkspaceSeedService;
 
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
-import com.xinl.easyclaw.role.service.RoleManagementService;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
 import com.xinl.easyclaw.workspace.entity.WorkspaceEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
@@ -56,6 +56,8 @@ public class WorkspaceManager {
     private final WorkspaceFileLayout fileLayout;
     /** Agent 装配（提示词/模型/权限/沙箱）——Agent 构建关注点已从本类剥离 */
     private final WorkspaceAgentBuilder agentBuilder;
+    /** 工作区种子播种（AGENTS.md 模板 + 种子知识，幂等不覆盖，失败仅 warn） */
+    private final WorkspaceSeedService workspaceSeedService;
 
     private final Map<String, WorkspaceContext> workspaceCache = new ConcurrentHashMap<>();
     private final Map<String, SessionContext> sessionCache = new ConcurrentHashMap<>();
@@ -67,7 +69,8 @@ public class WorkspaceManager {
                             com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
                             com.xinl.easyclaw.workspace.repository.WorkspaceScenarioRepository workspaceScenarioRepository,
                             WorkspaceFileLayout fileLayout,
-                            WorkspaceAgentBuilder agentBuilder) {
+                            WorkspaceAgentBuilder agentBuilder,
+                            WorkspaceSeedService workspaceSeedService) {
         this.workspaceRepository = workspaceRepository;
         this.sessionRepository = sessionRepository;
         this.agentFactory = agentFactory;
@@ -76,6 +79,7 @@ public class WorkspaceManager {
         this.workspaceScenarioRepository = workspaceScenarioRepository;
         this.fileLayout = fileLayout;
         this.agentBuilder = agentBuilder;
+        this.workspaceSeedService = workspaceSeedService;
     }
 
     /**
@@ -108,7 +112,8 @@ public class WorkspaceManager {
 
     // ==================== Workspace 管理 ====================
 
-    public WorkspaceContext createWorkspace(String userId, String name, String description, String customPath) {
+    public WorkspaceContext createWorkspace(String userId, String name, String description, String customPath,
+                                            String type) {
         if (workspaceRepository.existsByPath(customPath)) {
             throw new WorkspaceExceptions.WorkspacePathExistsException(
                     "目录已被占用: " + customPath + "，请选择其他目录");
@@ -149,7 +154,10 @@ public class WorkspaceManager {
 
         workspaceCache.put(workspaceId, context);
 
-        saveWorkspaceMetadata(context);
+        saveWorkspaceMetadata(context, type);
+
+        // 播种 AGENTS.md 模板与种子知识（幂等：已存在不覆盖；失败仅 warn，不影响创建结果）
+        workspaceSeedService.seedWorkspace(workspacePath);
 
         log.info("Workspace 创建成功: id={}, path={}, model={}",
                 workspaceId, customPath, agentFactory.getModelId());
@@ -497,7 +505,7 @@ public class WorkspaceManager {
 
     // ==================== 内部方法 ====================
 
-    private void saveWorkspaceMetadata(WorkspaceContext ctx) {
+    private void saveWorkspaceMetadata(WorkspaceContext ctx, String type) {
         WorkspaceEntity entity = WorkspaceEntity.builder()
                 .id(ctx.getWorkspaceId())
                 .userId(ctx.getUserId())
@@ -505,10 +513,33 @@ public class WorkspaceManager {
                 .description(ctx.getDescription())
                 .path(ctx.getPath().toString())
                 .status("active")
+                // type 已由 Controller 归一校验；此处再兜底，避免非 Web 调用方传入脏值
+                .type(normalizeType(type))
                 .createdAt(ctx.getCreatedAt())
                 .lastAccessedAt(Instant.now())
                 .build();
         workspaceRepository.save(entity);
+    }
+
+    /** 工作区类型归一：空白 → single；非注册模式直接拒绝（防止写入无法识别的分类） */
+    public static String normalizeType(String type) {
+        if (type == null || type.isBlank()) {
+            return "single";
+        }
+        String t = type.trim();
+        if (!com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(t).isPresent()) {
+            throw new IllegalArgumentException("非法的工作区类型: " + t
+                    + "（仅支持 single / team / schedule）");
+        }
+        return t;
+    }
+
+    /** 查询工作区形态分类（single / team / schedule）；工作区不存在返回 null */
+    @Transactional(readOnly = true)
+    public String findType(String workspaceId) {
+        return workspaceRepository.findById(workspaceId)
+                .map(WorkspaceEntity::getType)
+                .orElse(null);
     }
 
     private WorkspaceSummary toSummary(WorkspaceEntity entity) {
@@ -519,6 +550,8 @@ public class WorkspaceManager {
                 .description(entity.getDescription())
                 .path(entity.getPath())
                 .status(entity.getStatus())
+                // 存量工作区在加列前已存在（理论上 ddl-default=single），这里再兜底一次
+                .type(entity.getType() == null ? "single" : entity.getType())
                 .createdAt(entity.getCreatedAt())
                 .lastAccessed(entity.getLastAccessedAt())
                 .build();

@@ -48,7 +48,11 @@ agentscope:
     parallel-tool-calls: true
   agent:
     max-iters: 50
-    model-timeout-minutes: 10
+    # 单次模型调用整体时限（含流式全程）× maxAttempts=2 = 挂起最长真空期。
+    # 原值 10min：记忆提取/长上下文调用一旦挂起，会话最长 20min 无任何反馈。
+    # 降为 3min 后真空期 ~6min 封顶。注意：本值是「整流完成时限」而非空闲超时——
+    # 极端长输出（逼近 max-tokens 16384）的合法生成可能触线，若观察到误杀可调回 5。
+    model-timeout-minutes: 3
     # 下界受两个硬约束钳制，调低前务必确认：
     #  1) agent_spawn 同步等待上限 600s（AgentSpawnTool.MAX_TIMEOUT_SECONDS），到点自行
     #     「提升为后台任务」返回。本值必须 > 600s，否则外层工具超时先掐断 spawn，
@@ -68,6 +72,26 @@ agentscope:
     workspace-idle-minutes: ${AGENTSCOPE_WORKSPACE_IDLE_MINUTES:120}
     shell-timeout-seconds: 300
     max-shell-output-bytes: 200000
+  # ============================
+  # 按智能体的模型覆盖（可选）
+  # ----------------------------
+  # 为某个智能体单独指定模型：取消注释并填写对应字段。任一字段留空即向上回退：
+  #   agents.<id> 显式值 → agents.<id>.provider 指向的 providers.<provider> → 全局 model
+  # 可用智能体 id：main / coder / reviewer / planner / researcher / code-expert /
+  #   file-expert / general-purpose
+  # 注意：① 每个智能体要么整段注释、要么至少填一个字段，勿保留裸 key 行（如 "coder:" 后无字段）；
+  #       ② api-key 属于密钥，请勿写进本文件（本文件随源码进入版本库），
+  #         如需按智能体独立密钥，写到用户级配置 ~/.easyClaw/application.yml。
+  # ============================
+  agents:
+     coder:
+       provider: openapi          # 引用下方 providers 表中的 key
+       model-name:   # 覆盖模型名
+       base-url:                   # 覆盖 base-url（一般留空继承 provider）
+       api-key:                    # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
+       temperature:                # 覆盖采样温度
+       max-tokens:                 # 覆盖单次最大输出 token
+       parallel-tool-calls:        # 覆盖是否允许并行 tool_call
   providers:
     deepseek:
       api-key:
@@ -151,6 +175,20 @@ agentscope:
       max-tokens: 8192
 
 # ============================
+# 界面品牌定制（侧边栏 logo / 浏览器标签页标题 / favicon）
+#   name     应用名：侧边栏标题 + 浏览器标签页后缀
+#   subtitle 侧边栏标题下方的小字
+#   icon     图标：支持 emoji（默认 🦞）或图片地址（站内 /xxx.png 或 http(s):// 外链），
+#            同时用作浏览器 favicon
+# 修改后重启后端生效；未配置时使用下列默认值
+# ============================
+easyclaw:
+  branding:
+    name: Easy-Claw
+    subtitle: AI 编程助手
+    icon: 🦞
+
+# ============================
 # 内置工具配置
 # ----------------------------
 # web_search 走 Google Custom Search（需自备凭据）：
@@ -162,6 +200,18 @@ tools:
   web-search:
     api-key: ${GOOGLE_API_KEY:}
     cx: ${GOOGLE_SEARCH_CX:}
+
+# ============================
+# 记忆设置（上下文窗 / flush 沉淀策略 / 子 Agent flush）
+# ----------------------------
+# 不在本文件配置：走「系统管理 → 设置」页（GET/PUT /api/memory/settings），
+# 持久化于系统库 ai-assistant.db 的 memory_settings 表，按用户隔离。
+# 默认值：上下文窗 48000 tokens；flush 节流模式（最小间隔 30 分钟）；
+#         子 Agent flush 关闭（其产出经黑板协议归口主控记忆）。
+# 保存后自动重建全部 Workspace Agent，即时生效。
+# 历史说明：旧 ai.memory.*（命题记忆提取/打分召回）已随该体系整体移除，
+#           若旧版用户级 yml 中留有该段，删除即可（残留无害但不再生效）。
+# ============================
 
 # ============================
 # Workspace 安全配置

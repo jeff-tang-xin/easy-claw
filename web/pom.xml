@@ -17,9 +17,14 @@
         Web 侧聚合模块。分层目标：api → agent-core → base，
         agents/* 与 modes/* 只依赖 base，由 agent-core 在运行时按 SPI 装配。
 
-        当前阶段（阶段 1）只存在 base 与 api 两个子模块：
-        - base：智能体契约层（EasyClawAgent / AgentOrchestrator / 各 Policy / WorkflowParser）
-        - api ：现有全部实现与 Web 层，后续阶段逐步向 base、agent-core 迁移
+        - base      ：智能体契约层（EasyClawAgent / AgentOrchestrator / 各 Policy / WorkflowParser）
+        - agent-core：引擎层（SubagentLoader / RolePromptComposer / middleware / SPI 注册表）
+        - agents/*  ：7 个平级智能体，每个一个模块，只依赖 base
+        - modes/*   ：编排模式（single / team / schedule），只依赖 base
+        - api       ：Web 交互层（REST / WebSocket / 持久化）
+
+        新增智能体或编排模式 = 新建模块 + 实现契约 + 注册 META-INF/services
+        + 在 api/pom.xml 加一行 runtime 依赖，公共 Java 代码零改动。
 
         可执行 jar 由 api 子模块产出（finalName=easy-claw），本模块只做聚合不产出制品。
     </description>
@@ -27,6 +32,8 @@
     <modules>
         <module>base</module>
         <module>agent-core</module>
+        <module>agents</module>
+        <module>modes</module>
         <module>api</module>
     </modules>
 </project>

@@ -56,6 +56,7 @@ public class SystemDataSeeder {
         seedWecomTemplate();
         seedBuiltinSubagents();
         seedScenarios();
+        backfillWorkspaceType();
         log.info("系统内置数据播种完成");
     }
 
@@ -466,6 +467,32 @@ public class SystemDataSeeder {
                 }""".formatted(name, displayName,
                 implementationConfig.replace("\n", " "),
                 headers.replace("\n", " "));
+    }
+
+    /**
+     * 一次性数据迁移：把引入「工作区形态」分类前创建的存量工作区归档到 SOLO（single）。
+     * <p>
+     * {@code workspaces.type} 列由 JPA {@code ddl-auto:update} 后补，{@code @Builder.Default}
+     * 不进入 DDL，因此加列前已存在的行其 type 为 NULL 或空串（各 JDBC 方言补列行为不一）。
+     * 这里在启动时把「NULL / 空串 / 纯空白」的行统一写为 {@code single}，使存量工作区
+     * 真正落库归入 SOLO 分类，而不是仅靠读取时的内存兜底。已显式归类（team/schedule）
+     * 的行一律不动；重复执行只匹配未归档行，天然幂等。
+     */
+    private void backfillWorkspaceType() {
+        try (var conn = dataSource.getConnection()) {
+            int updated;
+            try (var stmt = conn.createStatement()) {
+                updated = stmt.executeUpdate(
+                        "UPDATE workspaces SET type = 'single' "
+                                + "WHERE type IS NULL OR trim(type) = ''");
+            }
+            if (updated > 0) {
+                log.info("存量工作区归档完成：{} 个工作区归入 SOLO（single）", updated);
+            }
+        } catch (Exception e) {
+            // 与 ensureColumn 一致：数据迁移失败不应阻断应用启动，读取层仍有 single 兜底
+            log.warn("backfillWorkspaceType 失败（不影响启动，读取层仍兜底 single）: {}", e.getMessage());
+        }
     }
 
     private void ensureColumn(String table, String column, String definition) {

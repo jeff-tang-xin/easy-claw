@@ -1,5 +1,8 @@
 package com.xinl.easyclaw.scenario.service;
 
+import com.xinl.easyclaw.agent.SubagentLoader;
+import com.xinl.easyclaw.agent.spi.AgentRegistry;
+import com.xinl.easyclaw.base.orchestration.OrchestrationModes;
 import com.xinl.easyclaw.base.workflow.WorkflowParseResult;
 import com.xinl.easyclaw.base.workflow.WorkflowParser;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
@@ -38,13 +41,16 @@ public class ScenarioService {
     private final ScenarioRepository scenarioRepo;
     private final WorkspaceScenarioRepository activationRepo;
     private final WorkspaceManager workspaceManager;
+    private final AgentRegistry agentRegistry;
 
     public ScenarioService(ScenarioRepository scenarioRepo,
                            WorkspaceScenarioRepository activationRepo,
-                           WorkspaceManager workspaceManager) {
+                           WorkspaceManager workspaceManager,
+                           AgentRegistry agentRegistry) {
         this.scenarioRepo = scenarioRepo;
         this.activationRepo = activationRepo;
         this.workspaceManager = workspaceManager;
+        this.agentRegistry = agentRegistry;
     }
 
     public List<ScenarioEntity> findAll() {
@@ -101,8 +107,8 @@ public class ScenarioService {
                     if (patch.getCapabilityTier() != null) {
                         existing.setCapabilityTier(blankToNull(patch.getCapabilityTier()));
                     }
-                    // 绑定角色同属「"" 表示解绑」语义：用户在下拉里选回「默认主角色」
-                    // 时前端传 ""，必须能真正清空，否则角色一旦绑定就摘不掉
+                    // 绑定智能体同属「"" 表示解绑」语义：用户在下拉里选回「默认主控」
+                    // 时前端传 ""，必须能真正清空，否则智能体一旦绑定就摘不掉
                     if (patch.getRoleName() != null) {
                         existing.setRoleName(blankToNull(patch.getRoleName()));
                     }
@@ -171,6 +177,20 @@ public class ScenarioService {
     }
 
     /**
+     * 按稳定标识名查询「存在且已启用」的场景。
+     * <p>供「工作区绑定场景前校验类型是否匹配」使用：调用方需要在真正激活前同时拿到
+     * 场景的 {@code mode} 做工作区类型强一致校验，故单独暴露，避免激活与校验各查一次。
+     */
+    @Transactional(readOnly = true)
+    public Optional<ScenarioEntity> findActiveByName(String scenarioName) {
+        if (scenarioName == null || scenarioName.isBlank()) {
+            return Optional.empty();
+        }
+        return scenarioRepo.findByName(scenarioName.trim())
+                .filter(s -> Boolean.TRUE.equals(s.getActive()));
+    }
+
+    /**
      * 停用工作区场景（回到默认主智能体），立即重建 Agent
      */
     @Transactional
@@ -195,36 +215,62 @@ public class ScenarioService {
     /**
      * 可用于编排的子 Agent 名单
      * <p>
-     * 与 {@code SubagentLoader.loadMerged} 保持一致：全局目录 + 当前工作区目录合并，
-     * 工作区级同名覆盖全局级。修复此前只扫全局目录、导致工作区级子 Agent 在编排 UI
-     * 中不可见（但运行时真实存在）的不一致问题。
+     * 口径与 {@code SubagentLoader.loadMerged} 完全一致：<b>来源是 SPI 注册表</b>，
+     * 并排除主控自身（{@code main} 不可被派遣，否则开出递归入口）。
+     * <p>
+     * 历史实现扫描 {@code subagents/*.md} 目录，随 {@code .md} 链路一并下线。
+     * 保留 {@code workspaceId} 参数是为了不破坏既有前端调用契约；SPI 名单不区分
+     * 工作区，故该参数当前不参与计算。
      *
-     * @param workspaceId 工作区 ID（为空时只返回全局成员）
+     * @param workspaceId 工作区 ID（当前不影响结果，保留以兼容既有调用）
      */
     public List<Map<String, String>> availableSubagents(String workspaceId) {
-        Map<String, String> merged = new LinkedHashMap<>();
-        collectSubagents(SystemHomePaths.globalSubagentsDir(), "global", merged);
-        if (workspaceId != null && !workspaceId.isBlank()) {
-            collectSubagents(workspaceManager.subagentsDir(workspaceId), "workspace", merged);
-        }
         List<Map<String, String>> result = new ArrayList<>();
-        merged.forEach((name, scope) -> result.add(Map.of("name", name, "scope", scope)));
+        for (String agentId : agentRegistry.agentIds()) {
+            if (SubagentLoader.MAIN_AGENT_ID.equals(agentId)) {
+                continue;
+            }
+            result.add(Map.of("name", agentId, "scope", "builtin"));
+        }
         return result;
     }
 
-    /** 扫描目录下的 .md 声明文件名，写入 merged（后写入的 scope 覆盖先前的） */
-    private void collectSubagents(Path dir, String scope, Map<String, String> merged) {
-        if (dir == null || !Files.isDirectory(dir)) {
-            return;
+    /**
+     * 全部已注册智能体清单（含 main 主控），供前端智能体选择下拉使用。
+     * <p>
+     * 与 {@link #availableSubagents(String)} 的区别：后者用于「编排可派成员」，
+     * 刻意排除 main；本方法用于场景/工作流的「主控 + 步骤执行体」选择，
+     * 需要含 main 且带展示名。单个智能体 profile 取值异常不拖垮整个列表。
+     *
+     * @return 每项含 {@code agentId}、{@code displayName}、{@code description}、{@code icon}、{@code main}
+     */
+    public List<Map<String, String>> allAgents() {
+        List<Map<String, String>> result = new ArrayList<>();
+        for (var agent : agentRegistry.all()) {
+            String agentId = agent.agentId();
+            String displayName = agentId;
+            String description = "";
+            String icon = "";
+            try {
+                var profile = agent.profile();
+                if (profile != null) {
+                    if (profile.displayName() != null && !profile.displayName().isBlank()) {
+                        displayName = profile.displayName();
+                    }
+                    description = profile.description() == null ? "" : profile.description();
+                    icon = profile.icon() == null ? "" : profile.icon();
+                }
+            } catch (Exception e) {
+                log.warn("[Agent] 读取智能体 {} 的 profile 失败，下拉仅展示 agentId", agentId, e);
+            }
+            result.add(Map.of(
+                    "agentId", agentId,
+                    "displayName", displayName,
+                    "description", description,
+                    "icon", icon,
+                    "main", String.valueOf(SubagentLoader.MAIN_AGENT_ID.equals(agentId))));
         }
-        try (Stream<Path> files = Files.list(dir)) {
-            files.filter(p -> Files.isRegularFile(p) && p.getFileName().toString().endsWith(".md"))
-                    .sorted()
-                    .forEach(p -> merged.put(
-                            p.getFileName().toString().replaceAll("\\.md$", ""), scope));
-        } catch (IOException e) {
-            log.warn("读取子 Agent 目录失败: dir={}, {}", dir, e.getMessage());
-        }
+        return result;
     }
 
     /** 空白字符串归一为 null：让「未绑定」在库里只有一种表示，避免 "" 与 null 两套判断 */
@@ -233,20 +279,24 @@ public class ScenarioService {
     }
 
     /**
-     * 校验工作流：team 模式必须带至少一个合法步骤，且 JSON 必须通过 schema 校验。
+     * 校验工作流：编排模式必须带至少一个合法步骤，且 JSON 必须通过 schema 校验。
      * <p>
      * 修复此前「JSON 语法错误也报成 subagent 不能为空」的误导性文案：
      * 现在语法错误、未知字段、类型错误都会带下标精确报出。
+     * <p>
+     * 「是否需要 workflow」由 {@link OrchestrationModes#isOrchestrated} 判定而非
+     * 硬编码比对 team —— 新增编排型模式时本方法自动生效。
      */
     private void validateWorkflow(ScenarioEntity scenario) {
-        boolean team = "team".equals(scenario.getMode());
+        boolean orchestrated = OrchestrationModes.isOrchestrated(scenario.getMode());
         WorkflowParseResult parsed = WorkflowParser.parse(scenario.getWorkflow());
 
         if (!parsed.ok()) {
             throw new IllegalArgumentException("工作流配置非法：" + parsed.errorMessage());
         }
-        if (team && !parsed.hasSteps()) {
-            throw new IllegalArgumentException("team 模式需要至少一个工作流步骤");
+        if (orchestrated && !parsed.hasSteps()) {
+            throw new IllegalArgumentException(
+                    OrchestrationModes.displayNameOf(scenario.getMode()) + "模式需要至少一个工作流步骤");
         }
         for (String warning : parsed.warnings()) {
             log.warn("场景[{}] 工作流告警: {}", scenario.getName(), warning);

@@ -1,6 +1,7 @@
 import {memo, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
+import {useBranding} from '../branding';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
 import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem, Segment, SubStep} from '../chatStore';
@@ -29,6 +30,26 @@ const EXT_MIME: Record<string, string> = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
   webp: 'image/webp', bmp: 'image/bmp', svg: 'image/svg+xml', avif: 'image/avif',
 };
+
+/** AI 运行中时状态栏轮换的提示词（替代旧的「长时间无响应/网络异常」警告） */
+const THINKING_WORDS = [
+  '🤖 思考中...',
+  '💭 整理思路中...',
+  '🧠 推理中...',
+  '⚙️ 处理中...',
+  '🔍 分析中...',
+  '📝 生成回复中...',
+  '⏳ 加载中...',
+];
+
+/** 随机取一个状态词；传 exclude 保证不与上一次重复，轮换时肉眼可见地在变化 */
+function randomThinkingWord(exclude?: string): string {
+  let w = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
+  while (exclude && w === exclude) {
+    w = THINKING_WORDS[Math.floor(Math.random() * THINKING_WORDS.length)];
+  }
+  return w;
+}
 
 /**
  * 解析附件 MIME：优先 File.type，其次 FileReader 生成的 data URL 前缀，最后按扩展名兜底。
@@ -133,7 +154,7 @@ type SubStepEvent = 'text' | 'reasoning' | 'tool' | 'toolArgs' | 'toolResult';
  * 从而保留「思考 → 调工具 → 继续说」的真实时序，而不是把三者拍平成一坨。
  *
  * 定卡关键：有 subId 时按实例精确定位，只在没有 subId（历史转录）时才退回按 name 找。
- * 并行派发的两个同角色子 Agent（如两个 code-expert）name 完全相同，仅按 name 归并会让
+ * 并行派发的两个同类（同 agentId）子 Agent（如两个 code-expert）name 完全相同，仅按 name 归并会让
  * 两路输出交错进同一张卡片。
  */
 function appendSubStep(
@@ -380,7 +401,7 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       if (last && last.role === 'ai') {
         const segs = [...last.segments];
         const name = evt.content;
-        // 有 subId 时按实例精确关卡：并行同角色实例下，只按 name 找会关掉先起的那张，
+        // 有 subId 时按实例精确关卡：并行同类实例下，只按 name 找会关掉先起的那张，
         // 让仍在运行的另一张永久停在「执行中」。无 subId（历史转录）时保持原就近匹配。
         for (let j = segs.length - 1; j >= 0; j--) {
           const s = segs[j];
@@ -472,8 +493,12 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       // 系统提示类事件（工具失败护栏/子Agent循环警告等 JSON）→ 渲染为 note 段
       try {
         const parsed = JSON.parse(evt.content);
-        if (parsed && (parsed.type === 'loop_warning' || parsed.type === 'tool_fail_guard')) {
-          const seg: Segment = { type: 'note', content: parsed.message || evt.content };
+        if (parsed && (parsed.type === 'loop_warning' || parsed.type === 'tool_fail_guard' || parsed.type === 'compaction')) {
+          const seg: Segment = {
+            type: 'note',
+            content: parsed.message || evt.content,
+            icon: parsed.type === 'compaction' ? '📦' : undefined,
+          };
           if (last && last.role === 'ai') {
             next[lastIdx] = { ...last, segments: [...last.segments, seg] };
           } else {
@@ -818,7 +843,7 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
               case 'tool':
                 return <ToolCallCard key={i} seg={seg} />;
               case 'note':
-                return <div key={i} className="system-note">⚠️ {seg.content}</div>;
+                return <div key={i} className="system-note">{seg.icon || '⚠️'} {seg.content}</div>;
               case 'blackboard':
                 return <BlackboardCard key={i} seg={seg} />;
               default:
@@ -927,6 +952,7 @@ export default function ChatPage() {
   const { workspaceId } = useParams();
   const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
+  const branding = useBranding();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
@@ -996,6 +1022,16 @@ export default function ChatPage() {
   const key = chatKey(workspaceId || '', sessionId);
   const chat = useChatSession(key);
   const { messages, running, pending, error, activeTools, activeSubagents } = chat;
+  // 运行中状态栏的轮换提示词：running 期间每 2.5s 随机切换，让用户明确感知「仍在工作」
+  const [thinkingWord, setThinkingWord] = useState(THINKING_WORDS[0]);
+  useEffect(() => {
+    if (!running) return;
+    setThinkingWord(randomThinkingWord());
+    const timer = setInterval(() => {
+      setThinkingWord((cur) => randomThinkingWord(cur));
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [running]);
   const patch = useCallback((p: Partial<typeof chat>) => {
     updateChatSession(key, (c) => ({ ...c, ...p }));
   }, [key]);
@@ -1026,8 +1062,6 @@ export default function ChatPage() {
       getChatSocket().send({ type: 'register', workspaceId, sessionId });
     }
   }, [sessionId, workspaceId]);
-  const lastEventAtRef = useRef(Date.now());
-  const hangTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 用户点击「停止」的时刻。后端 interrupt 到 Agent 真正退出之间有延迟，
   // 管道里的残留事件仍会到达；这段窗口内不允许数据事件把 running 复活，
   // 否则前端刚复位又被打回 running（按钮在「停止/发送」间闪烁）。
@@ -1065,7 +1099,6 @@ export default function ChatPage() {
   }, [flushNow]);
 
   const handleWsEvent = useCallback((evt: StreamEvent) => {
-    lastEventAtRef.current = Date.now();
     // 刷新/重连后 running=false，但后端 Agent 可能仍在运行 —— 收到数据事件即自动复位
     if (DATA_EVENT_TYPES.has(evt.type)) {
       const cur = getChatSession(key);
@@ -1226,10 +1259,6 @@ export default function ChatPage() {
       flushNow();
       patch({ running: false, activeTools: [], activeSubagents: [] });
       settleRunningSegments();
-      if (hangTimerRef.current) {
-        clearInterval(hangTimerRef.current);
-        hangTimerRef.current = null;
-      }
       // 队列自动发送（介入插队到队首的消息也会被 sendNextQueued 取到）
       setTimeout(() => sendNextQueued(), 0);
     } else if (evt.type === 'stopped') {
@@ -1239,10 +1268,6 @@ export default function ChatPage() {
       stoppedAtRef.current = Date.now();
       patch({ running: false, activeTools: [], activeSubagents: [] });
       settleRunningSegments();
-      if (hangTimerRef.current) {
-        clearInterval(hangTimerRef.current);
-        hangTimerRef.current = null;
-      }
       console.log('[ws] stopped 已确认，队列保留不自动发送');
     } else {
       // reasoning/tool_args/tool_result/subagent_text 等：统一批量渲染
@@ -1285,6 +1310,11 @@ export default function ChatPage() {
     return () => clearInterval(timer);
   }, [workspaceId, sessionId, running, pending]);
 
+  // 浏览器标签页标题：「工作区名 · 品牌名」；branding 异步拉取完成时 effect 重跑自动修正
+  useEffect(() => {
+    if (workspace) document.title = `${workspace.name} · ${branding.name}`;
+  }, [workspace, branding.name]);
+
   // 加载工作区 + 会话
   useEffect(() => {
     if (!workspaceId) return;
@@ -1301,7 +1331,6 @@ export default function ChatPage() {
           return;
         }
         setWorkspace(ws);
-        document.title = `${ws.name} · Easy-Claw`;
         const ss = await getJson<SessionItem[]>(`/api/workspaces/${workspaceId}/sessions`);
         setSessions(ss);
         if (ss.length > 0) {
@@ -1349,7 +1378,7 @@ export default function ChatPage() {
         if (b.type === 'USER') {
           cur = null;
           msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
-        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT' || b.type === 'BLACKBOARD') {
+        } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT' || b.type === 'BLACKBOARD' || b.type === 'SYSTEM') {
           if (!cur) {
             cur = { role: 'ai', segments: [] };
             msgs.push(cur);
@@ -1366,6 +1395,9 @@ export default function ChatPage() {
             } else {
               cur.segments.push({ type: 'tool', name: b.toolName, args: '', result: b.toolResult || '', running: false });
             }
+          } else if (b.type === 'SYSTEM') {
+            // 系统提示（当前唯一来源：上下文压缩）。落盘时已是面向用户的纯文本，直接渲染。
+            cur.segments.push({ type: 'note', content: b.content, icon: '📦' });
           } else if (b.type === 'BLACKBOARD') {
             // content 存的是 emit 时的 payload JSON，与实时通道同构
             let p: { seq?: number; type?: string; author?: string; content?: string } = {};
@@ -1796,14 +1828,6 @@ export default function ChatPage() {
     ]);
     patch({ running: true, error: '', pending: null }); // 新对话开始：关闭可能残留的确认弹窗
     setStatusHint('');
-    lastEventAtRef.current = Date.now();
-    if (hangTimerRef.current) clearInterval(hangTimerRef.current);
-    hangTimerRef.current = setInterval(() => {
-      if (Date.now() - lastEventAtRef.current > 60000) {
-        setStatusHint('⚠️ 长时间无响应：AI 可能正在等待确认（若弹窗未出现请刷新页面重试）或网络异常');
-        if (hangTimerRef.current) clearInterval(hangTimerRef.current);
-      }
-    }, 5000);
     const chatMsg: Record<string, unknown> = {
       type: 'chat',
       workspaceId,
@@ -2155,7 +2179,7 @@ export default function ChatPage() {
       <div className="chat-input-dock">
         <div className="chat-status">
           {running
-            ? (statusHint || '🤖 AI 正在输出...')
+            ? (statusHint || thinkingWord)
             : (pending ? '🔐 AI 正在等待你的确认...' : '💬 输入消息开始对话')}
           {chat.messageQueue.length > 0 && (
             <span style={{ marginLeft: 8, color: 'var(--accent)' }}>
@@ -2269,10 +2293,6 @@ export default function ChatPage() {
                       : m
                   )),
                 }));
-                if (hangTimerRef.current) {
-                  clearInterval(hangTimerRef.current);
-                  hangTimerRef.current = null;
-                }
                 // 队列策略：保留待发消息但「不」自动发送。
                 // 停止是用户的明确中止意图，若此处 flush 队列，会立刻拉起新一轮回复，
                 // 与「停止」语义相反。队列在 UI 上仍可见，由用户手动点发送或删除。

@@ -4,7 +4,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 工具授权策略。
+ * 工具维行为边界：人格基本准则的强制部分（原「工具授权策略」）。
+ * <p>
+ * 人格文案声明「我是谁、我不做什么」，本策略把它固化为硬约束
+ * （如 planner 刻意不落笔，以此强制「只规划不执行」）。
  * <p>
  * 取代原先硬编码在 {@code SubagentLoader} 的三处全局常量
  * （{@code KNOWN_TOOL_NAMES} / {@code TOOL_NAME_ALIASES} / {@code restrictTools}），

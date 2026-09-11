@@ -3,7 +3,9 @@ package com.xinl.easyclaw.base.agent;
 import java.util.List;
 
 /**
- * 技能授权策略。
+ * 技能维行为边界：人格基本准则的强制部分（原「技能授权策略」）。
+ * <p>
+ * 与 {@link ToolPolicy} 同属「基本准则的强制部分」。
  * <p>
  * 取代原先 {@code SubagentLoader.restrictSkills} 的统一裁剪逻辑。
  *

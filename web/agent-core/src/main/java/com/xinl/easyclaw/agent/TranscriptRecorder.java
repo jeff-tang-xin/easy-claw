@@ -2,6 +2,7 @@ package com.xinl.easyclaw.agent;
 
 import com.xinl.easyclaw.agent.domain.BoxMessage;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
 import java.util.function.Consumer;
@@ -26,6 +27,8 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
 
     /** subagent_text 事件中名称与增量的分隔符（与 StreamEvent.subagentText 编码一致） */
     private static final char SEP = '\u0001';
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final Path sessionDir;
     private final Consumer<StreamEvent> delegate;
@@ -121,9 +124,19 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 flushText();
                 flushTool();
             }
+            case "context" -> {
+                // 压缩提示必须入转录：它是「AI 为什么忽然不记得上文」的唯一解释，
+                // 刷新/回放时缺失会让用户对着摘要化的上下文一头雾水。
+                // 其余 context（token 计数等瞬态）不入转录。
+                String content = evt.content();
+                if (content != null && content.contains("\"type\":\"compaction\"")) {
+                    flushText();
+                    appendSystemNotice(content);
+                }
+            }
             case "end", "error" -> flushAll();
             default -> {
-                // context/auto_confirm/pending_info/status 等瞬态事件不入转录
+                // auto_confirm/pending_info/status 等瞬态事件不入转录
             }
         }
     }
@@ -203,6 +216,28 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
         }
         BoxMessage bm = new BoxMessage(BoxMessage.Type.BLACKBOARD, ++seq);
         bm.setContent(payloadJson);
+        SessionTranscriptStore.append(sessionDir, bm);
+    }
+
+    /**
+     * 系统提示落盘（当前唯一来源：上下文压缩提示）。
+     * <p>
+     * 入参是 CustomEventTranslator 组装的 payload JSON，落盘时提取其中面向用户的
+     * {@code message} 纯文本——回放端（loadHistory）把 SYSTEM 直接渲染为提示条，
+     * 不需要也不应再解析一次 JSON。解析失败退化为原文，绝不弄死转录。
+     */
+    private void appendSystemNotice(String payloadJson) {
+        String message = payloadJson;
+        try {
+            String extracted = MAPPER.readTree(payloadJson).path("message").asText("");
+            if (!extracted.isBlank()) {
+                message = extracted;
+            }
+        } catch (Exception ignore) {
+            // 解析失败退化为原文
+        }
+        BoxMessage bm = new BoxMessage(BoxMessage.Type.SYSTEM, ++seq);
+        bm.setContent(message);
         SessionTranscriptStore.append(sessionDir, bm);
     }
 

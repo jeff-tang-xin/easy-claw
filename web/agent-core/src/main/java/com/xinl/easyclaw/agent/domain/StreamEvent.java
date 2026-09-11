@@ -27,8 +27,8 @@ import com.fasterxml.jackson.annotation.JsonInclude;
  *
  * <p>{@code subId} 仅在子 Agent 类事件（subagent_* ）上非空，取自框架事件 metadata 的
  * {@code agentInstanceId}（见 {@code AgentEvent.METADATA_AGENT_INSTANCE_ID}），是并行同名
- * 子 Agent 的唯一实例标识。必须与展示名分开携带：{@code content} 里的名字是给人看的角色名
- * （如 code-expert），并行派发两个同角色实例时它完全相同，前端若按名字归并卡片，两个实例的
+ * 子 Agent 的唯一实例标识。必须与展示名分开携带：{@code content} 里的名字是给人看的智能体展示名
+ * （如 code-expert），并行派发两个同标识智能体实例时它完全相同，前端若按名字归并卡片，两个实例的
  * 步骤会全部挤进同一张卡。为 null 时前端退化为按名字归并（兼容历史转录回放）。
  */
 @JsonInclude(JsonInclude.Include.NON_NULL)

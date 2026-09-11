@@ -78,7 +78,7 @@ public class ModelRegistryService {
      * 解析模型 ID：先查注册表，未命中则用当前激活的 OpenAI 兼容协议动态构建并缓存。
      * <p>
      * 所有 Provider 都走 OpenAI Chat Completions 协议（OpenAIChatModel），
-     * 所以角色/子 Agent 只需填 model name 即可，不用关心 provider 是什么：
+     * 所以智能体/子 Agent 只需填 model name 即可，不用关心 provider 是什么：
      * <ul>
      *   <li>{@code "kimi-k2.7-code"} → 用激活 provider 的 baseUrl + apiKey + 此 modelName</li>
      *   <li>{@code "deepseek:deepseek-reasoner"} → 从 providers 表取对应 provider 配置</li>
@@ -131,14 +131,14 @@ public class ModelRegistryService {
     }
 
     /**
-     * 用<b>显式凭证</b>解析模型：角色自带 baseUrl + apiKey 时走这里，
+     * 用<b>显式凭证</b>解析模型：智能体自带 baseUrl + apiKey 时走这里，
      * 绕开全局 providers 表。
      * <p>
      * 二者任一为空即退回 {@link #resolveOrBuild(String)}（按全局配置解析）——
      * 半套凭证无法建连接，与其抛错不如退回可用路径。
      * <p>
      * 注册 ID 带 {@code custom@} 前缀 + baseUrl 哈希，避免与全局注册的同名模型
-     * 互相覆盖（否则角色 A 的自定义端点会污染其他人的 "deepseek:deepseek-chat"）。
+     * 互相覆盖（否则智能体 A 的自定义端点会污染其他人的 "deepseek:deepseek-chat"）。
      *
      * @param modelName 模型名，可含 provider 前缀（会被剥离，因为端点已显式给出）
      * @param baseUrl   自定义 API 基址

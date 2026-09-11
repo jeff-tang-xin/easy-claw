@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.scenario.service;
 
+import com.xinl.easyclaw.agent.spi.AgentRegistry;
 import com.xinl.easyclaw.scenario.entity.ScenarioEntity;
 import com.xinl.easyclaw.scenario.repository.ScenarioRepository;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
@@ -37,7 +38,8 @@ class ScenarioServiceBindingTest {
         // save 回显入参，让断言直接检查被持久化的那个实体
         when(scenarioRepo.save(any(ScenarioEntity.class)))
                 .thenAnswer(inv -> inv.getArgument(0));
-        service = new ScenarioService(scenarioRepo, activationRepo, mock(WorkspaceManager.class));
+        service = new ScenarioService(scenarioRepo, activationRepo,
+                mock(WorkspaceManager.class), new AgentRegistry());
     }
 
     private ScenarioEntity existing() {
@@ -133,5 +135,33 @@ class ScenarioServiceBindingTest {
 
         assertThat(created.getMcpServices()).isEqualTo("[\"fs\"]");
         assertThat(created.getCapabilityTier()).isEqualTo("full");
+    }
+
+    /**
+     * 方案 C：前端智能体下拉改走 {@code GET /api/scenarios/agents}（取代已删除的 /api/roles）。
+     * 关键差异是<b>必须含 main 主控</b>（availableSubagents 刻意排除 main），且要带展示名。
+     */
+    @Test
+    void allAgents应包含main并带展示名与主控标记() {
+        List<java.util.Map<String, String>> agents = service.allAgents();
+
+        assertThat(agents).hasSize(7);
+        List<String> ids = agents.stream().map(a -> a.get("agentId")).toList();
+        assertThat(ids).contains("main", "coder", "reviewer", "planner",
+                "researcher", "code-expert", "file-expert");
+
+        java.util.Map<String, String> main = agents.stream()
+                .filter(a -> "main".equals(a.get("agentId"))).findFirst().orElseThrow();
+        assertThat(main.get("main")).isEqualTo("true");
+        assertThat(main.get("displayName")).isNotBlank();
+
+        // 其余成员一律标 main=false，避免前端误把成员当主控
+        for (java.util.Map<String, String> a : agents) {
+            assertThat(a).containsKeys("agentId", "displayName", "description", "icon", "main");
+            if (!"main".equals(a.get("agentId"))) {
+                assertThat(a.get("main")).isEqualTo("false");
+                assertThat(a.get("displayName")).isNotBlank();
+            }
+        }
     }
 }

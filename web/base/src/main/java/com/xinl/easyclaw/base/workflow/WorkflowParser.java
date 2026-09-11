@@ -20,7 +20,7 @@ import java.util.regex.Pattern;
  * <ul>
  *   <li>语法错误不再被静默吞掉，而是作为阻断性错误返回</li>
  *   <li>未知字段（如把 parallel 拼成 paralel）会报错，避免语义被悄悄改变</li>
- *   <li>role 缺失的步骤不再静默丢弃，而是定位到具体下标报错</li>
+ *   <li>agentId 缺失的步骤不再静默丢弃，而是定位到具体下标报错</li>
  *   <li>步骤数上限，防止超长工作流撑爆 system prompt</li>
  * </ul>
  */
@@ -36,13 +36,13 @@ public final class WorkflowParser {
     public static final int MAX_JSON_LENGTH = 64 * 1024;
 
     /**
-     * 角色名合法字符集：字母、数字、下划线、连字符、点。
+     * 智能体标识合法字符集：字母、数字、下划线、连字符、点。
      * <p>
      * 名字会被直接拼进 system prompt，若允许换行或尖括号，攻击者可在场景配置里
      * 伪造审计标记（{@code <orchestration-audit .../>}）或注入额外指令段，
      * 因此在入口就限制为标识符字符。
      */
-    private static final Pattern ROLE_NAME = Pattern.compile("[A-Za-z0-9_.-]{1,64}");
+    private static final Pattern AGENT_ID_NAME = Pattern.compile("[A-Za-z0-9_.-]{1,64}");
 
     /** 用于剥离 instruction 中伪造的审计标记 */
     private static final Pattern AUDIT_TAG_IN_TEXT = Pattern.compile(
@@ -51,12 +51,13 @@ public final class WorkflowParser {
     /**
      * 步骤对象允许出现的字段，其余一律视为拼写错误。
      * <p>
-     * {@code subagent} 是<b>历史字段</b>：编排单位已从子 Agent 改为角色，新配置只写
-     * {@code role}。这里仍接受它，是为了让存量场景 JSON 能被读起来并自动迁移
-     * （见 {@code parseStep}），但序列化时不再写出。
+     * {@code agentId} 是当前字段，{@code role} 与 {@code subagent} 是<b>历史字段</b>：
+     * 编排单位历经「子 Agent（subagent）→ 角色（role）→ 智能体（agentId）」两次正名，
+     * 运行时始终把该值当 SPI agentId 使用。这里仍接受两个旧字段，是为了让存量场景
+     * JSON 能被读起来并自动迁移（见 {@code parseStep}），但序列化时只写 {@code agentId}。
      */
     private static final Set<String> ALLOWED_STEP_FIELDS =
-            Set.of("role", "instruction", "parallel", "subagent");
+            Set.of("agentId", "role", "instruction", "parallel", "subagent");
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -68,7 +69,7 @@ public final class WorkflowParser {
      * <p>
      * 空输入返回 {@link WorkflowParseResult#empty()}（不视为错误，由调用方按 mode 决定是否必填）。
      *
-     * @param workflowJson 形如 {@code {"steps":[{"role":"planner","instruction":"...","parallel":false}]}}
+     * @param workflowJson 形如 {@code {"steps":[{"agentId":"planner","instruction":"...","parallel":false}]}}
      */
     public static WorkflowParseResult parse(String workflowJson) {
         if (workflowJson == null || workflowJson.isBlank()) {
@@ -128,29 +129,34 @@ public final class WorkflowParser {
             }
         }
 
-        JsonNode roleNode = node.path("role");
-        if (!roleNode.isMissingNode() && !roleNode.isTextual() && !roleNode.isNull()) {
-            errors.add(prefix + "role 必须是字符串");
+        JsonNode agentIdNode = node.path("agentId");
+        if (!agentIdNode.isMissingNode() && !agentIdNode.isTextual() && !agentIdNode.isNull()) {
+            errors.add(prefix + "agentId 必须是字符串");
             return;
         }
-        String role = roleNode.asText("").trim();
-        if (role.isEmpty()) {
-            // 存量数据迁移：编排单位曾是 subagent，旧 JSON 只有 subagent 字段。
-            // 二者命名空间本就重合（code-expert / researcher 等既是角色也是子 Agent 声明），
+        String agentId = agentIdNode.asText("").trim();
+        if (agentId.isEmpty()) {
+            // 存量数据迁移（两级历史字段）：字段历经 subagent → role → agentId 两次正名，
+            // 三者命名空间本就重合（code-expert / researcher 等既是 agentId 也是历史角色名），
             // 因此直接顶替，避免历史场景升级后工作流整段失效。
-            String legacy = node.path("subagent").asText("").trim();
-            if (!legacy.isEmpty()) {
-                warnings.add(prefix + "使用了历史字段 subagent，已按角色 \"" + legacy
-                        + "\" 解析（编排单位已改为角色，请重新保存该场景）");
-                role = legacy;
+            String legacyRole = node.path("role").asText("").trim();
+            String legacySubagent = node.path("subagent").asText("").trim();
+            if (!legacyRole.isEmpty()) {
+                warnings.add(prefix + "使用了历史字段 role，已按智能体 \"" + legacyRole
+                        + "\" 解析（编排单位已正名为 agentId，请重新保存该场景）");
+                agentId = legacyRole;
+            } else if (!legacySubagent.isEmpty()) {
+                warnings.add(prefix + "使用了历史字段 subagent，已按智能体 \"" + legacySubagent
+                        + "\" 解析（编排单位已正名为 agentId，请重新保存该场景）");
+                agentId = legacySubagent;
             }
         }
-        if (role.isEmpty()) {
-            errors.add(prefix + "role 不能为空");
+        if (agentId.isEmpty()) {
+            errors.add(prefix + "agentId 不能为空");
             return;
         }
-        if (!ROLE_NAME.matcher(role).matches()) {
-            errors.add(prefix + "role 名 \"" + role
+        if (!AGENT_ID_NAME.matcher(agentId).matches()) {
+            errors.add(prefix + "agentId \"" + agentId
                     + "\" 含非法字符（仅允许字母/数字/下划线/连字符/点，最长 64）");
             return;
         }
@@ -174,14 +180,14 @@ public final class WorkflowParser {
             instruction = sanitized.trim();
         }
 
-        steps.add(new WorkflowStep(role, instruction, parallelNode.asBoolean(false)));
+        steps.add(new WorkflowStep(agentId, instruction, parallelNode.asBoolean(false)));
     }
 
     /**
      * 序列化工作流为 JSON（改用 Jackson 构建，取代旧版手写字符串拼接）
      * <p>
-     * 只写 {@code role}，不再写历史的 {@code subagent} 字段——存量数据在
-     * {@link #parse} 阶段已迁移为角色，重新保存一次即可完成落库形态的统一。
+     * 只写当前字段 {@code agentId}，不再写历史的 {@code role}/{@code subagent}——存量数据在
+     * {@link #parse} 阶段已迁移为 agentId，重新保存一次即可完成落库形态的统一。
      *
      * @return 步骤为空时返回 null（与实体「未配置工作流」的表示保持一致）
      */
@@ -193,7 +199,7 @@ public final class WorkflowParser {
         var array = root.putArray("steps");
         for (WorkflowStep step : steps) {
             array.addObject()
-                    .put("role", step.role())
+                    .put("agentId", step.agentId())
                     .put("instruction", step.instruction())
                     .put("parallel", step.parallel());
         }

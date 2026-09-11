@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-agent-researcher</artifactId>
+    <name>Easy Claw - Agent: Researcher</name>
+    <description>
+        研究分析专家 —— 独立调研并给出有依据的结论，不编造。
+        需要联网检索与本地资料检索能力，因此额外授权 web/knowledge/memory 类工具。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-base</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</project>

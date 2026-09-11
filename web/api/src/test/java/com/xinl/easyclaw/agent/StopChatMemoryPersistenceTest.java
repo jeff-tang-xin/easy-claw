@@ -103,7 +103,8 @@ class StopChatMemoryPersistenceTest {
                 new AgentScopeProperties(),
                 sessions,
                 mock(ScenarioResolver.class),
-                new com.xinl.easyclaw.workspace.WorkspaceFileLayout());
+                new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
 
         disposable = new RecordingDisposable();
         sessions.bindWorkspace(SESSION_ID, WORKSPACE_ID);

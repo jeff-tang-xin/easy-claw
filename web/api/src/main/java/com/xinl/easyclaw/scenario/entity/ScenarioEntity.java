@@ -98,10 +98,10 @@ public class ScenarioEntity implements ScenarioProfile {
     private String capabilityTier;
 
     /**
-     * 场景绑定的主角色名（对应 {@code agent_roles.name}）。
-     * <p>single 模式：该角色的人格（role/goal/backstory）+ 模型用于本场景的主智能体。
-     * 为空 = 沿用默认主角色 {@code main}（AI-CLAW）。
-     * <p>multi-agent 模式下本字段指协调者角色，其余成员见 {@code teamRoles}。
+     * 场景绑定的主智能体标识（语义 = SPI agentId）。物理列名沿用历史 {@code role_name}
+     * （ddl-auto:update 不迁移列名，改名会丢存量绑定）。
+     * <p>single 模式：本场景的主智能体；为空 = 沿用默认 {@code main}（AI-CLAW）。
+     * <p>team 模式下本字段指协调者智能体，其余成员见 {@link #workflow}。
      */
     @Column(name = "role_name", length = 64)
     private String roleName;

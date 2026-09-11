@@ -6,6 +6,8 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
@@ -37,6 +39,12 @@ public class WorkspaceFileLayout {
 
     /** .easyClaw/agent 下必须存在的子目录 */
     private static final List<String> AGENT_SUBDIRS = List.of("state", "skills", "subagents");
+
+    /** AGENTS.md 模板的 classpath 位置（jar 内置唯一来源，内容 = 平台当前默认工作规范） */
+    private static final String AGENTS_TEMPLATE_RESOURCE = "/seed/AGENTS.md";
+
+    /** AGENTS.md 模板缓存（懒加载；null 表示尚未加载过，加载失败不缓存、下次重试） */
+    private volatile String agentsTemplateCache;
 
     // ==================== 对外入口 ====================
 
@@ -75,7 +83,11 @@ public class WorkspaceFileLayout {
     public void repair(Path agentDir) {
         try {
             createAgentDirs(agentDir);
-            writeIfAbsent(agentDir.resolve("AGENTS.md"), agentsTemplate());
+            String agentsTemplate = agentsTemplate();
+            if (agentsTemplate != null) {
+                // 模板缺失/读取失败时跳过本项（已记 warn），不阻断其余补齐
+                writeIfAbsent(agentDir.resolve("AGENTS.md"), agentsTemplate);
+            }
             writeIfAbsent(agentDir.resolve("MEMORY.md"), memoryTemplate());
             // 注意：此处不播种 reviewer.md 等内置子 Agent。
             // 内置角色（planner/coder/reviewer...）统一由 SystemDataSeeder 播种到全局目录，
@@ -284,47 +296,29 @@ public class WorkspaceFileLayout {
 
     // ==================== 模板内容 ====================
 
+    /**
+     * AGENTS.md 模板：classpath {@code /seed/AGENTS.md} 为唯一来源（jar 内置），懒加载并缓存。
+     * 资源缺失或读取失败时返回 null —— {@link #repair} 跳过该项（已记 warn），不影响其余补齐。
+     */
     private String agentsTemplate() {
-        return AGENTS_TEMPLATE;
+        if (agentsTemplateCache == null) {
+            try (InputStream in = WorkspaceFileLayout.class.getResourceAsStream(AGENTS_TEMPLATE_RESOURCE)) {
+                if (in == null) {
+                    log.warn("classpath 缺少 {}，跳过 AGENTS.md 模板补齐", AGENTS_TEMPLATE_RESOURCE);
+                    return null;
+                }
+                agentsTemplateCache = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+            } catch (IOException e) {
+                log.warn("读取 AGENTS.md 模板失败（跳过补齐）: {}", e.toString());
+                return null;
+            }
+        }
+        return agentsTemplateCache;
     }
 
     private String memoryTemplate() {
         return MEMORY_TEMPLATE;
     }
-
-    private static final String AGENTS_TEMPLATE = """
-            # AI 编程助手工作规范
-
-            ## 角色
-            你是 Easy-Claw AI 编程助手，当前工作区的主控 Agent。你拥有代码编写、文件操作、网络搜索、MCP 扩展工具等能力，并可调度专项子 Agent 协同完成复杂任务。
-
-            ## 目标
-            帮助用户高效完成当前工作区的编程与文件任务，包括但不限于：功能开发、Bug 修复、代码重构、代码审查、项目配置、文件批量处理、资料检索与分析。
-
-            ## 工作空间（最重要）
-            - 你的一切文件操作都限制在当前工作区内（用户指定的项目目录）
-            - 所有路径基于工作区根目录，使用相对路径（如 src/main/...），禁止访问工作区之外的任何路径
-            - 系统目录 `.easyClaw/` 存放 Agent 配置与运行时数据，**不要修改或删除**，包括：
-              - `.easyClaw/agent/subagents/` — 子 Agent 声明文件
-              - `.easyClaw/agent/skills/` — 技能定义与操作指南
-              - `.easyClaw/agent/state/` — 会话状态存储
-            - 优先使用工作区内已有工具完成任务，避免引入不必要的外部依赖
-
-            ## 子 Agent 编排
-            你可以调度专项子 Agent 在同一工作区内协同工作，当前可用的子 Agent 及其职责由系统动态注入。调度原则：
-            - 当任务适合交给专项子 Agent 时（如大量代码审查、深度研究分析），优先调度子 Agent 协同完成，而不是自己硬做
-            - 调度子 Agent 时给出明确的任务目标和输出要求，而不是模糊指令
-            - 同一子 Agent 最多调度 2 次；若子 Agent 无法完成，请自己直接处理，禁止重复调度同一子 Agent
-            - 子 Agent 返回结果后，你负责整合、补充和最终交付
-
-            ## 行为准则
-            - **专业准确** — 回答有条理，代码可运行，不确定时坦诚说明，不编造信息
-            - **理解先行** — 修改代码前先阅读相关文件，理清上下文和依赖关系，遵循项目已有的命名风格和编码约定
-            - **小步验证** — 每次聚焦一个明确目标，修改后及时验证（编译、测试、lint），确认无副作用再继续
-            - **文件安全** — 批量操作前先列出影响范围；编辑文件保留原有缩进、换行符和编码；大文件使用分页读取
-            - **主动沟通** — 遇到错误先自行排查（读报错、看日志、搜代码），无法解决再询问用户；主动识别用户意图，在合理范围内提供额外价值
-            - **Shell 规范** — Windows 环境使用兼容语法（cmd /c），长命令注意超时，优先用内置工具快速定位
-            """;
 
     private static final String MEMORY_TEMPLATE = """
             # 工作区记忆

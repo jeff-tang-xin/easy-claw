@@ -10,7 +10,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 public class SpaController {
 
     @GetMapping(value = {
-            "/", "/workspaces", "/skills", "/roles", "/tools", "/mcp", "/settings",
+            "/", "/workspaces", "/workspaces/*", "/skills", "/tools", "/mcp", "/settings",
+            "/scenarios", "/blackboard", "/knowledge",
             "/chat", "/chat/", "/chat/**"
     })
     public String spa() {

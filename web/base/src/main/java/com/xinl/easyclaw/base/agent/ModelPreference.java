@@ -3,7 +3,7 @@ package com.xinl.easyclaw.base.agent;
 /**
  * 模型偏好。
  * <p>
- * 对应原 {@code AgentFactory.resolveRoleModel(modelId, baseUrl, apiKey)} 的三个入参，
+ * 对应 {@code AgentFactory.resolveModelWithCredentials(modelId, baseUrl, apiKey)} 的三个入参，
  * 收敛为一个值对象，使「哪个智能体用哪个模型」成为智能体自身的声明。
  * <p>
  * <b>安全</b>：{@code apiKey} 仅在内存中传递，不得写入日志或落盘

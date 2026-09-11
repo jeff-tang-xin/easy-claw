@@ -72,4 +72,13 @@ public class ScenarioController {
             @RequestParam(required = false) String workspaceId) {
         return scenarioService.availableSubagents(workspaceId);
     }
+
+    /**
+     * 全部已注册智能体（含 main 主控，带展示名），供场景/工作流表单的智能体下拉使用。
+     * 方案 C 后取代原 {@code /api/roles} 下拉数据源。
+     */
+    @GetMapping("/agents")
+    public List<Map<String, String>> agents() {
+        return scenarioService.allAgents();
+    }
 }

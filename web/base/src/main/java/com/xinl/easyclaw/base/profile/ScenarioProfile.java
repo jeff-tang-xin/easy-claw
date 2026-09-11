@@ -5,8 +5,6 @@ package com.xinl.easyclaw.base.profile;
  * <p>
  * 由 api 层的 {@code ScenarioEntity implements ScenarioProfile} 完成对接。
  * 全部为 String 标量，无关联、无懒加载，实体侧零改动即可满足。
- *
- * @see RoleProfile RoleProfile（同样的 Lombok getter 对齐要求）
  */
 public interface ScenarioProfile {
 
@@ -33,4 +31,31 @@ public interface ScenarioProfile {
 
     /** 工作流 JSON，仅 team 模式使用；格式见 {@code WorkflowParser} */
     String getWorkflow();
+
+    /** 绑定的 skill 名列表（JSON 数组文本）；解析见 {@code ScenarioBinding} */
+    String getSkills();
+
+    /** 绑定的子智能体名列表（JSON 数组文本） */
+    String getSubagents();
+
+    /** 绑定的 MCP 服务名列表（JSON 数组文本），硬约束 */
+    String getMcpServices();
+
+    /** 能力档位；空/空白表示未显式配置，此时不得裁剪工具 */
+    String getCapabilityTier();
+
+    /**
+     * 绑定的主智能体标识（语义 = SPI {@link com.xinl.easyclaw.base.agent.EasyClawAgent#agentId()}）。
+     * <p>
+     * 物理列名沿用历史的 {@code role_name}：SQLite {@code ddl-auto:update} 不做列名迁移，
+     * 改名会丢存量绑定，故列名保留、语义已切换为 agentId。
+     * <p>
+     * single 模式：本场景要用哪个智能体；空 = 回退默认的 {@code main}（AI-CLAW）。
+     * <p>
+     * team 模式：指协调者智能体，其余成员由 {@code getWorkflow()} 的步骤定义。
+     * <p>
+     * 若绑定了已下线（SPI 未注册）的标识（如历史的 {@code creative-writer}），
+     * 由各编排器解析时回退 {@code main} 并告警。
+     */
+    String getRoleName();
 }

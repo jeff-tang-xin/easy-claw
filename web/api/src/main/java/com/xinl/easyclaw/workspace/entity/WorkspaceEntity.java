@@ -37,7 +37,17 @@ public class WorkspaceEntity {
     @Column(length = 20)
     @Builder.Default
     private String status = "active";
-    
+
+    /**
+     * 工作区形态分类，取值与场景模式（{@code ScenarioEntity.mode}）对齐：
+     * {@code single}（SOLO，单智能体）/ {@code team}（团队编排）/ {@code schedule}（定时任务）。
+     * <p>决定该工作区允许绑定哪一类场景（类型必须一致）。ddl-auto:update 自动加列，
+     * 存量行取默认值 {@code single}（既有工作区全部归入 SOLO）。
+     */
+    @Column(nullable = false, length = 20)
+    @Builder.Default
+    private String type = "single";
+
     @Column(name = "last_accessed_at")
     private Instant lastAccessedAt;
     

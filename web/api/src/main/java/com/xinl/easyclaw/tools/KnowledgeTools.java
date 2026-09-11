@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.tools;
 
 import com.xinl.easyclaw.knowledge.KnowledgeEntry;
+import com.xinl.easyclaw.knowledge.KnowledgeSearchHit;
 import com.xinl.easyclaw.knowledge.KnowledgeService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.tool.Tool;
@@ -96,6 +97,41 @@ public class KnowledgeTools {
         } catch (Exception e) {
             log.error("列出知识库失败", e);
             return "❌ 读取失败: " + e.getMessage();
+        }
+    }
+
+    @Tool(name = "knowledge_search", description = "在知识库里按关键词全文搜索条目（不区分大小写），返回命中清单与上下文片段。\n"
+            + "【何时用】索引摘要猜不到该读哪条、按关键词全文定位条目时。多个关键词为「且」关系，全部命中才算命中；匹配范围覆盖条目名、摘要与正文，按「条目名 > 摘要 > 正文」权重排序。\n"
+            + "【不要用于】已知条目名读正文（那用 knowledge_read）。\n"
+            + "【参数】query：一个或多个关键词，用空白分隔。limit：最多返回多少条，留空或 ≤0 默认 10。")
+    public String knowledgeSearch(
+            @ToolParam(name = "query", description = "搜索关键词，多个词用空白分隔，全部命中才算命中（不区分大小写）") String query,
+            @ToolParam(name = "limit", description = "最多返回条数，留空或 ≤0 默认 10", required = false) Integer limit,
+            WorkspaceContext workspace) {
+        if (workspace == null) {
+            return "❌ 当前没有可用的工作区，无法搜索知识库。";
+        }
+        if (query == null || query.isBlank()) {
+            return "❌ query 不能为空：请给出至少一个关键词。";
+        }
+        try {
+            List<KnowledgeSearchHit> hits = knowledgeService.search(query, limit == null ? 0 : limit, workspace);
+            if (hits.isEmpty()) {
+                return "（没有命中「" + query + "」的知识条目。可换用更短或更通用的关键词重试，或用 knowledge_list 浏览全部条目。）";
+            }
+            StringBuilder sb = new StringBuilder("命中 " + hits.size() + " 条：\n\n");
+            for (KnowledgeSearchHit h : hits) {
+                String line = "- " + h.topic() + " — " + h.summary() + "\n  片段: " + h.snippet() + "\n";
+                if (sb.length() + line.length() > MAX_RENDER_CHARS) {
+                    sb.append("…（命中较多，已截断）\n");
+                    break;
+                }
+                sb.append(line);
+            }
+            return sb.toString();
+        } catch (Exception e) {
+            log.error("搜索知识库失败", e);
+            return "❌ 搜索失败: " + e.getMessage();
         }
     }
 

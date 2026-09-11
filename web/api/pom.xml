@@ -35,6 +35,81 @@
         </dependency>
 
         <!-- ========================================= -->
+        <!-- 智能体实现：7 个平级智能体                 -->
+        <!--                                           -->
+        <!-- 仅为把实现放上 classpath 供 ServiceLoader  -->
+        <!-- 发现，api 不直接引用其中任何类。新增智能体  -->
+        <!-- 只需在此加一行，无需改任何 Java 代码。      -->
+        <!-- ========================================= -->
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-main</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-coder</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-reviewer</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-planner</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-researcher</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-code-expert</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-file-expert</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ========================================= -->
+        <!-- 编排模式：single / team / schedule         -->
+        <!--                                           -->
+        <!-- 同样只为 ServiceLoader 发现。新增模式在此  -->
+        <!-- 加一行即可，公共代码零改动。               -->
+        <!-- ========================================= -->
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-mode-single</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-mode-team</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-mode-schedule</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+
+        <!-- ========================================= -->
         <!-- AgentScope 2.0 核心                        -->
         <!-- ========================================= -->
         <dependency>

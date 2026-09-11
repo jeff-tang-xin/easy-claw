@@ -1,5 +1,5 @@
 import {useEffect, useState} from 'react';
-import {useNavigate} from 'react-router-dom';
+import {useParams, useNavigate} from 'react-router-dom';
 import {del, getJson, postJson, putJson} from '../api';
 import Modal from '../components/Modal';
 
@@ -9,17 +9,34 @@ interface WorkspaceSummary {
   description: string;
   path: string;
   status: string;
+  /** 工作区形态分类：single / team / schedule（存量工作区后端兜底为 single） */
+  type?: string;
   createdAt: string;
 }
 
 interface PermRule { id: number; toolName: string; createdAt: string; }
 interface ToolDef { name: string; displayName: string; requiresConfirm: boolean; }
-interface ScenarioOption { id: number; name: string; displayName: string; icon?: string; active: boolean; }
+interface ScenarioOption { id: number; name: string; displayName: string; icon?: string; active: boolean; mode?: string; }
+
+/** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序 */
+const WS_TYPES = [
+  { type: 'single', label: 'SOLO', icon: '👤', hint: '单个主智能体独立完成任务' },
+  { type: 'team', label: '团队', icon: '👥', hint: '主智能体编排多个子智能体协作' },
+  { type: 'schedule', label: '定时', icon: '⏰', hint: '按工作流编排任务（定时触发能力规划中，当前可手动执行）' },
+] as const;
+
+type WsType = typeof WS_TYPES[number]['type'];
 
 /** 内置「通用编程」场景标识，与后端 SystemDataSeeder / WorkspaceController 保持一致 */
 const DEFAULT_SCENARIO = 'general-coding';
 
 export default function WorkspacesPage() {
+  // 路由段决定当前分类：/workspaces/single | team | schedule；非法值回退 single
+  const { wsType } = useParams<{ wsType: string }>();
+  const currentType: WsType =
+    (WS_TYPES.some((t) => t.type === wsType) ? wsType : 'single') as WsType;
+  const typeMeta = WS_TYPES.find((t) => t.type === currentType)!;
+
   const [items, setItems] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -27,9 +44,15 @@ export default function WorkspacesPage() {
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
   const [description, setDescription] = useState('');
-  const [scenarioName, setScenarioName] = useState(DEFAULT_SCENARIO);
+  const [scenarioName, setScenarioName] = useState('');
   const [scenarios, setScenarios] = useState<ScenarioOption[]>([]);
   const navigate = useNavigate();
+
+  /** 当前类型可选的场景：仅取已启用且 mode 与工作区类型一致的场景 */
+  const scenariosForType = scenarios.filter((s) => (s.mode || 'single') === currentType);
+
+  /** 当前分类下的工作区：存量数据 type 为 null 时按 single 兜底 */
+  const visibleItems = items.filter((w) => (w.type || 'single') === currentType);
 
   // 白名单管理弹窗状态
   const [permWsId, setPermWsId] = useState<string | null>(null);
@@ -59,20 +82,47 @@ export default function WorkspacesPage() {
   };
 
   useEffect(() => {
+    // 工作区列表全量拉取一次，前端按路由类型过滤（数据量小，避免三个分类各发一次请求）
     load();
     // 场景列表只在挂载时拉一次：新建/编辑弹窗都要用，且变动频率极低
     getJson<ScenarioOption[]>('/api/scenarios')
-      .then((list) => setScenarios(list.filter((s) => s.active)))
+      .then((list) => {
+        const active = list.filter((s) => s.active);
+        setScenarios(active);
+        setScenarioName(defaultScenarioOf(active, currentType));
+      })
       .catch(() => setScenarios([]));
+    // 切换分类时把新建弹窗的默认场景重置为该类型的首个场景
   }, []);
+
+  // 路由类型变化（侧边栏切分类）时同步新建默认场景并收起弹窗
+  useEffect(() => {
+    setShowCreate(false);
+    setScenarioName(defaultScenarioOf(scenarios, currentType));
+  }, [currentType]);
+
+  /** 该类型的默认选中场景：优先内置「通用编程」（仅 single 类型内置），否则取同类型首个 */
+  function defaultScenarioOf(list: ScenarioOption[], type: WsType): string {
+    const sameType = list.filter((s) => (s.mode || 'single') === type);
+    if (type === 'single' && sameType.some((s) => s.name === DEFAULT_SCENARIO)) {
+      return DEFAULT_SCENARIO;
+    }
+    return sameType[0]?.name || '';
+  }
 
   const create = async () => {
     try {
-      await postJson('/api/workspaces', { name, description, path, scenarioName });
+      await postJson('/api/workspaces', {
+        name,
+        description,
+        path,
+        scenarioName,
+        type: currentType,
+      });
       setName('');
       setPath('');
       setDescription('');
-      setScenarioName(DEFAULT_SCENARIO);
+      setScenarioName(defaultScenarioOf(scenarios, currentType));
       setShowCreate(false);
       await load();
     } catch (e) {
@@ -84,8 +134,8 @@ export default function WorkspacesPage() {
     setEditing(ws);
     setEditName(ws.name);
     setEditDesc(ws.description || '');
-    // 回显当前绑定：查不到（未绑定/接口异常）时落到默认场景，不阻塞编辑
-    setEditScenario(DEFAULT_SCENARIO);
+    // 回显当前绑定：查不到（未绑定/接口异常）时落到该类型默认场景，不阻塞编辑
+    setEditScenario(defaultScenarioOf(scenarios, currentType));
     getJson<ScenarioOption | null>(`/api/scenarios/active/${ws.workspaceId}`)
       .then((s) => { if (s && s.name) setEditScenario(s.name); })
       .catch(() => undefined);
@@ -171,16 +221,19 @@ export default function WorkspacesPage() {
   return (
     <div className="page">
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h1 className="page-title">📁 工作区</h1>
+        <h1 className="page-title">
+          {typeMeta.icon} {typeMeta.label}工作区
+        </h1>
         <button className="btn primary" onClick={() => setShowCreate(!showCreate)}>
-          {showCreate ? '取消' : '＋ 新建工作区'}
+          {showCreate ? '取消' : `＋ 新建${typeMeta.label}工作区`}
         </button>
       </div>
+      <div className="hint" style={{ marginTop: -8, marginBottom: 12 }}>{typeMeta.hint}</div>
 
       {error && <div className="error-box">{error}</div>}
 
       {showCreate && (
-        <Modal title="📁 新建工作区" onClose={() => setShowCreate(false)} width={560}>
+        <Modal title={`${typeMeta.icon} 新建${typeMeta.label}工作区`} onClose={() => setShowCreate(false)} width={560}>
           <div className="field">
             <label>名称</label>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="如：我的 Rust 项目" />
@@ -200,16 +253,22 @@ export default function WorkspacesPage() {
             </div>
           </div>
           <div className="field">
-            <label>场景（决定 AI 在此工作区能做什么、怎么做）</label>
-            <select value={scenarioName} onChange={(e) => setScenarioName(e.target.value)}>
-              {scenarios.length === 0 && <option value={DEFAULT_SCENARIO}>💻 通用编程</option>}
-              {scenarios.map((s) => (
+            <label>场景（必须是「{typeMeta.label}」类型，决定 AI 在此工作区能做什么、怎么做）</label>
+            <select
+              value={scenarioName}
+              onChange={(e) => setScenarioName(e.target.value)}
+              disabled={scenariosForType.length === 0}
+            >
+              {scenariosForType.length === 0 && (
+                <option value="">（暂无{typeMeta.label}类型场景，请先到「工具管理 - 场景」创建）</option>
+              )}
+              {scenariosForType.map((s) => (
                 <option key={s.id} value={s.name}>
                   {s.icon ? `${s.icon} ` : ''}{s.displayName}
                 </option>
               ))}
             </select>
-            <div className="hint">创建后可随时在此页编辑切换</div>
+            <div className="hint">工作区类型与场景类型强一致；创建后可随时在此页编辑切换为同类型的其他场景</div>
           </div>
           <div className="field">
             <label>描述（可选）</label>
@@ -217,7 +276,13 @@ export default function WorkspacesPage() {
           </div>
           <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
             <button className="btn" onClick={() => setShowCreate(false)}>取消</button>
-            <button className="btn primary" onClick={create}>创建并初始化</button>
+            <button
+              className="btn primary"
+              onClick={create}
+              disabled={scenariosForType.length === 0 || !scenarioName}
+            >
+              创建并初始化
+            </button>
           </div>
         </Modal>
       )}
@@ -278,16 +343,18 @@ export default function WorkspacesPage() {
             <input value={editing.path} disabled readOnly />
           </div>
           <div className="field">
-            <label>场景（决定 AI 在此工作区能做什么、怎么做）</label>
+            <label>场景（仅可切换为「{typeMeta.label}」类型的其他场景）</label>
             <select value={editScenario} onChange={(e) => setEditScenario(e.target.value)}>
-              {scenarios.length === 0 && <option value={DEFAULT_SCENARIO}>💻 通用编程</option>}
-              {scenarios.map((s) => (
+              {scenariosForType.length === 0 && (
+                <option value="">（暂无{typeMeta.label}类型场景）</option>
+              )}
+              {scenariosForType.map((s) => (
                 <option key={s.id} value={s.name}>
                   {s.icon ? `${s.icon} ` : ''}{s.displayName}
                 </option>
               ))}
             </select>
-            <div className="hint">切换后立即重建该工作区的 AI，正在进行的对话建议先结束</div>
+            <div className="hint">切换后立即重建该工作区的 AI，正在进行的对话建议先结束；工作区形态不支持在此变更</div>
           </div>
           <div className="field">
             <label>描述（可选）</label>
@@ -331,17 +398,17 @@ export default function WorkspacesPage() {
 
       {loading ? (
         <div className="empty">加载中...</div>
-      ) : items.length === 0 ? (
+      ) : visibleItems.length === 0 ? (
         <div className="empty">
-          <h3>还没有工作区</h3>
-          <p className="hint">点击右上角「新建工作区」，指定一个项目目录后即可与 AI 对话</p>
+          <h3>还没有{typeMeta.label}工作区</h3>
+          <p className="hint">点击右上角「新建{typeMeta.label}工作区」，指定一个项目目录后即可与 AI 对话</p>
         </div>
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
-          {items.map((ws) => (
+          {visibleItems.map((ws) => (
             <div key={ws.workspaceId} className="card" style={{ cursor: 'pointer' }} onClick={() => navigate(`/chat/${ws.workspaceId}`)}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                <span style={{ fontSize: '1.6em' }}>📁</span>
+                <span style={{ fontSize: '1.6em' }}>{typeMeta.icon}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ fontWeight: 700 }}>{ws.name}</div>
                   <div className="hint" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
