@@ -1,6 +1,7 @@
 import {memo, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
+import Modal from '../components/Modal';
 import {useBranding} from '../branding';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
@@ -18,7 +19,7 @@ import {parseNames} from '../scenarioBinding';
 
 // ============ 类型 ============
 interface Workspace { workspaceId: string; name: string; agentName?: string; path: string; description: string; }
-interface SessionItem { id: string; workspaceId: string; title: string; createdAt: string; }
+interface SessionItem { id: string; workspaceId: string; title: string; createdAt: string; branch?: string | null; worktreePath?: string | null; }
 interface BoxMessage {
   id?: string; type: string; content: string; toolName?: string;
   toolArgs?: string; toolResult?: string; subagentName?: string; images?: string[]; seq: number;
@@ -954,6 +955,14 @@ export default function ChatPage() {
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const branding = useBranding();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  // 新会话弹窗（会话↔worktree 挂钩，2026-09-14）：分支隔离选项
+  const [showNewSession, setShowNewSession] = useState(false);
+  const [branchInfo, setBranchInfo] = useState<{ current: string | null; branches: string[] } | null>(null);
+  const [nsTitle, setNsTitle] = useState('');
+  const [nsMode, setNsMode] = useState<'none' | 'new' | 'existing'>('none');
+  const [nsBranch, setNsBranch] = useState('');
+  const [nsBase, setNsBase] = useState('');
+  const [nsCreating, setNsCreating] = useState(false);
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
   const [sessionId, setSessionId] = useState('');
@@ -1727,11 +1736,45 @@ export default function ChatPage() {
       loadHistory(workspaceId, sid);
     }
   };
-  const createSession = async () => {
+  // 打开新会话弹窗：首次打开时拉取分支清单（非 git 仓库返回空，隔离选项禁用）
+  const createSession = () => {
     if (!workspaceId) return;
-    const created = await postJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions`, { title: `会话 ${sessions.length + 1}` });
-    setSessions([created, ...sessions]);
-    setSessionId(created.id);
+    setNsTitle(`会话 ${sessions.length + 1}`);
+    setNsMode('none');
+    setNsBranch('');
+    setNsBase('');
+    setShowNewSession(true);
+    if (!branchInfo) {
+      getJson<{ current: string | null; branches: string[] }>(`/api/workspaces/${workspaceId}/branches`)
+        .then(setBranchInfo)
+        .catch(() => setBranchInfo({ current: null, branches: [] }));
+    }
+  };
+
+  /** 新分支默认名：ASCII 短名（后端分支名白名单仅收 ASCII），时间戳底 36 进制保证唯一 */
+  const defaultBranchName = () => `easyclaw/w${Date.now().toString(36)}`;
+
+  const submitNewSession = async () => {
+    if (!workspaceId || nsCreating) return;
+    const title = nsTitle.trim() || `会话 ${sessions.length + 1}`;
+    const body: { title: string; branch?: { type: string; name: string; base?: string } } = { title };
+    if (nsMode === 'new') {
+      body.branch = { type: 'new', name: nsBranch.trim() || defaultBranchName(), base: nsBase.trim() || undefined };
+    } else if (nsMode === 'existing') {
+      if (!nsBranch) return;
+      body.branch = { type: 'existing', name: nsBranch };
+    }
+    setNsCreating(true);
+    try {
+      const created = await postJson<SessionItem>(`/api/workspaces/${workspaceId}/sessions`, body);
+      setSessions([created, ...sessions]);
+      setSessionId(created.id);
+      setShowNewSession(false);
+    } catch (e) {
+      alert(`创建会话失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setNsCreating(false);
+    }
   };
 
   // 会话重命名：双击标题或点击 ✎ 进入行内编辑
@@ -1768,7 +1811,18 @@ export default function ChatPage() {
 
   const deleteSession = async (sid: string) => {
     if (!workspaceId || !confirm('删除该会话？')) return;
-    await del(`/api/workspaces/${workspaceId}/sessions/${sid}`);
+    // 挂了 worktree 的会话：二次确认是否一并清理 worktree（默认保留）
+    const target = sessions.find((s) => s.id === sid);
+    let worktreeOp = 'keep';
+    if (target?.branch) {
+      if (confirm(`该会话挂载了分支「${target.branch}」的 worktree。\n「确定」一并删除 worktree，「取消」保留 worktree 目录仅删会话`)) {
+        worktreeOp = 'remove';
+      }
+    }
+    const res = await del<{ worktreeWarning?: string | null }>(`/api/workspaces/${workspaceId}/sessions/${sid}?worktree=${worktreeOp}`);
+    if (res?.worktreeWarning) {
+      alert(`会话已删除，但 worktree 清理未完成：${res.worktreeWarning}\n可稍后手动删除 workspace 下 .easyclaw-worktrees 中的对应目录`);
+    }
     const rest = sessions.filter((s) => s.id !== sid);
     setSessions(rest);
     if (sid === sessionId) {
@@ -2439,6 +2493,9 @@ export default function ChatPage() {
                         title={`${s.title}（双击重命名）`}
                         onDoubleClick={(e) => { e.stopPropagation(); startRename(s); }}
                       >{s.title}</span>
+                      {s.branch && (
+                        <span className="session-branch" title={`worktree：${s.worktreePath || ''}`}>⎇ {s.branch}</span>
+                      )}
                       <button
                         className="session-rename"
                         title="重命名"
@@ -2492,6 +2549,81 @@ export default function ChatPage() {
           onDecide={decideConfirm}
           onClose={() => decideConfirm('deny')}
         />
+      )}
+
+      {showNewSession && (
+        <Modal title="新会话" subtitle="可将会话隔离到独立 git worktree 分支" onClose={() => setShowNewSession(false)} width={420}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            <label style={{ fontSize: 13 }}>
+              标题
+              <input
+                className="session-rename-input"
+                style={{ display: 'block', width: '100%', marginTop: 4 }}
+                value={nsTitle}
+                maxLength={100}
+                autoFocus
+                onChange={(e) => setNsTitle(e.target.value)}
+              />
+            </label>
+            <label style={{ fontSize: 13 }}>
+              <input type="radio" name="ns-mode" checked={nsMode === 'none'} onChange={() => setNsMode('none')} /> 不隔离（默认，直接在工作区操作）
+            </label>
+            <label style={{ fontSize: 13, opacity: branchInfo && !branchInfo.current ? 0.5 : 1 }}>
+              <input
+                type="radio" name="ns-mode" checked={nsMode === 'new'}
+                disabled={!!branchInfo && !branchInfo.current}
+                onChange={() => { setNsMode('new'); if (!nsBranch) setNsBranch(defaultBranchName()); }}
+              /> 新建分支（独立 worktree，改动互不影响）
+            </label>
+            {nsMode === 'new' && (
+              <div style={{ paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <input
+                  className="session-rename-input"
+                  placeholder={defaultBranchName()}
+                  value={nsBranch}
+                  maxLength={100}
+                  onChange={(e) => setNsBranch(e.target.value)}
+                />
+                <input
+                  className="session-rename-input"
+                  placeholder={`基准分支（默认当前：${branchInfo?.current || 'HEAD'}）`}
+                  value={nsBase}
+                  maxLength={100}
+                  onChange={(e) => setNsBase(e.target.value)}
+                />
+              </div>
+            )}
+            <label style={{ fontSize: 13, opacity: branchInfo && branchInfo.branches.length === 0 ? 0.5 : 1 }}>
+              <input
+                type="radio" name="ns-mode" checked={nsMode === 'existing'}
+                disabled={!branchInfo || branchInfo.branches.length === 0}
+                onChange={() => setNsMode('existing')}
+              /> 挂到已有分支
+            </label>
+            {nsMode === 'existing' && (
+              <div style={{ paddingLeft: 20 }}>
+                <select
+                  className="session-rename-input"
+                  style={{ width: '100%' }}
+                  value={nsBranch}
+                  onChange={(e) => setNsBranch(e.target.value)}
+                >
+                  <option value="">选择分支…</option>
+                  {(branchInfo?.branches || []).map((b) => <option key={b} value={b}>{b}</option>)}
+                </select>
+              </div>
+            )}
+            {branchInfo && !branchInfo.current && branchInfo.branches.length === 0 && (
+              <div className="hint" style={{ fontSize: 12 }}>该工作区不是 git 仓库，分支隔离不可用</div>
+            )}
+            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+              <button className="btn small" onClick={() => setShowNewSession(false)}>取消</button>
+              <button className="btn primary small" disabled={nsCreating || (nsMode === 'existing' && !nsBranch)} onClick={submitNewSession}>
+                {nsCreating ? '创建中…' : '创建'}
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </div>
   );

@@ -89,7 +89,7 @@ class WorkspaceTypeTest {
         });
         WorkspaceManager wm = new WorkspaceManager(null, null, null, null, null, null, null, null, null);
         ScenarioService scenarioService = new ScenarioService(repo, actRepo, wm, new AgentRegistry());
-        return new WorkspaceController(null, null, null, null, null, scenarioService, null);
+        return new WorkspaceController(null, null, null, null, null, scenarioService, null, null);
     }
 
     private void assertCompatible(WorkspaceController controller, String scenarioName, String workspaceType)

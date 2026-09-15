@@ -32,6 +32,8 @@ public class WorkspaceController {
     private final com.xinl.easyclaw.scenario.service.ScenarioService scenarioService;
     /** 权限规则读取直连 permission 层：AgentService 不持有该数据，不应借道穿透 */
     private final com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService;
+    /** 会话↔worktree 挂钩：git worktree 的创建/挂载/移除（2026-09-14） */
+    private final WorktreeService worktreeService;
 
     public WorkspaceController(WorkspaceManager workspaceManager,
                                SessionHistoryService sessionHistoryService,
@@ -39,7 +41,8 @@ public class WorkspaceController {
                                WorkspaceSandbox sandbox,
                                WorkspaceAgentBuilder agentBuilder,
                                com.xinl.easyclaw.scenario.service.ScenarioService scenarioService,
-                               com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService) {
+                               com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService,
+                               WorktreeService worktreeService) {
         this.workspaceManager = workspaceManager;
         this.sessionHistoryService = sessionHistoryService;
         this.agentService = agentService;
@@ -47,6 +50,7 @@ public class WorkspaceController {
         this.agentBuilder = agentBuilder;
         this.scenarioService = scenarioService;
         this.permissionRuleService = permissionRuleService;
+        this.worktreeService = worktreeService;
     }
 
     /**
@@ -62,7 +66,25 @@ public class WorkspaceController {
     public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
     }
 
-    public record CreateSessionRequest(String title) {
+    public record CreateSessionRequest(String title, BranchSpec branch) {
+    }
+
+    /**
+     * 新建会话时的可选分支挂钩（2026-09-14 会话↔worktree）。
+     *
+     * @param type none（缺省，不挂载，行为与旧版一致）/ new（新建分支）/ existing（挂已有分支）
+     * @param name 分支名；new / existing 时必填
+     * @param base 基准引用；仅 new 有效，缺省 = 当前 HEAD
+     */
+    public record BranchSpec(String type, String name, String base) {
+    }
+
+    /** 会话删除结果；worktreeWarning 非 null 表示 worktree 清理未成功（会话已删，不阻塞） */
+    public record DeleteSessionResult(String worktreeWarning) {
+    }
+
+    /** 分支清单响应：current 为当前分支（非 git 仓库等异常时为 null） */
+    public record BranchesResponse(String current, java.util.List<String> branches) {
     }
 
     /** 会话不存在 → 404，而不是让调用方看到裸 500 */
@@ -166,7 +188,33 @@ public class WorkspaceController {
         entity.setStatus("active");
         entity.setCreatedAt(java.time.Instant.now());
         entity.setLastAccessedAt(java.time.Instant.now());
-        workspaceManager.createSession(id, entity.getId(), entity.getTitle());
+
+        // 可选：挂 git worktree。branch 缺省或 type=none 时完全不触碰（行为与旧版一致）。
+        BranchSpec spec = req.branch();
+        if (spec != null && spec.type() != null && !"none".equals(spec.type())) {
+            WorkspaceContext ws = workspaceManager.getWorkspace(id);
+            if (ws == null) {
+                throw new ApiExceptions.NotFoundException("Workspace 未找到: " + id);
+            }
+            if (spec.name() == null || spec.name().isBlank()) {
+                throw new ApiExceptions.BadRequestException("branch.type=" + spec.type() + " 时 branch.name 必填");
+            }
+            WorktreeService.WorktreeResult result = switch (spec.type()) {
+                case "new" -> worktreeService.create(ws.getPath(), entity.getId(), spec.name(), spec.base());
+                case "existing" -> worktreeService.attach(ws.getPath(), entity.getId(), spec.name());
+                default -> throw new ApiExceptions.BadRequestException(
+                        "未知 branch.type: " + spec.type() + "（可选 none / new / existing）");
+            };
+            if (!result.ok()) {
+                // 用户明确要求隔离时建不出 worktree，直接报错 —— 降级成不隔离的会话会误导
+                throw new ApiExceptions.BadRequestException(result.message());
+            }
+            entity.setWorktreePath(result.path().toString());
+            entity.setBranch(spec.name());
+        }
+
+        workspaceManager.createSession(id, entity.getId(), entity.getTitle(),
+                entity.getWorktreePath(), entity.getBranch());
         return entity;
     }
 
@@ -177,14 +225,39 @@ public class WorkspaceController {
     }
 
     @DeleteMapping("/{id}/sessions/{sessionId}")
-    public void deleteSession(@PathVariable String id, @PathVariable String sessionId) {
+    public DeleteSessionResult deleteSession(@PathVariable String id, @PathVariable String sessionId,
+                                             @RequestParam(defaultValue = "keep") String worktree) {
         WorkspaceContext ws = workspaceManager.getWorkspace(id);
         if (ws != null) {
+            String worktreeWarning = null;
+            // worktree=remove/force 时先清 worktree；失败不阻塞删会话（Windows 文件占用是常态），
+            // 警告带回给前端提示用户手动清理。目录不存在时 remove 幂等 ok，无 worktree 会话传 remove 无害。
+            if ("remove".equals(worktree) || "force".equals(worktree)) {
+                WorktreeService.WorktreeResult r =
+                        worktreeService.remove(ws.getPath(), sessionId, "force".equals(worktree));
+                if (!r.ok()) {
+                    worktreeWarning = r.message();
+                    log.warn("会话 {} 的 worktree 清理失败（会话照常删除）: {}", sessionId, r.message());
+                }
+            }
             sessionHistoryService.deleteSession(ws, sessionId);
             // 会话被删除是明确的终止意图：强制驱逐内存状态（订阅、工具授权、计数器），
             // 否则 sessionId 若被复用会继承旧的 turnAllowed 授权而绕过确认弹窗
             agentService.releaseSession(sessionId);
+            return new DeleteSessionResult(worktreeWarning);
         }
+        return new DeleteSessionResult(null);
+    }
+
+    /** 列出工作区 git 分支（新建会话表单的分支下拉数据源）；非 git 仓库时 current 为 null、branches 为空 */
+    @GetMapping("/{id}/branches")
+    public BranchesResponse branches(@PathVariable String id) {
+        WorkspaceContext ws = workspaceManager.getWorkspace(id);
+        if (ws == null) {
+            throw new ApiExceptions.NotFoundException("Workspace 未找到: " + id);
+        }
+        return new BranchesResponse(worktreeService.currentBranch(ws.getPath()),
+                worktreeService.listBranches(ws.getPath()));
     }
 
     @GetMapping("/{id}/permissions")

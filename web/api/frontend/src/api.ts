@@ -50,9 +50,11 @@ export async function putJson<T>(url: string, body: unknown): Promise<T> {
   return safeJson<T>(res);
 }
 
-export async function del(url: string): Promise<void> {
+export async function del<T = void>(url: string): Promise<T> {
   const res = await fetch(url, { method: 'DELETE' });
   if (!res.ok) throw new Error((await safeText(res)) || `HTTP ${res.status}`);
+  // 204 / 空 body 时 safeJson 返回 null；调用方不读值则与旧版（void）行为一致
+  return safeJson<T>(res);
 }
 
 async function safeText(res: Response): Promise<string> {

@@ -437,6 +437,7 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
   font-weight: 600;
 }
 .session-item .title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.session-branch { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; color: var(--text-tertiary); background: rgba(59,130,246,0.08); border-radius: 4px; padding: 1px 5px; }
 .session-del { opacity: 0; border: none; background: none; cursor: pointer; color: var(--text-tertiary); padding: 2px; border-radius: 4px; transition: all 0.12s; }
 .session-item:hover .session-del { opacity: 1; }
 .session-del:hover { color: #dc2626; background: rgba(220, 38, 38, 0.08); }

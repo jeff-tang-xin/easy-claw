@@ -22,6 +22,8 @@ import com.xinl.easyclaw.config.RetryScope;
 import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
+import com.xinl.easyclaw.workspace.WorktreeService;
+import com.xinl.easyclaw.workspace.shell.SafeShellFilesystem;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.*;
@@ -2349,6 +2351,17 @@ public class AgentService {
                 // Builder.from 会复制 stringAttributes，故子 Agent 虽自带 sub-<UUID> 会话，
                 // 仍继承同一 key → 同一轮协作的主/子 Agent 共用一块黑板。
                 .put(BlackboardKeys.CTX_KEY, sessionId);
+        // worktree 路由（会话↔git worktree 挂钩）：路径纯推导不查库，目录存在才绑定——
+        // 目录被手动清理时 isDirectory=false 自动回退主工作区根，回合不受影响。
+        // 与黑板键同理，子 Agent 经 Builder.from 继承同一路由。
+        Path workspacePath = workspace.getPath();
+        if (workspacePath != null) {
+            Path worktreeBase = workspacePath.resolve(WorktreeService.WORKTREE_ROOT_NAME);
+            Path worktreePath = worktreeBase.resolve(sessionId).normalize();
+            if (worktreePath.startsWith(worktreeBase) && Files.isDirectory(worktreePath)) {
+                builder.put(SafeShellFilesystem.WORKTREE_CTX_KEY, worktreePath.toString());
+            }
+        }
         applyForceSyncDispatch(builder, workspace.getWorkspaceId());
         return builder.build();
     }

@@ -32,4 +32,17 @@ public class SessionEntity {
     
     @Column(name = "last_accessed_at")
     private Instant lastAccessedAt;
+
+    /**
+     * 会话挂载的 git worktree 绝对路径；null = 未挂载（默认，行为与旧版一致）。
+     * 位于 {@code <workspace>/.easyclaw-worktrees/<sessionId>}（2026-09-14 会话↔worktree 挂钩）。
+     */
+    @Column(name = "worktree_path", length = 500)
+    private String worktreePath;
+
+    /**
+     * worktree 检出的分支名；null = 未挂载。与 worktreePath 同生同灭。
+     */
+    @Column(name = "branch", length = 200)
+    private String branch;
 }

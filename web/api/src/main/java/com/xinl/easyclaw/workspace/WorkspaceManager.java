@@ -438,6 +438,15 @@ public class WorkspaceManager {
     // ==================== Session 管理 ====================
 
     public SessionContext createSession(String workspaceId, String sessionId, String title) {
+        return createSession(workspaceId, sessionId, title, null, null);
+    }
+
+    /**
+     * @param worktreePath 会话挂载的 worktree 绝对路径；null = 未挂载（默认）
+     * @param branch       worktree 检出的分支名；与 worktreePath 同生同灭
+     */
+    public SessionContext createSession(String workspaceId, String sessionId, String title,
+                                        String worktreePath, String branch) {
         WorkspaceContext workspace = getWorkspace(workspaceId);
         if (workspace == null) {
             throw new WorkspaceExceptions.WorkspaceNotFoundException("Workspace 未找到: " + workspaceId);
@@ -459,6 +468,8 @@ public class WorkspaceManager {
                 .workspaceId(workspaceId)
                 .title(title)
                 .createdAt(Instant.now())
+                .worktreePath(worktreePath)
+                .branch(branch)
                 .build();
         sessionRepository.save(entity);
 
