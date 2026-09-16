@@ -3,7 +3,7 @@ package com.xinl.easyclaw.api;
 import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.agent.spi.AgentRegistry;
 import com.xinl.easyclaw.base.agent.EasyClawAgent;
-import com.xinl.easyclaw.config.SettingsService;
+import com.xinl.easyclaw.config.CloudBootstrapService;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
@@ -44,7 +44,7 @@ public class ManageController {
     private final McpConnectionService mcpService;
     private final MemorySettingsService memorySettingsService;
     private final WorkspaceManager workspaceManager;
-    private final SettingsService settingsService;
+    private final CloudBootstrapService cloudBootstrapService;
     private final SkillScriptTools skillScriptTools;
 
     public ManageController(AgentRegistry agentRegistry,
@@ -53,7 +53,7 @@ public class ManageController {
                             McpConnectionService mcpService,
                             MemorySettingsService memorySettingsService,
                             WorkspaceManager workspaceManager,
-                            SettingsService settingsService,
+                            CloudBootstrapService cloudBootstrapService,
                             SkillScriptTools skillScriptTools) {
         this.agentRegistry = agentRegistry;
         this.toolService = toolService;
@@ -61,7 +61,7 @@ public class ManageController {
         this.mcpService = mcpService;
         this.memorySettingsService = memorySettingsService;
         this.workspaceManager = workspaceManager;
-        this.settingsService = settingsService;
+        this.cloudBootstrapService = cloudBootstrapService;
         this.skillScriptTools = skillScriptTools;
     }
 
@@ -555,38 +555,15 @@ public class ManageController {
         }
     }
 
-    // ================= 设置（YAML 原文编辑器） =================
+    // ================= 云端接入状态 =================
 
-    public record SettingsYamlResponse(String yaml, String settingsFile, String hotReloadNote) {
-    }
-
-    public record SettingsYamlRequest(String yaml) {
-    }
-
-    @GetMapping("/settings")
-    public SettingsYamlResponse settings() {
-        return new SettingsYamlResponse(
-                settingsService.readRawYaml(),
-                settingsService.getExternalConfigPath().toString(),
-                "保存后 agentscope 模型、日志级别热生效；server.port 需重启；其他 Spring 配置下次启动生效");
-    }
-
-    @PutMapping("/settings")
-    public SettingsYamlResponse saveSettings(@RequestBody SettingsYamlRequest req) {
-        if (req.yaml() == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "yaml 不能为空");
-        }
-        String err = settingsService.validateYaml(req.yaml());
-        if (err != null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, err);
-        }
-        try {
-            settingsService.saveRawYaml(req.yaml());
-        } catch (IOException ex) {
-            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR, "保存配置失败: " + ex.getMessage());
-        }
-        workspaceManager.rebuildAllAgents();
-        return settings();
+    /**
+     * 云端（hub）接入状态：开关、快照可用性、组织/模型面/权限、最近失败原因。
+     * 仅回显 appkey 前缀，绝不回显完整密钥。
+     */
+    @GetMapping("/settings/cloud-status")
+    public CloudBootstrapService.CloudStatus cloudStatus() {
+        return cloudBootstrapService.status();
     }
 
     // ================= 记忆设置 =================

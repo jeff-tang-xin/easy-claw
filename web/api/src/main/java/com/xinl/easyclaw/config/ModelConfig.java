@@ -12,7 +12,7 @@ import org.springframework.context.annotation.Configuration;
  * 无需手动构建 Model Bean。API Key 通过环境变量自动读取。
  */
 @Configuration
-@EnableConfigurationProperties(AgentScopeProperties.class)
+@EnableConfigurationProperties({AgentScopeProperties.class, CloudProperties.class})
 public class ModelConfig {
 
     private static final Logger log = LoggerFactory.getLogger(ModelConfig.class);

@@ -1,8 +1,11 @@
 server:
   port: 18080
+  error:
+    # ResponseStatusException 的 reason 返回给前端（默认 never 会吞成裸 Bad Request，无法诊断）
+    include-message: always
 spring:
   profiles:
-    active: dev-sqlite
+    active: dev-sqlite,local
   application:
     name: easy-claw
   servlet:
@@ -25,27 +28,33 @@ logging:
     console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
 
 # ============================
-# AgentScope 模型配置（多 Provider 支持）
+# AgentScope 模型配置（公共骨架，所有模式共享）
 # ============================
-# model.provider 为当前激活的 Provider，providers 表可配置任意多个。
-# 所有 Provider 均走 OpenAI 兼容协议，AgentScope 扩展无需额外依赖。
-# 所有配置集中在 application.yml；api-key 留空时按 <PROVIDER>_API_KEY 环境变量兜底。
+# 【配置分层】
+#   本文件          = 公共抽象：字段骨架 + 占位符 + 中立默认值 + 公共机制说明
+#   application-local.yml / application-cloud.yml = 两个模式的【供给模板】，
+#                     各自往同一组公共字段里填值（见各自文件头注释）
+#   运行层 ~/.easyClaw/application.yml = 用户真实值，覆盖优先；密钥只写这里或环境变量
+# 【模式切换】spring.profiles.active 中的 local ↔ cloud
+#   （启动参数 --spring.profiles.active=dev-sqlite,cloud，或改运行层 yml 同名键）
+# 【对 AgentScope 而言】local 与 cloud 都只是 provider（base-url + api-key + model-name
+#   三要素）的供给方，注册/解析/model-limits 走同一路径，模型 ID 形如 <provider>:<model>。
 agentscope:
   model:
-    provider: ${AGENTSCOPE_PROVIDER:}
-    api-key: ${AGENTSCOPE_API_KEY:}
-    base-url: ${AGENTSCOPE_BASE_URL:}
-    temperature: 0.3
-    stream: true
+    # 五个字段全部占位符化：值由模式文件（application-local.yml / application-cloud.yml）
+    # 顶层 model: 段供给；冒号后为中立默认值（= local 行为），无模式文件时兜底
+    provider: ${model.provider:zhipu}
+    temperature: ${model.temperature:0.3}
+    stream: ${model.stream:true}
     # 单次响应最大输出 token：防止长 tool_call arguments（如 write_file 的大 content）
     # 被服务端默认上限截断 → JSON 不合法 → 上游降级为 {} → 报「未找到 path/content 参数」
     # 这里只是「全局兜底值」，取所有模型都能接受的保守值；
     # 具体模型的真实上限在下方 model-limits 中按模型名覆盖（route 网关多模型必读）
-    max-tokens: ${AGENTSCOPE_MAX_TOKENS:16384}
+    max-tokens: ${model.max-tokens:16384}
     # 并行 tool_call：开启后单轮可并发多个工具，吞吐更高。
     # 代价是多路 arguments 的流式分片会交错到达，对上游累积器的分片归位要求更高；
     # 若再次出现 JSON 不合法 / 参数串台，优先把这里改回 false 定位问题。
-    parallel-tool-calls: true
+    parallel-tool-calls:  ${model.parallel-tool-calls:true}
   agent:
     max-iters: 50
     # 单次模型调用整体时限（含流式全程）× maxAttempts=2 = 挂起最长真空期。
@@ -66,15 +75,15 @@ agentscope:
     max-attachment-bytes: 33554432
     # 循环护栏阈值（策略参数，原先硬编码在事件分发逻辑中）
     max-same-subagent-calls: 3
+    # ============================
+    # 按智能体的模型覆盖（可选）
+    # ----------------------------
     max-consecutive-tool-failures: 2
     # Workspace Agent 缓存驱逐：每个 context 持有模型客户端/工具集/MCP 连接，需上限 + 空闲回收
     max-cached-workspaces: ${AGENTSCOPE_MAX_CACHED_WORKSPACES:32}
     workspace-idle-minutes: ${AGENTSCOPE_WORKSPACE_IDLE_MINUTES:120}
     shell-timeout-seconds: 300
     max-shell-output-bytes: 200000
-  # ============================
-  # 按智能体的模型覆盖（可选）
-  # ----------------------------
   # 为某个智能体单独指定模型：取消注释并填写对应字段。任一字段留空即向上回退：
   #   agents.<id> 显式值 → agents.<id>.provider 指向的 providers.<provider> → 全局 model
   # 可用智能体 id：main / coder / reviewer / planner / researcher / code-expert /
@@ -84,47 +93,19 @@ agentscope:
   #         如需按智能体独立密钥，写到用户级配置 ~/.easyClaw/application.yml。
   # ============================
   agents:
-     coder:
-       provider: openapi          # 引用下方 providers 表中的 key
-       model-name:   # 覆盖模型名
-       base-url:                   # 覆盖 base-url（一般留空继承 provider）
-       api-key:                    # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
-       temperature:                # 覆盖采样温度
-       max-tokens:                 # 覆盖单次最大输出 token
-       parallel-tool-calls:        # 覆盖是否允许并行 tool_call
-  providers:
-    deepseek:
-      api-key:
-      base-url:
-      model-name:
-    # 推理模型：支持 thinking（推理过程可视化），速度较慢
-    deepseek-reasoner:
-      api-key:
-      base-url: https://api.deepseek.com/v1
-      model-name: deepseek-reasoner
-    openai:
-      api-key: ${OPENAI_API_KEY:}
-      base-url:
-      model-name: ark-code-latest
-    dashscope:
-      api-key: ${DASHSCOPE_API_KEY:}
-      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-      model-name: qwen-plus
-    ollama:
-      api-key: ollama
-      base-url: http://localhost:11434/v1
-      model-name: qwen2.5:7b
-    moonshot:
-      api-key: ${MOONSHOT_API_KEY:}
-      base-url: https://api.moonshot.cn/v1
-      model-name: moonshot-v1-8k
-    zhipu:
-      api-key: ${ZHIPU_API_KEY:}
-      base-url: https://open.bigmodel.cn/api/paas/v4
-      model-name: glm-4-flash
-
+    coder:
+      provider: openapi          # 引用下方 providers 表中的 key
+      model-name:   # 覆盖模型名
+      base-url:                   # 覆盖 base-url（一般留空继承 provider）
+      api-key:                    # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
+      temperature:                # 覆盖采样温度
+      max-tokens:                 # 覆盖单次最大输出 token
+      parallel-tool-calls:        # 覆盖是否允许并行 tool_call
+  # ---- providers 表：按模式拆分到 profile 文件（同一份公共结构，两个供给方）----
+  # local（默认）→ application-local.yml：本地多 provider 表 + 顶层 local:/model: 变量段
+  # cloud        → application-cloud.yml：hub 网关条目 + 顶层 cloud:/model: 变量段
   # ============================
-  # 按模型名的输出上限覆盖表（route / 网关型 provider 必需）
+  # 按模型名的输出上限覆盖表（公共机制：与供给方无关，local/cloud 共用）
   # ----------------------------
   # 场景：一个 base-url + api-key 后面挂着 kimi、豆包、deepseek、glm 等多个模型，
   #       各家单次输出 token 上限差异极大：
@@ -173,6 +154,7 @@ agentscope:
       max-tokens: 8192
     qwen*:
       max-tokens: 8192
+
 
 # ============================
 # 界面品牌定制（侧边栏 logo / 浏览器标签页标题 / favicon）
