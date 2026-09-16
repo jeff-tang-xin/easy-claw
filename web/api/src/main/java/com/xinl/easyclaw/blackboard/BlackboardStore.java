@@ -11,14 +11,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 /**
@@ -59,6 +63,19 @@ public class BlackboardStore {
     /** 读取默认条数 */
     public static final int DEFAULT_READ_LIMIT = 30;
 
+    /** 归档件文件名中，主干与归档时间戳之间的固定后缀（含前导点） */
+    static final String ARCHIVE_SUFFIX = ".archived-";
+    /**
+     * 归档件文件名主干白名单：{@code <safeKey>.archived-yyyyMMdd-HHmmss}。
+     * 只有点号出现在这唯一位置时才被当作归档句柄原样保留（避免 {@link #safeKey} 把点换成下划线
+     * 而定位不到归档文件）；其余任何点号 / 路径分隔仍被拒绝，故不削弱越目录防护。
+     */
+    private static final Pattern ARCHIVED_KEY =
+            Pattern.compile("[A-Za-z0-9_-]+\\.archived-\\d{8}-\\d{6}");
+    /** 归档时间戳格式（与归档文件名一致，本地时间） */
+    private static final DateTimeFormatter ARCHIVE_STAMP =
+            DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss");
+
     /** key → 写锁（同 JVM 内串行化同一记录本的写入） */
     private final Map<String, ReentrantLock> locks = new ConcurrentHashMap<>();
     /** key → 序号发号器；首次按现有行数初始化，之后锁内自增 */
@@ -75,6 +92,10 @@ public class BlackboardStore {
      * @return 形如 {@code ✅ #12 已登记（risk, by main）} 的说明；失败时为可读的失败原因
      */
     public String append(WorkspaceContext workspace, String key, String author, String type, String content) {
+        if (isArchivedKey(key)) {
+            // 归档本是只读历史：禁止再追加，否则「归档清空」后历史仍被改写，破坏不可抵赖性
+            return "❌ 该记录本已归档，为只读历史，不能再登记内容。请改用当前活跃记录本。";
+        }
         Path file = blackboardFile(workspace, key);
         String body = truncate(content);
         ReentrantLock lock = locks.computeIfAbsent(fileKey(file), k -> new ReentrantLock());
@@ -144,11 +165,33 @@ public class BlackboardStore {
         return List.copyOf(all.subList(all.size() - want, all.size()));
     }
 
-    /** 记录本文件路径；key 经 safe 化后作为文件名，防止越出 blackboard 目录 */
+    /**
+     * 记录本文件路径；key 经 safe 化后作为文件名，防止越出 blackboard 目录。
+     * 归档句柄（{@code <safeKey>.archived-<时间戳>}）经白名单校验后原样保留，
+     * 从而能定位到归档件；归档判定见 {@link #isArchivedKey}。
+     */
     private Path blackboardFile(WorkspaceContext workspace, String key) {
-        return blackboardDir(workspace)
-                .resolve(safeKey(key) + ".jsonl")
-                .normalize();
+        String fileName = (isArchivedKey(key) ? key : safeKey(key)) + ".jsonl";
+        return blackboardDir(workspace).resolve(fileName).normalize();
+    }
+
+    /** 判断 key 是否为合规的归档句柄（整个 key 必须完整匹配归档文件名主干） */
+    static boolean isArchivedKey(String key) {
+        return key != null && ARCHIVED_KEY.matcher(key).matches();
+    }
+
+    /**
+     * 从归档句柄中反解归档时间（epoch millis）；句柄非法或时间戳不可解析时返回 0。
+     */
+    private static long archivedAtMillis(String archivedKey) {
+        int idx = archivedKey.indexOf(ARCHIVE_SUFFIX);
+        String stamp = archivedKey.substring(idx + ARCHIVE_SUFFIX.length());
+        try {
+            return LocalDateTime.parse(stamp, ARCHIVE_STAMP)
+                    .atZone(ZoneId.systemDefault()).toInstant().toEpochMilli();
+        } catch (DateTimeParseException e) {
+            return 0L;
+        }
     }
 
     /** 记录本根目录：{@code <workspace>/.easyClaw/agent/blackboard} */
@@ -159,13 +202,16 @@ public class BlackboardStore {
     }
 
     /**
-     * 列出该工作区下所有记录本的 key（即 jsonl 文件名去掉后缀），按最后修改时间倒序。
+     * 列出该工作区下所有记录本（含归档本），按最后修改时间倒序。
      * <p>
      * 供管理页面浏览用：{@link #read} 只能按已知 key 取单个记录本，而页面需要先知道
-     * 「这个工作区里有哪些记录本」。返回的是 safeKey 化后的名字（磁盘真实文件名），
-     * 可直接回传给 {@link #read} —— safeKey 是幂等的，二次处理不会变形。
+     * 「这个工作区里有哪些记录本」。活跃本的 key 是磁盘文件名去后缀（safeKey 化后的名字）；
+     * 归档本的 key 是 {@code <safeKey>.archived-<时间戳>} 完整主干 —— 两者同属一个磁盘目录、
+     * 基础 key 相同，但归档主干天然唯一，可直接回传给 {@link #read} 定位归档件。
+     * <p>
+     * 归档本 {@code archived=true} 且只读（可回看条目，不能 append / 再次归档）。
      *
-     * @return key 列表；目录不存在或读取失败时返回空列表（管理页面不应因此报错）
+     * @return 记录本列表；目录不存在或读取失败时返回空列表（管理页面不应因此报错）
      */
     public List<BlackboardBook> listBooks(WorkspaceContext workspace) {
         Path dir = blackboardDir(workspace);
@@ -174,10 +220,13 @@ public class BlackboardStore {
         }
         List<BlackboardBook> books = new ArrayList<>();
         try (Stream<Path> files = Files.list(dir)) {
-            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".jsonl")
-                            && !f.getFileName().toString().contains(".archived-")).toList()) {
+            for (Path p : files.filter(f -> f.getFileName().toString().endsWith(".jsonl")).toList()) {
                 String fileName = p.getFileName().toString();
                 String key = fileName.substring(0, fileName.length() - ".jsonl".length());
+                boolean archived = key.contains(ARCHIVE_SUFFIX);
+                // 归档判定以白名单为准：只有形如 <safeKey>.archived-<时间戳> 的才是归档本，
+                // 手工放进目录、名字恰好含 .archived- 但不合规的文件不当归档句柄处理。
+                boolean validArchived = archived && isArchivedKey(key);
                 long modified = 0L;
                 long entries = 0L;
                 try {
@@ -186,7 +235,8 @@ public class BlackboardStore {
                 } catch (IOException ignore) {
                     // 单个文件读不到不应让整个列表失败，保留 key 让用户至少看到它存在
                 }
-                books.add(new BlackboardBook(key, entries, modified));
+                books.add(new BlackboardBook(key, entries, modified,
+                        validArchived, validArchived ? archivedAtMillis(key) : 0L));
             }
         } catch (IOException e) {
             log.warn("列出记录本目录失败: {}, {}", dir, e.getMessage());
@@ -199,11 +249,15 @@ public class BlackboardStore {
     /**
      * 一个记录本的概要（管理页面列表用）。
      *
-     * @param key          记录本键（磁盘文件名去后缀，通常是会话 id）
+     * @param key          记录本键：活跃本为磁盘文件名去后缀（通常是会话 id）；
+     *                     归档本为 {@code <基础key>.archived-<时间戳>} 完整唯一主干
      * @param entries      有效条目数
      * @param lastModified 最后修改时间（epoch millis）
+     * @param archived     是否为归档本（归档本只读，可回看）
+     * @param archivedAt   归档时间（epoch millis）；活跃本为 0
      */
-    public record BlackboardBook(String key, long entries, long lastModified) {
+    public record BlackboardBook(String key, long entries, long lastModified,
+                                 boolean archived, long archivedAt) {
     }
 
     /**
@@ -221,6 +275,10 @@ public class BlackboardStore {
      * @return 归档后的文件名；记录本不存在时返回 null
      */
     public String archiveBook(WorkspaceContext workspace, String key) {
+        if (isArchivedKey(key)) {
+            // 归档本已经是历史快照，不允许二次归档（也没有对应的活跃文件可改名）
+            throw new IllegalArgumentException("该记录本已归档，为只读历史，不能再次归档");
+        }
         Path file = blackboardFile(workspace, key);
         ReentrantLock lock = locks.computeIfAbsent(fileKey(file), k -> new ReentrantLock());
         lock.lock();
@@ -228,9 +286,8 @@ public class BlackboardStore {
             if (!Files.exists(file)) {
                 return null;
             }
-            String stamp = OffsetDateTime.now()
-                    .format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"));
-            String archivedName = safeKey(key) + ".archived-" + stamp + ".jsonl";
+            String stamp = LocalDateTime.now().format(ARCHIVE_STAMP);
+            String archivedName = safeKey(key) + ARCHIVE_SUFFIX + stamp + ".jsonl";
             Path target = file.getParent().resolve(archivedName);
             Files.move(file, target);
             // 发号器必须重置：否则新记录本的 seq 会从旧值接着涨，

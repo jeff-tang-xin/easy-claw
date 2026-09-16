@@ -15,14 +15,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * {@link BlackboardStore#archiveBook} 的行为约束。
  * <p>
- * 归档是「清空」机制的实现方式：改名而非删除，保住 append-only 轨迹的可回溯性。
- * 页面依赖三点：① 归档后原记录本从清单消失；② 历史内容仍在磁盘上；
- * ③ 归档后重新登记的 seq 从 1 重新开始（否则用户会看到「清空后第一条是 #106」）。
+ * 归档是「清空活跃本」机制的实现方式：改名而非删除，保住 append-only 轨迹的可回溯性。
+ * 契约四点：① 归档后活跃文件移走，但归档本仍出现在清单中（{@code archived=true}），
+ * 可用其完整句柄 key 只读回看；② 历史内容原样保留在归档文件上；
+ * ③ 归档后重新登记的 seq 从 1 重新开始（否则用户会看到「清空后第一条是 #106」）；
+ * ④ 归档本只读：拒绝 append 与二次归档。
  */
 @DisplayName("记录本归档清空")
 class BlackboardArchiveTest {
@@ -81,15 +84,79 @@ class BlackboardArchiveTest {
     }
 
     @Test
-    @DisplayName("归档文件不出现在记录本清单里")
-    void archivedFilesExcludedFromList(@TempDir Path root) {
+    @DisplayName("归档后归档本仍出现在清单，带 archived 标记与归档时间，且可只读回看")
+    void archivedBookRemainsVisibleAndReadable(@TempDir Path root) throws IOException {
         BlackboardStore store = new BlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "x");
-        store.archiveBook(ws(root), "s1");
+        store.append(ws(root), "s1", "main", "note", "历史内容");
+        String archivedName = store.archiveBook(ws(root), "s1");
 
         List<BlackboardStore.BlackboardBook> books = store.listBooks(ws(root));
+        assertEquals(1, books.size(), "归档本不应被清单过滤掉；实际: " + books);
+        BlackboardStore.BlackboardBook archived = books.get(0);
+        String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
+        assertEquals(archivedKey, archived.key(), "归档本 key 应为含 .archived- 的完整唯一主干");
+        assertTrue(archived.archived(), "归档本必须带 archived=true 标记");
+        assertTrue(archived.archivedAt() > 0, "归档本应能反解出归档时间");
+        assertEquals(1, archived.entries(), "归档本条目数应保留");
 
-        assertTrue(books.isEmpty(),
-                "归档件是历史快照，不应作为活跃记录本出现在清单中，否则用户会看到一堆 .archived- 条目；实际: " + books);
+        List<BlackboardEntry> entries = store.read(ws(root), archivedKey, 100);
+        assertEquals(1, entries.size(), "归档本应仍可通过其句柄回看历史条目");
+        assertEquals("历史内容", entries.get(0).content());
+    }
+
+    @Test
+    @DisplayName("活跃本与归档本同基础 key 时并存且各自可定位")
+    void activeAndArchivedCoexist(@TempDir Path root) {
+        BlackboardStore store = new BlackboardStore();
+        store.append(ws(root), "s1", "main", "note", "旧");
+        store.archiveBook(ws(root), "s1");
+        store.append(ws(root), "s1", "main", "note", "新");
+
+        List<BlackboardStore.BlackboardBook> books = store.listBooks(ws(root));
+        assertEquals(2, books.size(), "应有一本归档 + 一本活跃；实际: " + books);
+
+        // 活跃本读到新内容
+        List<BlackboardEntry> active = store.read(ws(root), "s1", 100);
+        assertEquals(1, active.size());
+        assertEquals("新", active.get(0).content());
+
+        // 归档本读到旧内容
+        String archivedKey = books.stream()
+                .filter(BlackboardStore.BlackboardBook::archived)
+                .findFirst().orElseThrow().key();
+        List<BlackboardEntry> archivedEntries = store.read(ws(root), archivedKey, 100);
+        assertEquals(1, archivedEntries.size());
+        assertEquals("旧", archivedEntries.get(0).content());
+    }
+
+    @Test
+    @DisplayName("归档本拒绝再追加（返回失败说明且内容不变）")
+    void archivedBookRejectsAppend(@TempDir Path root) {
+        BlackboardStore store = new BlackboardStore();
+        store.append(ws(root), "s1", "main", "note", "旧");
+        String archivedName = store.archiveBook(ws(root), "s1");
+        String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
+
+        String result = store.append(ws(root), archivedKey, "main", "note", "试图改写历史");
+        assertTrue(result.startsWith("❌"), "追加归档本必须被拒绝；实际: " + result);
+        assertTrue(result.contains("只读"), "拒绝原因应说明归档本只读；实际: " + result);
+
+        List<BlackboardEntry> entries = store.read(ws(root), archivedKey, 100);
+        assertEquals(1, entries.size(), "被拒绝的追加不得落盘，归档内容必须保持不变");
+        assertEquals("旧", entries.get(0).content());
+    }
+
+    @Test
+    @DisplayName("归档本拒绝二次归档")
+    void archivedBookRejectsReArchive(@TempDir Path root) {
+        BlackboardStore store = new BlackboardStore();
+        store.append(ws(root), "s1", "main", "note", "旧");
+        String archivedName = store.archiveBook(ws(root), "s1");
+        String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
+
+        IllegalArgumentException ex = assertThrows(IllegalArgumentException.class,
+                () -> store.archiveBook(ws(root), archivedKey),
+                "对归档本再次归档必须被拒绝");
+        assertTrue(ex.getMessage().contains("已归档"), "拒绝原因应说明已归档；实际: " + ex.getMessage());
     }
 }

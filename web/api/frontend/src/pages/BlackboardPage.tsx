@@ -10,6 +10,10 @@ interface BlackboardBook {
   key: string;
   entries: number;
   lastModified: number;
+  /** 是否为归档本（只读历史，可回看不可写） */
+  archived?: boolean;
+  /** 归档时间（epoch ms），仅归档本有值 */
+  archivedAt?: number;
 }
 
 interface BlackboardEntry {
@@ -69,7 +73,10 @@ export default function BlackboardPage() {
       .then((list) => {
         setBooks(list);
         setError('');
-        if (list.length > 0) setActiveKey(list[0].key);
+        if (list.length > 0) {
+          // 默认落在活跃本上；全是归档本时才退而选第一条
+          setActiveKey((cur) => cur || (list.find((b) => !b.archived) || list[0]).key);
+        }
       })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
@@ -120,23 +127,28 @@ export default function BlackboardPage() {
     setArchiving(true);
     const url = `/api/blackboard/archive?workspaceId=${encodeURIComponent(wsId)}`
       + `&key=${encodeURIComponent(activeKey)}`;
-    postJson<{ archivedAs: string }>(url, {})
+    postJson<{ archived: string }>(url, {})
       .then((res) => {
         setConfirmArchive(false);
-        setNotice(`已归档为 ${res.archivedAs}，原记录本已清空（历史内容仍保留在磁盘上）。`);
-        setActiveKey('');
-        setEntries([]);
+        const archivedName = res.archived || '';
+        const archivedKey = archivedName.replace(/\.jsonl$/, '');
+        setNotice(`已归档为 ${archivedName}，活跃记录本已清空；归档历史仍可在左侧只读回看。`);
         return getJson<BlackboardBook[]>(
-          `/api/blackboard/books?workspaceId=${encodeURIComponent(wsId)}`);
-      })
-      .then((list) => {
-        if (!list) return;
-        setBooks(list);
-        setError('');
+          `/api/blackboard/books?workspaceId=${encodeURIComponent(wsId)}`)
+          .then((list) => {
+            setBooks(list);
+            setError('');
+            // 直接选中归档本，让用户马上能回看刚归档的内容
+            setActiveKey(list.some((b) => b.key === archivedKey) ? archivedKey : '');
+          });
       })
       .catch((e) => setError(String(e)))
       .finally(() => setArchiving(false));
   };
+
+  // 当前选中本及其归档态（归档本只读：可回看，不能再归档）
+  const selectedBook = books.find((b) => b.key === activeKey);
+  const selectedArchived = !!selectedBook?.archived;
 
   const kw = keyword.trim().toLowerCase();
   const shown = entries.filter((e) => {
@@ -192,8 +204,12 @@ export default function BlackboardPage() {
           <button
             className="btn small"
             onClick={() => { setConfirmArchive(true); setNotice(''); }}
-            disabled={!activeKey || loading || archiving || confirmArchive}
-            title={activeKey ? `归档并清空「${activeKey}」` : '请先选择一个记录本'}
+            disabled={!activeKey || loading || archiving || confirmArchive || selectedArchived}
+            title={!activeKey
+              ? '请先选择一个记录本'
+              : selectedArchived
+                ? '归档本为只读历史，不能再次归档'
+                : `归档并清空「${activeKey}」`}
           >
             🗄️ 归档并清空
           </button>
@@ -207,9 +223,9 @@ export default function BlackboardPage() {
             </div>
             <div className="hint" style={{ marginBottom: 10 }}>
               归档 <strong>不是删除</strong>：整本会被改名为 <code>{activeKey}.archived-&lt;时间戳&gt;.jsonl</code> 留在磁盘上，
-              随后记录本归零、序号从 #1 重新开始。
+              随后活跃记录本归零、序号从 #1 重新开始；归档历史仍可在左侧列表只读回看。
               <br />
-              请确认正在运行的 Agent 已不再需要这些结论 —— 归档后它们读不到旧条目。
+              但正在运行的 Agent 只会读写活跃本，归档后它读不到旧条目 —— 请确认其不再依赖这些结论。
             </div>
             <div style={{ display: 'flex', gap: 8 }}>
               <button className="btn small primary" onClick={archive} disabled={archiving}>
@@ -238,9 +254,12 @@ export default function BlackboardPage() {
                 style={{ textAlign: 'left', flexDirection: 'column', alignItems: 'flex-start' }}
                 title={b.key}
               >
-                <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>{b.key}</span>
+                <span style={{ fontWeight: 600, wordBreak: 'break-all' }}>
+                  {b.archived ? '🗄️ ' : ''}{b.key}
+                </span>
                 <span className="hint" style={{ fontSize: 11 }}>
-                  {b.entries} 条 · {fmtTime(b.lastModified)}
+                  {b.entries} 条 · {fmtTime(b.archived ? (b.archivedAt || b.lastModified) : b.lastModified)}
+                  {b.archived ? ' · 已归档' : ''}
                 </span>
               </button>
             ))}
@@ -248,6 +267,12 @@ export default function BlackboardPage() {
         </div>
 
         <div className="card" style={{ flex: 1, minWidth: 0 }}>
+          {activeKey && selectedArchived && (
+            <div className="card" style={{ margin: '0 0 12px', padding: '8px 12px', borderLeft: '3px solid #6b7280' }}>
+              🗄️ 这是已归档的只读记录本（归档于 {fmtTime(selectedBook?.archivedAt || selectedBook?.lastModified || 0)}），
+              仅可回看历史条目，不能再登记或归档。
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', marginBottom: 12 }}>
             {TYPE_FILTERS.map((t) => {
               const meta = TYPE_META[t];

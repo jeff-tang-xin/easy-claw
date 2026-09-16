@@ -41,8 +41,9 @@ public class BlackboardController {
     }
 
     /**
-     * 列出该工作区所有记录本（key + 条目数 + 最后修改时间），按修改时间倒序。
-     * 目录不存在或为空时返回空列表。
+     * 列出该工作区所有记录本（key + 条目数 + 最后修改时间，含归档本），按修改时间倒序。
+     * 归档本额外带 {@code archived=true} 与 {@code archivedAt}，其 key 为
+     * {@code <基础key>.archived-<时间戳>} 唯一主干。目录不存在或为空时返回空列表。
      */
     @GetMapping("/books")
     public List<BlackboardBook> listBooks(@RequestParam String workspaceId) {
@@ -67,12 +68,12 @@ public class BlackboardController {
 
     /**
      * 归档指定记录本：把当前 jsonl 重命名为 {@code <key>.archived-<时间戳>.jsonl}，
-     * 记录本随之归零（下次访问自动新建空文件）。
+     * 活跃记录本随之归零（下次访问自动新建空文件）。
      * <p>
-     * 本操作<strong>不可逆</strong>：归档后该记录本不再出现在书列表中，
-     * 其内容不可再通过 blackboard API 读取。如需恢复，需手动在文件系统中改名。
+     * 归档件<b>不会消失</b>：它仍出现在书列表中（{@code archived=true}），可经
+     * {@code /entries} 只读回看全部历史；但为保护 append-only 轨迹，归档本禁止再追加或二次归档。
      * <p>
-     * <b>为什么不是删除：</b>保留历史以便回溯，改名即达「清空」效果。
+     * <b>为什么不是删除：</b>保留历史以便回溯，改名即达「清空活跃本、另起一本」的效果。
      *
      * @return 归档后的文件名（不含路径）
      */
