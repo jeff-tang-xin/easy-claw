@@ -60,3 +60,8 @@ run-compile.ps1
 /default_old_backup/
 *.txt
 *.log
+
+# 本地接口抓包/调试临时文件（含真实 Bearer 等敏感信息，严禁入库）
+/img-test.bat
+/img-req.json
+/img-resp.json

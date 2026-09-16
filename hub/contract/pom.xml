@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-hub-contract</artifactId>
+    <name>Easy Claw - Hub Contract</name>
+    <description>hub 与客户端共享的 DTO / 枚举 / 错误码。纯 Java records，零 Spring / 零 Lombok 依赖，供 hub 与 web/api（阶段 B）共同依赖，避免契约漂移。</description>
+
+    <!--
+        边界纪律：零 Spring / 零 Lombok。仅引入 jakarta.validation-api——纯注解（@NotBlank/@Size 等），
+        不带校验实现；实现由消费方（hub/server 的 spring-boot-starter-validation）提供。
+        让请求 DTO 的约束随契约下发，服务端与客户端（阶段 B）共用同一份声明式校验。
+        版本由 Spring Boot 父 BOM 管理。
+    -->
+    <dependencies>
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+        </dependency>
+    </dependencies>
+</project>

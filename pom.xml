@@ -20,6 +20,10 @@
     <modules>
         <module>web</module>
         <module>agentscope-java</module>
+        <!-- Hub-Spoke：hub 中心服务 + 共享契约，独立于 agent 运行时栈。
+             按用户要求 hub 与客户端 web/ 目录区分开，放在顶层 hub/ 下（server=服务+控制台，contract=共享 DTO）。 -->
+        <module>hub</module>
+
     </modules>
     <properties>
         <java.version>21</java.version>
