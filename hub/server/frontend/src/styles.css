@@ -477,6 +477,30 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 .ps-quick-title { font-weight: 600; margin-bottom: 4px; }
 .ps-quick-desc { font-size: 0.85em; color: var(--text-tertiary); }
 
+/* 顶部全局/空间面包屑补充样式 */
+.crumb-text { color: var(--text-secondary); }
+.top-breadcrumb {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 14px;
+  font-size: 0.9em; color: var(--text-tertiary);
+}
+.crumb-link {
+  background: none; border: none; padding: 0; font: inherit; color: var(--accent-dark);
+  cursor: pointer;
+}
+.crumb-link:hover { text-decoration: underline; }
+
+/* 项目设置 tab */
+.ps-settings { display: flex; flex-direction: column; gap: 16px; max-width: 720px; }
+.ps-settings .card { display: flex; flex-direction: column; gap: 10px; padding: 18px; }
+.ps-settings label { display: flex; flex-direction: column; gap: 6px; font-size: 0.9em; font-weight: 600; }
+.ps-settings input, .ps-settings textarea, .ps-settings select {
+  font-weight: 400; width: 100%; box-sizing: border-box;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel);
+}
+.ps-settings .modal-actions { display: flex; align-items: center; gap: 12px; }
+.ps-saved-hint { color: #15803d; font-size: 0.85em; }
+.ps-danger-zone { border-color: #f3c0c0; }
+
 /* 项目卡片可点击态 */
 .project-card-link { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; position: relative; }
 .project-card-enter {

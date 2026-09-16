@@ -12,12 +12,17 @@ import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.xinl.easyclaw.hub.entity.ProjectEntity;
+import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.repository.ProjectRepository;
+import com.xinl.easyclaw.hub.repository.UserRepository;
 
 /**
  * 项目管理：组织内归类锚点。可见性 private|team|public，按角色 + 归属过滤；归档=status:archived。
@@ -30,11 +35,14 @@ public class ProjectService {
     private static final Set<String> VALID_STATUS = Set.of("active", "archived");
 
     private final ProjectRepository projects;
+    private final UserRepository users;
     private final OrgService orgService;
     private final AuditService auditService;
 
-    public ProjectService(ProjectRepository projects, OrgService orgService, AuditService auditService) {
+    public ProjectService(ProjectRepository projects, UserRepository users, OrgService orgService,
+                          AuditService auditService) {
         this.projects = projects;
+        this.users = users;
         this.orgService = orgService;
         this.auditService = auditService;
     }
@@ -46,13 +54,16 @@ public class ProjectService {
             throw ApiException.forbidden("非组织成员");
         }
         boolean privileged = "owner".equals(role) || "admin".equals(role);
-        List<ProjectDto> out = new ArrayList<>();
+        List<ProjectEntity> visible = new ArrayList<>();
+        Set<Long> ownerIds = new HashSet<>();
         for (ProjectEntity p : projects.findByOrgId(orgId)) {
             if (canSee(p, requesterId, privileged)) {
-                out.add(toDto(p));
+                visible.add(p);
+                ownerIds.add(p.getOwnerUserId());
             }
         }
-        return out;
+        Map<Long, String> names = resolveUsernames(ownerIds);
+        return visible.stream().map(p -> toDto(p, names)).toList();
     }
 
     public ProjectDto get(Long requesterId, Long projectId) {
@@ -68,7 +79,7 @@ public class ProjectService {
         if (member && !canSee(p, requesterId, privileged)) {
             throw ApiException.forbidden("无权限查看该项目");
         }
-        return toDto(p);
+        return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
     }
 
     /** 建项目：guest 只读不可建；slug 组织内唯一。 */
@@ -95,7 +106,7 @@ public class ProjectService {
         projects.save(p);
         auditService.record(AuditModule.PROJECT, "create_project", requesterId, orgId, "project", String.valueOf(p.getId()),
                 "name=" + p.getName() + ",slug=" + p.getSlug() + ",visibility=" + visibility, AuditModule.SUCCESS);
-        return toDto(p);
+        return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
     }
 
     /** 改项目：owner/admin 或项目创建者。status 可用于归档。 */
@@ -128,7 +139,7 @@ public class ProjectService {
                 : "fields=" + changed.substring(0, changed.length() - 1);
         auditService.record(AuditModule.PROJECT, "update_project", requesterId, p.getOrgId(), "project",
                 String.valueOf(p.getId()), detail, AuditModule.SUCCESS);
-        return toDto(p);
+        return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
     }
 
     /** 归档（软删）：owner/admin 或项目创建者。 */
@@ -205,9 +216,23 @@ public class ProjectService {
         }
     }
 
-    private static ProjectDto toDto(ProjectEntity p) {
+    private ProjectDto toDto(ProjectEntity p, Map<Long, String> names) {
         return new ProjectDto(p.getId(), p.getOrgId(), p.getSlug(), p.getName(), p.getDescription(),
-                p.getVisibility(), p.getOwnerUserId(), p.getStatus(), ldt(p.getCreatedAt()), ldt(p.getUpdatedAt()));
+                p.getVisibility(), p.getOwnerUserId(), names.get(p.getOwnerUserId()), p.getStatus(),
+                ldt(p.getCreatedAt()), ldt(p.getUpdatedAt()));
+    }
+
+    /** 批量回填创建者展示名（displayName 优先，回落 username），缺失用户留 null。 */
+    private Map<Long, String> resolveUsernames(Set<Long> userIds) {
+        if (userIds == null || userIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, String> out = new HashMap<>();
+        for (UserEntity u : users.findAllById(userIds)) {
+            out.put(u.getId(), u.getDisplayName() != null && !u.getDisplayName().isBlank()
+                    ? u.getDisplayName() : u.getUsername());
+        }
+        return out;
     }
 
     private static LocalDateTime ldt(Instant instant) {

@@ -13,6 +13,8 @@ public record ProjectDto(
         String description,
         String visibility,
         Long ownerUserId,
+        /** 创建者展示名（displayName 优先，回落 username），列表/空间头部直接渲染，避免裸 id */
+        String ownerUsername,
         String status,
         LocalDateTime createdAt,
         LocalDateTime updatedAt) {

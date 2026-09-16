@@ -1,6 +1,6 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {archiveProject, createProject, listProjects, restoreProject, updateProject} from '../api';
+import {createProject, listProjects} from '../api';
 import Modal from '../components/Modal';
 import type {ProjectDto} from '../types';
 
@@ -40,12 +40,10 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
   const [error, setError] = useState('');
   const [showArchived, setShowArchived] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
-  const [editing, setEditing] = useState<ProjectDto | null>(null);
   const [form, setForm] = useState<ProjectForm>(EMPTY_FORM);
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
 
-  const canEdit = role === 'owner' || role === 'admin';
   const canCreate = role !== null && role !== 'guest';
 
   const reload = useCallback(async () => {
@@ -74,12 +72,6 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
     setCreateOpen(true);
   };
 
-  const openEdit = (p: ProjectDto) => {
-    setForm({name: p.name, description: p.description ?? '', visibility: p.visibility});
-    setFormError('');
-    setEditing(p);
-  };
-
   const submitCreate = async (e: React.FormEvent) => {
     e.preventDefault();
     if (orgId == null) return;
@@ -98,45 +90,6 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
       setFormError(err instanceof Error ? err.message : '创建失败');
     } finally {
       setBusy(false);
-    }
-  };
-
-  const submitEdit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!editing) return;
-    setFormError('');
-    setBusy(true);
-    try {
-      await updateProject(editing.id, {
-        name: form.name.trim(),
-        description: form.description.trim(),
-        visibility: form.visibility,
-      });
-      setEditing(null);
-      await reload();
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : '保存失败');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const archive = async (p: ProjectDto) => {
-    if (!window.confirm(`确定归档项目「${p.name}」？归档后不再出现在默认列表。`)) return;
-    try {
-      await archiveProject(p.id);
-      await reload();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '归档失败');
-    }
-  };
-
-  const restore = async (p: ProjectDto) => {
-    try {
-      await restoreProject(p.id);
-      await reload();
-    } catch (err) {
-      alert(err instanceof Error ? err.message : '恢复失败');
     }
   };
 
@@ -264,27 +217,9 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
               <div className="project-slug">@{p.slug}</div>
               {p.description && <p className="project-desc">{p.description}</p>}
               <div className="project-meta">
-                创建者 #{p.ownerUserId}
+                创建者 {p.ownerUsername || `#${p.ownerUserId}`}
                 {mine ? '（我）' : ''} · 更新于 {p.updatedAt ? new Date(p.updatedAt).toLocaleString() : '—'}
               </div>
-              {(canEdit || mine) && (
-                <div className="row-actions" onClick={(e) => e.stopPropagation()}>
-                  {!archived && (
-                    <button type="button" className="btn btn-sm" onClick={() => openEdit(p)}>
-                      编辑
-                    </button>
-                  )}
-                  {!archived ? (
-                    <button type="button" className="btn btn-sm btn-danger" onClick={() => void archive(p)}>
-                      归档
-                    </button>
-                  ) : (
-                    <button type="button" className="btn btn-sm" onClick={() => void restore(p)}>
-                      恢复
-                    </button>
-                  )}
-                </div>
-              )}
               <div className="project-card-enter">进入空间 →</div>
             </div>
           );
@@ -293,7 +228,6 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
 
       {createOpen &&
         renderFormModal('新建项目', '标识（slug）由系统根据名称自动生成', submitCreate, () => setCreateOpen(false), '创建')}
-      {editing && renderFormModal('编辑项目', `@${editing.slug}`, submitEdit, () => setEditing(null), '保存')}
     </div>
   );
 }

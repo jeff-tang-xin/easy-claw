@@ -1,8 +1,9 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Navigate, NavLink, Route, Routes} from 'react-router-dom';
+import {Navigate, NavLink, Route, Routes, useLocation} from 'react-router-dom';
 import {fetchMe, logout} from './api';
 import {clearSession, getCurrentOrgId, loadSession, setCurrentOrgId} from './auth';
 import type {MeResponse} from './types';
+import Breadcrumb, {type Crumb} from './components/Breadcrumb';
 import ChangePasswordCard from './components/ChangePasswordCard';
 import AppKeysPage from './pages/AppKeysPage';
 import AuditLogsPage from './pages/AuditLogsPage';
@@ -25,6 +26,49 @@ const ROLE_LABELS: Record<string, string> = {
 const COLLAPSED_KEY = 'hub.sidebar.collapsed';
 
 /** 侧边栏外壳 + 路由。会话状态集中在根部：me / 当前组织，页面通过 props 消费。 */
+// ---------- 顶部面包屑（IA §0.2）：组织维度「{组织} / {页面}」，平台维度「平台 / {页面}」 ----------
+
+/** 当前 orgId 对应组织名（me.orgs 含全部加入组织）；拿不到时回落「组织」。 */
+function orgNameOf(me: MeResponse, orgId: number | null): string {
+  if (orgId == null) return '组织';
+  return me.orgs.find((o) => o.id === orgId)?.name ?? '组织';
+}
+
+function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
+  const loc = useLocation();
+  const path = loc.pathname;
+
+  // 项目空间自带「组织 / 项目 / tab」面包屑，不重复渲染。
+  if (path.startsWith('/projects/')) return null;
+
+  const orgName = orgNameOf(me, orgId);
+  const items: Crumb[] = [];
+
+  if (path === '/' || path.startsWith('/login')) return null;
+  if (path === '/orgs') {
+    // 组织管理入口：组织列表 + 当前组织成员
+    items.push({text: '组织管理'});
+  } else if (path.startsWith('/orgs/')) {
+    // /orgs/:orgId 某组织成员管理；组织名以路由参数为准（可能非当前切换组织）
+    const routeOrgId = Number(path.slice('/orgs/'.length).split('/')[0]);
+    items.push({text: '组织管理'}, {text: orgNameOf(me, routeOrgId)}, {text: '成员'});
+  } else if (path.startsWith('/projects')) {
+    items.push({text: orgName}, {text: '项目'});
+  } else if (path.startsWith('/appkeys')) {
+    items.push({text: orgName}, {text: 'AppKey'});
+  } else if (path.startsWith('/audit')) {
+    items.push({text: orgName}, {text: '审计'});
+  } else if (path.startsWith('/gateway')) {
+    items.push({text: orgName}, {text: 'LLM 网关'});
+  } else if (path.startsWith('/providers')) {
+    items.push({text: '平台'}, {text: '模型 Provider'});
+  } else if (path.startsWith('/users')) {
+    items.push({text: '平台'}, {text: '用户管理'});
+  }
+
+  return <Breadcrumb items={items} />;
+}
+
 export default function App() {
   const [booting, setBooting] = useState(true);
   const [me, setMe] = useState<MeResponse | null>(null);
@@ -158,17 +202,7 @@ export default function App() {
               </NavLink>
             </div>
             <div className="nav-group">
-              <div className="nav-group-title">管理</div>
-              <NavLink to="/orgs" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="组织">
-                <span className="nav-icon">🏛️</span>
-                <span className="nav-label">组织</span>
-              </NavLink>
-              {has('audit.read') && (
-                <NavLink to="/audit" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="审计日志">
-                  <span className="nav-icon">🛡️</span>
-                  <span className="nav-label">审计日志</span>
-                </NavLink>
-              )}
+              <div className="nav-group-title">组织资源</div>
               {has('appkey.manage') && (
                 <NavLink to="/appkeys" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="AppKey">
                   <span className="nav-icon">🔑</span>
@@ -181,6 +215,19 @@ export default function App() {
                   <span className="nav-label">LLM 网关</span>
                 </NavLink>
               )}
+              {has('audit.read') && (
+                <NavLink to="/audit" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="审计日志">
+                  <span className="nav-icon">🛡️</span>
+                  <span className="nav-label">审计日志</span>
+                </NavLink>
+              )}
+            </div>
+            <div className="nav-group">
+              <div className="nav-group-title">组织管理</div>
+              <NavLink to="/orgs" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="组织">
+                <span className="nav-icon">🏛️</span>
+                <span className="nav-label">组织</span>
+              </NavLink>
             </div>
             {(has('user.manage') || has('provider.manage')) && (
               <div className="nav-group">
@@ -216,6 +263,7 @@ export default function App() {
         </aside>
 
         <main className="app-main">
+          <TopBreadcrumb me={me} orgId={orgId} />
           <Routes>
             <Route path="/" element={<Navigate to="/projects" replace />} />
             <Route path="/login" element={<Navigate to="/projects" replace />} />

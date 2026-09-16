@@ -38,6 +38,8 @@ export interface ProjectDto {
   /** private|team|public */
   visibility: string;
   ownerUserId: number;
+  /** 创建者展示名（displayName 优先，回落 username），可能为 null（用户已删除等） */
+  ownerUsername: string | null;
   /** active|archived */
   status: string;
   createdAt: string | null;
