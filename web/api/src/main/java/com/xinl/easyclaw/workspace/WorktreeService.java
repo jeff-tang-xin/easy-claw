@@ -9,7 +9,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 
@@ -40,8 +42,11 @@ public class WorktreeService {
     /** worktree 总根目录名（位于 workspace 根下，必须加入 .gitignore） */
     public static final String WORKTREE_ROOT_NAME = ".easyclaw-worktrees";
 
-    /** git 命令超时（秒）：worktree add/remove 均为本地操作，30s 足够 */
+    /** git 命令超时（秒）：branch/rev-parse/remove 等轻量本地操作，30s 足够 */
     private static final int GIT_TIMEOUT_SECONDS = 30;
+
+    /** worktree add 专用超时（秒）：需 checkout 全量文件，大仓库（3 万+ 文件实测远超 30s）单独放宽 */
+    private static final int GIT_ADD_TIMEOUT_SECONDS = 600;
 
     /** 超时强杀后等待进程死透的宽限（秒），与 SafeShellFilesystem 对齐 */
     private static final int KILL_GRACE_SECONDS = 5;
@@ -102,7 +107,7 @@ public class WorktreeService {
             }
             args.add(baseRef);
         }
-        GitResult r = runGit(workspacePath, args);
+        GitResult r = runGit(workspacePath, args, GIT_ADD_TIMEOUT_SECONDS);
         if (r.exitCode() == 0) {
             log.info("已创建会话 worktree: session={}, branch={}, path={}", sessionId, branchName, target);
             return WorktreeResult.ok(target, "已创建 worktree（新分支 " + branchName + "）");
@@ -122,7 +127,7 @@ public class WorktreeService {
             return WorktreeResult.fail("worktree 目录已存在: " + target);
         }
         GitResult r = runGit(workspacePath,
-                List.of("worktree", "add", target.toString(), branchName));
+                List.of("worktree", "add", target.toString(), branchName), GIT_ADD_TIMEOUT_SECONDS);
         if (r.exitCode() == 0) {
             log.info("已挂载会话 worktree: session={}, branch={}, path={}", sessionId, branchName, target);
             return WorktreeResult.ok(target, "已挂载 worktree（分支 " + branchName + "）");
@@ -182,6 +187,30 @@ public class WorktreeService {
         return name.isEmpty() ? null : name;
     }
 
+    /**
+     * 已被占用的分支（短名）→ 占用它的 worktree 路径。主工作区 checkout 的分支也在内
+     * （{@code git worktree list} 第一行恒为主工作区），detached HEAD 的 worktree 无
+     * branch 行、不计入。解析 {@code --porcelain} 稳定输出；失败返回空 Map——
+     * 降级含义是「不置灰」，创建时仍由 git already-checked-out 报错透传兜底。
+     */
+    public Map<String, String> listOccupiedBranches(Path workspacePath) {
+        GitResult r = runGit(workspacePath, List.of("worktree", "list", "--porcelain"));
+        if (r.exitCode() != 0) {
+            log.warn("列出 worktree 占用失败: {}", r.output());
+            return Map.of();
+        }
+        Map<String, String> occupied = new LinkedHashMap<>();
+        String currentWorktree = null;
+        for (String line : r.output().split("\\R")) {
+            if (line.startsWith("worktree ")) {
+                currentWorktree = line.substring("worktree ".length()).trim();
+            } else if (line.startsWith("branch refs/heads/") && currentWorktree != null) {
+                occupied.put(line.substring("branch refs/heads/".length()).trim(), currentWorktree);
+            }
+        }
+        return occupied;
+    }
+
     // ==================== 分支名 / 会话 ID 校验 ====================
 
     private static void validateBranchName(String name) {
@@ -200,6 +229,10 @@ public class WorktreeService {
     // ==================== 进程执行（三重教训版） ====================
 
     private GitResult runGit(Path cwd, List<String> args) {
+        return runGit(cwd, args, GIT_TIMEOUT_SECONDS);
+    }
+
+    private GitResult runGit(Path cwd, List<String> args, int timeoutSeconds) {
         List<String> cmd = new ArrayList<>(args.size() + 1);
         cmd.add("git");
         cmd.addAll(args);
@@ -215,11 +248,11 @@ public class WorktreeService {
             Process proc = pb.start();
             // 立即关闭 stdin：子进程收到 EOF，交互式命令不会干等输入
             proc.getOutputStream().close();
-            boolean exited = proc.waitFor(GIT_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+            boolean exited = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS);
             if (!exited) {
                 killProcessTree(proc);
                 return new GitResult(-1,
-                        "git 命令超时（" + GIT_TIMEOUT_SECONDS + "s）已强杀: " + String.join(" ", args));
+                        "git 命令超时（" + timeoutSeconds + "s）已强杀: " + String.join(" ", args));
             }
             String out = readQuietly(stdoutFile);
             String err = readQuietly(stderrFile);

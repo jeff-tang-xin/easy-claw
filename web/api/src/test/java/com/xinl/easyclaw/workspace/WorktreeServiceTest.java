@@ -12,6 +12,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -88,6 +89,22 @@ class WorktreeServiceTest {
         assertTrue(r.ok(), r.message());
         assertTrue(Files.isDirectory(r.path()));
         assertEquals("feat-z", service.currentBranch(r.path()));
+    }
+
+    @Test
+    @DisplayName("listOccupiedBranches：主工作区与已挂载分支计入，空闲分支不计入")
+    void listOccupiedBranches() throws Exception {
+        git(repoDir, "branch", "free-b");
+        WorktreeService.WorktreeResult r =
+                service.create(repoDir, "session-occ", "easyclaw/occ", null);
+        assertTrue(r.ok(), r.message());
+
+        Map<String, String> occupied = service.listOccupiedBranches(repoDir);
+        // @TempDir 给 8.3 短名（XINL~1.TAN）而 git porcelain 输出长路径名，
+        // Path.equals 按元素字符串比较会误判 —— 用 Files.isSameFile 比文件身份
+        assertTrue(Files.isSameFile(repoDir, Path.of(occupied.get("main"))), "主工作区 checkout 的分支应计入");
+        assertTrue(Files.isSameFile(r.path(), Path.of(occupied.get("easyclaw/occ"))), "已挂载分支应计入");
+        assertFalse(occupied.containsKey("free-b"), "未被任何 worktree checkout 的分支不应计入");
     }
 
     @Test

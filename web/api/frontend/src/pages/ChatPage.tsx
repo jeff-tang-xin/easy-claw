@@ -957,7 +957,7 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   // 新会话弹窗（会话↔worktree 挂钩，2026-09-14）：分支隔离选项
   const [showNewSession, setShowNewSession] = useState(false);
-  const [branchInfo, setBranchInfo] = useState<{ current: string | null; branches: string[] } | null>(null);
+  const [branchInfo, setBranchInfo] = useState<{ current: string | null; branches: string[]; occupiedBy?: Record<string, string> } | null>(null);
   const [nsTitle, setNsTitle] = useState('');
   const [nsMode, setNsMode] = useState<'none' | 'new' | 'existing'>('none');
   const [nsBranch, setNsBranch] = useState('');
@@ -1736,7 +1736,7 @@ export default function ChatPage() {
       loadHistory(workspaceId, sid);
     }
   };
-  // 打开新会话弹窗：首次打开时拉取分支清单（非 git 仓库返回空，隔离选项禁用）
+  // 打开新会话弹窗：每次打开都刷新分支清单（外部 git 操作会使快照漂移，曾致 attach 已删分支 400）
   const createSession = () => {
     if (!workspaceId) return;
     setNsTitle(`会话 ${sessions.length + 1}`);
@@ -1744,11 +1744,9 @@ export default function ChatPage() {
     setNsBranch('');
     setNsBase('');
     setShowNewSession(true);
-    if (!branchInfo) {
-      getJson<{ current: string | null; branches: string[] }>(`/api/workspaces/${workspaceId}/branches`)
-        .then(setBranchInfo)
-        .catch(() => setBranchInfo({ current: null, branches: [] }));
-    }
+    getJson<{ current: string | null; branches: string[]; occupiedBy?: Record<string, string> }>(`/api/workspaces/${workspaceId}/branches`)
+      .then(setBranchInfo)
+      .catch(() => setBranchInfo({ current: null, branches: [] }));
   };
 
   /** 新分支默认名：ASCII 短名（后端分支名白名单仅收 ASCII），时间戳底 36 进制保证唯一 */
@@ -2609,7 +2607,16 @@ export default function ChatPage() {
                   onChange={(e) => setNsBranch(e.target.value)}
                 >
                   <option value="">选择分支…</option>
-                  {(branchInfo?.branches || []).map((b) => <option key={b} value={b}>{b}</option>)}
+                  {(branchInfo?.branches || []).map((b) => {
+                    const occupied = branchInfo?.occupiedBy?.[b];
+                    const isCurrent = branchInfo?.current === b;
+                    // 已被 checkout 的分支（含主工作区当前分支）挂上必 400，前置置灰并标注
+                    return (
+                      <option key={b} value={b} disabled={!!occupied}>
+                        {b}{isCurrent ? '（当前分支）' : occupied ? '（已被占用）' : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
             )}

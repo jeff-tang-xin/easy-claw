@@ -84,7 +84,8 @@ public class WorkspaceController {
     }
 
     /** 分支清单响应：current 为当前分支（非 git 仓库等异常时为 null） */
-    public record BranchesResponse(String current, java.util.List<String> branches) {
+    public record BranchesResponse(String current, java.util.List<String> branches,
+                                   java.util.Map<String, String> occupiedBy) {
     }
 
     /** 会话不存在 → 404，而不是让调用方看到裸 500 */
@@ -257,7 +258,8 @@ public class WorkspaceController {
             throw new ApiExceptions.NotFoundException("Workspace 未找到: " + id);
         }
         return new BranchesResponse(worktreeService.currentBranch(ws.getPath()),
-                worktreeService.listBranches(ws.getPath()));
+                worktreeService.listBranches(ws.getPath()),
+                worktreeService.listOccupiedBranches(ws.getPath()));
     }
 
     @GetMapping("/{id}/permissions")
