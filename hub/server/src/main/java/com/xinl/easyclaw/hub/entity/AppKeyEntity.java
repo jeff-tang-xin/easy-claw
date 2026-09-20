@@ -45,4 +45,18 @@ public class AppKeyEntity extends BaseEntity {
 
     @Column(name = "revoked_at")
     private Instant revokedAt;
+
+    /**
+     * 逻辑模型别名 {@code hub_cloud} 的默认路由目标 provider；{@code null} = 未配置。
+     * 非空必须指向 active 且本 appkey 已绑定的 provider（应用层校验）。
+     */
+    @Column(name = "cloud_provider_id")
+    private Long cloudProviderId;
+
+    /**
+     * {@code hub_cloud} 路由目标的真实模型名；{@code cloudProviderId} 非空时必填，
+     * 且必须在该 provider 声明的 models 清单内（应用层校验）；{@code null} provider 时固定空串。
+     */
+    @Column(name = "cloud_model_name", nullable = false, length = 64)
+    private String cloudModelName = "";
 }

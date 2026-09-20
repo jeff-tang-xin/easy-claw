@@ -5,6 +5,7 @@ import com.xinl.easyclaw.hub.common.AuditModule;
 import com.xinl.easyclaw.hub.contract.appkey.AppKeyBindingDto;
 import com.xinl.easyclaw.hub.contract.appkey.AppKeyCreatedResponse;
 import com.xinl.easyclaw.hub.contract.appkey.AppKeyDto;
+import com.xinl.easyclaw.hub.contract.appkey.CloudRouteRequest;
 import com.xinl.easyclaw.hub.contract.appkey.BindingRequest;
 import com.xinl.easyclaw.hub.contract.appkey.CreateAppKeyRequest;
 import com.xinl.easyclaw.hub.contract.appkey.UpdateBindingsRequest;
@@ -88,6 +89,9 @@ public class AppKeyService {
         k.setCreatedBy(actorId);
         appKeys.save(k);
         List<AppKeyProviderBindingEntity> saved = saveBindings(k.getId(), normalizeBindings(orgId, req.bindings()));
+        if (req.cloudRoute() != null) {
+            applyCloudRoute(k, orgId, req.cloudRoute(), saved);
+        }
         auditService.record(AuditModule.APPKEY, "create_appkey", actorId, orgId, "app_key",
                 String.valueOf(k.getId()), "name=" + k.getName() + ",keyPrefix=" + k.getKeyPrefix(),
                 AuditModule.SUCCESS);
@@ -109,6 +113,7 @@ public class AppKeyService {
         k.setStatus("revoked");
         k.setRevokedAt(Instant.now());
         bindings.deleteByAppKeyId(keyId);
+        clearCloudRoute(k);
         appKeys.save(k);
         auditService.record(AuditModule.APPKEY, "revoke_appkey", actorId, orgId, "app_key",
                 String.valueOf(k.getId()), "keyPrefix=" + k.getKeyPrefix(), AuditModule.SUCCESS);
@@ -125,9 +130,45 @@ public class AppKeyService {
         List<BindingRequest> normalized = normalizeBindings(orgId, req.bindings());
         bindings.deleteByAppKeyId(keyId);
         List<AppKeyProviderBindingEntity> saved = saveBindings(keyId, normalized);
+        reconcileCloudRouteAfterBindingChange(k, saved);
         auditService.record(AuditModule.APPKEY, "update_appkey_bindings", actorId, orgId, "app_key",
                 String.valueOf(keyId), "bindings=" + normalized.size(), AuditModule.SUCCESS);
         return toDto(k, saved, providerMapOf(List.of(saved)));
+    }
+
+    /**
+     * 设置逻辑模型别名 {@code hub_cloud} 的默认路由。
+     * 已吊销 key 不可改；目标 provider+model 必须在该 appkey 的绑定模型面内。
+     */
+    @Transactional
+    public AppKeyDto updateCloudRoute(Long actorId, Long orgId, Long keyId, CloudRouteRequest req) {
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        AppKeyEntity k = requireOrgKey(orgId, keyId);
+        if (!"active".equals(k.getStatus())) {
+            throw ApiException.validation("appkey 已吊销，不能修改 hub_cloud 路由");
+        }
+        List<AppKeyProviderBindingEntity> current = bindings.findByAppKeyId(keyId);
+        applyCloudRoute(k, orgId, req, current);
+        Map<Long, LlmProviderEntity> providerMap = providerMapOf(List.of(current));
+        auditService.record(AuditModule.APPKEY, "update_appkey_cloud_route", actorId, orgId, "app_key",
+                String.valueOf(keyId), "cloudRoute=" + k.getCloudProviderId() + ":" + k.getCloudModelName(),
+                AuditModule.SUCCESS);
+        return toDto(k, current, providerMap);
+    }
+
+    /** 清除逻辑模型别名 {@code hub_cloud} 的默认路由（显式停用该 key 的云端别名），幂等。 */
+    @Transactional
+    public AppKeyDto clearCloudRouteConfig(Long actorId, Long orgId, Long keyId) {
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        AppKeyEntity k = requireOrgKey(orgId, keyId);
+        List<AppKeyProviderBindingEntity> current = bindings.findByAppKeyId(keyId);
+        if (k.getCloudProviderId() != null) {
+            clearCloudRoute(k);
+            appKeys.save(k);
+            auditService.record(AuditModule.APPKEY, "clear_appkey_cloud_route", actorId, orgId, "app_key",
+                    String.valueOf(keyId), "cloudRoute cleared", AuditModule.SUCCESS);
+        }
+        return toDto(k, current, providerMapOf(List.of(current)));
     }
 
     /** 取 key 并校验归属 org；不存在或跨 org 一律 404，不暴露存在性。 */
@@ -190,6 +231,65 @@ public class AppKeyService {
         return saved;
     }
 
+    /**
+     * 校验并落定 hub_cloud 路由：provider 必须存在、对 org 可见、active；modelName 非空且在 provider
+     * 声明模型清单；且目标 provider+model 必须落在已保存的绑定模型面内（精确绑定，或“全部模型”绑定
+     * 且模型在清单内）。调用方负责随后 appKeys.save（本方法只改内存实体）。
+     */
+    private void applyCloudRoute(AppKeyEntity k, Long orgId, CloudRouteRequest req,
+                                 List<AppKeyProviderBindingEntity> currentBindings) {
+        if (req == null || req.providerId() == null) {
+            throw ApiException.validation("hub_cloud 路由缺少 providerId");
+        }
+        String model = req.modelName() == null ? "" : req.modelName().trim();
+        if (model.isEmpty()) {
+            throw ApiException.validation("hub_cloud 路由必须指定具体模型（不支持“全部模型”）");
+        }
+        LlmProviderEntity p = providers.findById(req.providerId())
+                .orElseThrow(() -> ApiException.validation("provider 不存在：" + req.providerId()));
+        if (p.getOrgId() != null && !p.getOrgId().equals(orgId)) {
+            throw ApiException.validation("provider 不存在：" + req.providerId());
+        }
+        if (!"active".equals(p.getStatus())) {
+            throw ApiException.validation("provider 已禁用：" + p.getSlug());
+        }
+        if (!ProviderService.parseModels(p.getModels()).contains(model)) {
+            throw ApiException.validation("模型 " + model + " 不在 provider " + p.getSlug() + " 可用模型内");
+        }
+        boolean covered = currentBindings.stream().anyMatch(b ->
+                p.getId().equals(b.getProviderId())
+                        && (model.equals(b.getModelName())
+                            || (b.getModelName() == null || b.getModelName().isEmpty())));
+        if (!covered) {
+            throw ApiException.validation("hub_cloud 路由目标必须先加入该 appkey 的绑定模型面："
+                    + p.getSlug() + "/" + model);
+        }
+        k.setCloudProviderId(p.getId());
+        k.setCloudModelName(model);
+        appKeys.save(k);
+    }
+
+    /** 绑定全量替换后调和已配置路由：目标 provider+model 仍在新绑定面内则保留，否则清空（防悬空）。 */
+    private void reconcileCloudRouteAfterBindingChange(AppKeyEntity k,
+                                                       List<AppKeyProviderBindingEntity> newBindings) {
+        if (k.getCloudProviderId() == null) {
+            return;
+        }
+        boolean stillCovered = newBindings.stream().anyMatch(b ->
+                k.getCloudProviderId().equals(b.getProviderId())
+                        && (k.getCloudModelName().equals(b.getModelName())
+                            || (b.getModelName() == null || b.getModelName().isEmpty())));
+        if (!stillCovered) {
+            clearCloudRoute(k);
+        }
+        appKeys.save(k);
+    }
+
+    private static void clearCloudRoute(AppKeyEntity k) {
+        k.setCloudProviderId(null);
+        k.setCloudModelName("");
+    }
+
     /** 批量加载绑定涉及的 provider（不存在则缺席，展示层置 null 不炸）。 */
     private Map<Long, LlmProviderEntity> providerMapOf(Collection<List<AppKeyProviderBindingEntity>> grouped) {
         Set<Long> providerIds = new HashSet<>();
@@ -214,8 +314,15 @@ public class AppKeyService {
                             p == null ? null : p.getName(), b.getModelName());
                 })
                 .toList();
+        AppKeyBindingDto cloudRoute = null;
+        if (k.getCloudProviderId() != null) {
+            LlmProviderEntity cp = providerMap.get(k.getCloudProviderId());
+            cloudRoute = new AppKeyBindingDto(k.getCloudProviderId(), cp == null ? null : cp.getSlug(),
+                    cp == null ? null : cp.getName(), k.getCloudModelName());
+        }
         return new AppKeyDto(k.getId(), k.getOrgId(), k.getName(), k.getKeyPrefix(), k.getStatus(),
-                k.getCreatedBy(), ldt(k.getCreatedAt()), ldt(k.getLastUsedAt()), ldt(k.getRevokedAt()), bindingDtos);
+                k.getCreatedBy(), ldt(k.getCreatedAt()), ldt(k.getLastUsedAt()), ldt(k.getRevokedAt()),
+                bindingDtos, cloudRoute);
     }
 
     /** 新 key：eck- 前缀 + 16 字节随机 hex（32 字符），总长 36。 */

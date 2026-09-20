@@ -2,6 +2,7 @@ package com.xinl.easyclaw.hub.controller;
 
 import com.xinl.easyclaw.hub.contract.appkey.AppKeyCreatedResponse;
 import com.xinl.easyclaw.hub.contract.appkey.AppKeyDto;
+import com.xinl.easyclaw.hub.contract.appkey.CloudRouteRequest;
 import com.xinl.easyclaw.hub.contract.appkey.CreateAppKeyRequest;
 import com.xinl.easyclaw.hub.contract.appkey.UpdateBindingsRequest;
 import com.xinl.easyclaw.hub.security.CurrentUserHolder;
@@ -9,6 +10,7 @@ import com.xinl.easyclaw.hub.service.AppKeyService;
 import jakarta.validation.Valid;
 import java.util.List;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -52,5 +54,18 @@ public class AppKeyController {
     public AppKeyDto updateBindings(@PathVariable Long orgId, @PathVariable Long id,
                                     @Valid @RequestBody UpdateBindingsRequest req) {
         return appKeyService.updateBindings(CurrentUserHolder.requireUserId(), orgId, id, req);
+    }
+
+    /** 配置逻辑模型别名 hub_cloud 的默认路由（provider + 真实模型）。 */
+    @PutMapping("/{id}/cloud-route")
+    public AppKeyDto updateCloudRoute(@PathVariable Long orgId, @PathVariable Long id,
+                                      @Valid @RequestBody CloudRouteRequest req) {
+        return appKeyService.updateCloudRoute(CurrentUserHolder.requireUserId(), orgId, id, req);
+    }
+
+    /** 清除 hub_cloud 默认路由（停用该 key 的云端别名），幂等。 */
+    @DeleteMapping("/{id}/cloud-route")
+    public AppKeyDto clearCloudRoute(@PathVariable Long orgId, @PathVariable Long id) {
+        return appKeyService.clearCloudRouteConfig(CurrentUserHolder.requireUserId(), orgId, id);
     }
 }

@@ -292,6 +292,19 @@ export const revokeAppKey = (orgId: number, id: number) =>
 export const updateAppKeyBindings = (orgId: number, id: number, bindings: AppKeyBindingInput[]) =>
   request<AppKeyDto>('PUT', `/api/orgs/${orgId}/appkeys/${id}/bindings`, {bindings});
 
+/** 配置 hub_cloud 别名默认路由：modelName 必填且为具体模型（不支持“全部模型”） */
+export const updateAppKeyCloudRoute = (
+  orgId: number,
+  id: number,
+  providerId: number,
+  modelName: string,
+) =>
+  request<AppKeyDto>('PUT', `/api/orgs/${orgId}/appkeys/${id}/cloud-route`, {providerId, modelName});
+
+/** 清除 hub_cloud 别名默认路由（停用别名），幂等 */
+export const clearAppKeyCloudRoute = (orgId: number, id: number) =>
+  request<AppKeyDto>('DELETE', `/api/orgs/${orgId}/appkeys/${id}/cloud-route`);
+
 // ============ LLM 网关（详单/用量，仅 owner/admin 可调通，服务端强制校验） ============
 /** 详单分页查询：status/model/keyPrefix 过滤可组合，page 从 0 开始 */
 export const fetchGatewayLogs = (

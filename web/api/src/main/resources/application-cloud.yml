@@ -5,17 +5,19 @@
 # 区别只在值的供给方：
 #   local —— 由 application.yml 的 providers 表 + 环境变量直接供给
 #   cloud —— 由本文件两个特例输入派生供给：
-#            hub-url + app-key ──物化──> providers 表中名为 cloud 的普通条目
+#            hub-url + app-key ──物化──> providers 表中名为 openai 的普通条目
 #                                        （base-url = <hub-url>/api/gateway/v1，api-key = app-key）
-#            模型面 / 组织 / 权限由 bootstrap 快照动态供给（启动与设置热重载时拉取）
+#            模型面 / 组织 / 权限由 bootstrap 快照动态供给（仅启动时拉取，见 CloudBootstrapService）
 # 物化之后，注册、解析、model-limits 三级回退与本地 provider 走完全相同的代码路径。
 #
 # 激活方式（二选一）：
 #   1) 启动参数 --spring.profiles.active=dev-sqlite,cloud
 #   2) 运行层 ~/.easyClaw/application.yml 的 spring.profiles.active 改为 dev-sqlite,cloud
 #
-# 使用：模型 ID 形如 cloud:<模型名>（快照模型面内的名字），可填在
+# 使用：模型 ID 形如 openai:<模型名>（快照模型面内的名字），可填在
 # agentscope.model.default-model 或 agents.<id>.model-name 等任意模型位。
+# 注：此处刻意复用 openai 这个 provider key——cloud 对框架而言只是一个 OpenAI 兼容
+# 供给方（base-url 指向 hub 网关），注册/解析/三级回退与本地 provider 完全同路径。
 # 快照不可用 = cloud 条目缺席，cloud:xxx 与「未配置的 provider」行为一致（回退默认）。
 # app-key 是密钥：本文件随源码入库只留占位符，真实值走环境变量 HUB_APPKEY
 # 或运行层 ~/.easyClaw/application.yml 覆盖，绝不入库。
@@ -26,7 +28,13 @@ agentscope:
     openai:
       api-key: ${cloud.app-key}
       base-url: ${cloud.hub-url:}/api/gateway/v1
-      model-name: ark-code-latest
+      # 逻辑别名：真实 provider+model 由 hub 按 appkey 的 hub_cloud 路由配置决定
+      model-name: hub_cloud
+  model:
+    # web 侧不感知 hub 上 appkey 实际绑定的真实云端模型，统一下发 16384 可能超过
+    # 低上限模型并触发 400。显式覆盖 application.yml 中由顶层变量派生的全局兜底值：
+    # OpenAI 上游走服务端默认值，hub 的 Anthropic 转换器会在缺失时补 4096。
+    max-tokens: null
 cloud:
   hub-url: http://localhost:18081
   app-key: ${HUB_APPKEY:}
@@ -34,5 +42,4 @@ model:
   provider: openai
   temperature: 0.3
   stream: true
-  max-tokens: 16384
   parallel-tool-calls: true

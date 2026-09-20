@@ -1,13 +1,16 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
+  clearAppKeyCloudRoute,
   createAppKey,
   listAppKeys,
   listProviders,
   revokeAppKey,
   updateAppKeyBindings,
+  updateAppKeyCloudRoute,
   type AppKeyBindingInput,
 } from '../api';
 import Modal from '../components/Modal';
+import AccessGuide from '../components/AccessGuide';
 import type {AppKeyCreatedResponse, AppKeyDto, ProviderDto} from '../types';
 
 const STATUS_LABELS: Record<string, string> = {
@@ -139,6 +142,13 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
   const [copyError, setCopyError] = useState('');
   // 编辑绑定弹窗
   const [editTarget, setEditTarget] = useState<AppKeyDto | null>(null);
+  // 编辑 hub_cloud 路由弹窗：cloudProvider='' 表示未选择
+  const [cloudTarget, setCloudTarget] = useState<AppKeyDto | null>(null);
+  // 只读「接入方式」弹窗：给已创建的 key 复看用法（明文密钥不再可得，用占位符）
+  const [guideTarget, setGuideTarget] = useState<AppKeyDto | null>(null);
+  const [cloudProvider, setCloudProvider] = useState('');
+  const [cloudModel, setCloudModel] = useState('');
+  const [cloudClearing, setCloudClearing] = useState(false);
   const [name, setName] = useState('');
   const [rows, setRows] = useState<BindingRow[]>([]);
   const [formError, setFormError] = useState('');
@@ -224,6 +234,70 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
     }
   };
 
+  /** 打开 hub_cloud 路由弹窗：用已保存绑定面作为候选，回显当前路由 */
+  const openCloudRoute = (k: AppKeyDto) => {
+    if (k.bindings.length === 0) return;
+    setCloudTarget(k);
+    const firstSpecific = k.bindings.find((b) => b.modelName);
+    setCloudProvider(k.cloudRoute ? String(k.cloudRoute.providerId) : String(firstSpecific?.providerId ?? ''));
+    setCloudModel(k.cloudRoute?.modelName ?? '');
+    setFormError('');
+  };
+
+  /** 候选（providerId -> 具体模型列表），仅含绑定了具体模型的 provider */
+  const cloudCandidates = useMemo(() => {
+    if (!cloudTarget) return [];
+    const byProvider = new Map<number, {slug: string | null; name: string | null; models: string[]}>();
+    for (const b of cloudTarget.bindings) {
+      if (!b.modelName) continue; // “全部模型”绑定不能作为别名的确定性落点
+      const entry = byProvider.get(b.providerId) ?? {slug: b.providerSlug, name: b.providerName, models: []};
+      entry.models.push(b.modelName);
+      byProvider.set(b.providerId, entry);
+    }
+    return [...byProvider.entries()].map(([providerId, v]) => ({providerId, ...v}));
+  }, [cloudTarget]);
+
+  const submitCloudRoute = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (orgId === null || cloudTarget === null) return;
+    const providerId = Number(cloudProvider);
+    const model = cloudModel.trim();
+    if (!providerId) {
+      setFormError('请选择 Provider');
+      return;
+    }
+    if (!model) {
+      setFormError('请选择具体模型（hub_cloud 不支持路由到“全部模型”）');
+      return;
+    }
+    setBusy(true);
+    try {
+      await updateAppKeyCloudRoute(orgId, cloudTarget.id, providerId, model);
+      setCloudTarget(null);
+      await reload();
+    } catch (err2) {
+      setFormError(err2 instanceof Error ? err2.message : '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const clearCloudRoute = async () => {
+    if (orgId === null || cloudTarget === null) return;
+    if (!window.confirm('确定停用该 AppKey 的 hub_cloud 别名？停用后以 hub_cloud 为模型名的请求将被拒绝。')) return;
+    setCloudClearing(true);
+    setFormError('');
+    try {
+      await clearAppKeyCloudRoute(orgId, cloudTarget.id);
+      setCloudTarget(null);
+      await reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '清除失败');
+    } finally {
+      setCloudClearing(false);
+    }
+  };
+
   const revoke = async (k: AppKeyDto) => {
     if (orgId === null) return;
     if (!window.confirm(`确定吊销 AppKey「${k.name}」（${k.keyPrefix}…）？吊销后立即失效且不可恢复。`)) return;
@@ -300,6 +374,7 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
                 <th>密钥前缀</th>
                 <th>状态</th>
                 <th>绑定</th>
+                <th>hub_cloud 路由</th>
                 <th>创建时间</th>
                 <th>操作</th>
               </tr>
@@ -333,6 +408,19 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
                           </span>
                         ))}
                   </td>
+                  <td>
+                    {k.cloudRoute ? (
+                      <span
+                        className="badge role-member"
+                        title={k.cloudRoute.providerName ?? undefined}
+                        style={{fontFamily: "ui-monospace, 'Cascadia Code', Consolas, monospace"}}
+                      >
+                        {k.cloudRoute.providerSlug ?? `#${k.cloudRoute.providerId}`}:{k.cloudRoute.modelName}
+                      </span>
+                    ) : (
+                      <span className="muted">未配置</span>
+                    )}
+                  </td>
                   <td>{formatTime(k.createdAt)}</td>
                   <td style={{whiteSpace: 'nowrap'}}>
                     {k.status === 'active' ? (
@@ -343,6 +431,27 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
                           onClick={() => openEditBindings(k)}
                         >
                           编辑绑定
+                        </button>{' '}
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => openCloudRoute(k)}
+                          disabled={!k.bindings.some((b) => b.modelName)}
+                          title={
+                            k.bindings.some((b) => b.modelName)
+                              ? '配置逻辑别名 hub_cloud 的默认云端路由'
+                              : '需先在绑定中包含至少一个具体模型'
+                          }
+                        >
+                          云端路由
+                        </button>{' '}
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setGuideTarget(k)}
+                          title="查看用该 AppKey 接入网关的配置示例"
+                        >
+                          接入方式
                         </button>{' '}
                         <button
                           type="button"
@@ -390,6 +499,15 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
               </div>
               <div className="form-error">此密钥仅显示这一次，请立即保存；关闭后将无法再次查看。</div>
               {copyError && <div className="form-error">{copyError}</div>}
+              <AccessGuide
+                plainKey={created.plainKey}
+                model={created.appKey.cloudRoute ? 'hub_cloud' : (created.appKey.bindings.find((b) => b.modelName)?.modelName ?? '<真实模型名>')}
+                modelNote={
+                  created.appKey.cloudRoute
+                    ? `model 填 hub_cloud 即可，真实模型由 hub 按该 key 的云端路由解析；也可填绑定面内的真实模型名。`
+                    : `model 填该 key 绑定面内的真实模型名。若要固定用逻辑别名 hub_cloud，请先点「云端路由」为该 key 配置默认云端路由。`
+                }
+              />
               <div className="modal-actions">
                 <button
                   type="button"
@@ -456,6 +574,112 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {cloudTarget && (
+        <Modal
+          title={`hub_cloud 路由：${cloudTarget.name}`}
+          subtitle={`密钥前缀 ${cloudTarget.keyPrefix}… · 逻辑模型别名 hub_cloud 解析到此 key 绑定面内的一个具体模型`}
+          onClose={() => setCloudTarget(null)}
+          width={560}
+        >
+          {cloudCandidates.length === 0 ? (
+            <div className="empty-state">
+              <h3>没有可路由的具体模型</h3>
+              <p>请先在「编辑绑定」中为该 AppKey 绑定至少一个具体模型（不支持“全部模型”作为别名落点）。</p>
+            </div>
+          ) : (
+            <>
+            <form className="modal-form" onSubmit={(e) => void submitCloudRoute(e)}>
+              <label>
+                Provider
+                <select
+                  value={cloudProvider}
+                  onChange={(e) => {
+                    setCloudProvider(e.target.value);
+                    setCloudModel('');
+                  }}
+                >
+                  {cloudCandidates.map((c) => (
+                    <option key={c.providerId} value={c.providerId}>
+                      {c.name ?? `Provider#${c.providerId}`}（{c.slug ?? `#${c.providerId}`}）
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                真实模型<span className="field-hint">请求体中的 hub_cloud 会被改写成此模型名后转发</span>
+                <select value={cloudModel} onChange={(e) => setCloudModel(e.target.value)}>
+                  <option value="">请选择模型…</option>
+                  {(cloudCandidates.find((c) => c.providerId === Number(cloudProvider))?.models ?? []).map((m) => (
+                    <option key={m} value={m}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {formError && <div className="form-error">{formError}</div>}
+              <div className="modal-actions">
+                {cloudTarget.cloudRoute && (
+                  <button
+                    type="button"
+                    className="btn btn-danger"
+                    onClick={() => void clearCloudRoute()}
+                    disabled={busy || cloudClearing}
+                    style={{marginRight: 'auto'}}
+                  >
+                    {cloudClearing ? '停用中…' : '停用别名'}
+                  </button>
+                )}
+                <button type="button" className="btn btn-ghost" onClick={() => setCloudTarget(null)}>
+                  取消
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={busy}>
+                  {busy ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </form>
+            <AccessGuide
+              collapsible
+              plainKey={null}
+              model={cloudTarget.cloudRoute ? 'hub_cloud' : '<真实模型名>'}
+              modelNote={
+                cloudTarget.cloudRoute
+                  ? '已配置路由：model 填 hub_cloud，hub 会改写为上方选定的真实模型后转发；也可继续直接填绑定面内的真实模型名。'
+                  : '保存后 model 即可填 hub_cloud（hub 按此处配置改写为真实模型）；未保存前 hub_cloud 不可用。'
+              }
+            />
+            </>
+          )}
+        </Modal>
+      )}
+
+      {guideTarget && (
+        <Modal
+          title={`接入方式：${guideTarget.name}`}
+          subtitle={`密钥前缀 ${guideTarget.keyPrefix}… · 明文密钥仅在创建时显示一次`}
+          onClose={() => setGuideTarget(null)}
+          width={620}
+        >
+          <AccessGuide
+            plainKey={null}
+            model={
+              guideTarget.cloudRoute
+                ? 'hub_cloud'
+                : (guideTarget.bindings.find((b) => b.modelName)?.modelName ?? '<真实模型名>')
+            }
+            modelNote={
+              guideTarget.cloudRoute
+                ? '该 key 已配置 hub_cloud 路由：model 填 hub_cloud 即可，真实模型由 hub 按路由改写；也可填绑定面内的真实模型名。'
+                : '该 key 尚未配置 hub_cloud 路由：model 请填绑定面内的真实模型名；如需固定用 hub_cloud，请先点「云端路由」配置。'
+            }
+          />
+          <div className="modal-actions">
+            <button type="button" className="btn btn-primary" onClick={() => setGuideTarget(null)}>
+              关闭
+            </button>
+          </div>
         </Modal>
       )}
     </div>

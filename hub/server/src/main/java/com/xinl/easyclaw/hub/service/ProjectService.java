@@ -197,7 +197,8 @@ public class ProjectService {
         }
     }
 
-    private static boolean canSee(ProjectEntity p, Long requesterId, boolean privileged) {
+    /** 可见性判定：特权（owner/admin）全见；team/public 成员可见；private 仅创建者。供工作区等按 project 框定可见性的模块复用。 */
+    public static boolean canSee(ProjectEntity p, Long requesterId, boolean privileged) {
         return privileged
                 || "team".equals(p.getVisibility())
                 || "public".equals(p.getVisibility())

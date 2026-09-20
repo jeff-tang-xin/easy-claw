@@ -6,12 +6,16 @@ import com.xinl.easyclaw.hub.contract.spoke.SpokeBootstrapResponse;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeBootstrapResponse.SpokeAppKeyInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeBootstrapResponse.SpokeOrgInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeBootstrapResponse.SpokeProviderInfo;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeMenuNode;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeWorkspaceInfo;
 import com.xinl.easyclaw.hub.entity.AppKeyProviderBindingEntity;
 import com.xinl.easyclaw.hub.entity.LlmProviderEntity;
 import com.xinl.easyclaw.hub.entity.OrganizationEntity;
+import com.xinl.easyclaw.hub.entity.WorkspaceEntity;
 import com.xinl.easyclaw.hub.repository.AppKeyProviderBindingRepository;
 import com.xinl.easyclaw.hub.repository.LlmProviderRepository;
 import com.xinl.easyclaw.hub.repository.OrganizationRepository;
+import com.xinl.easyclaw.hub.repository.WorkspaceRepository;
 import com.xinl.easyclaw.hub.security.AppKeyContext;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -33,12 +37,16 @@ public class SpokeService {
     private final OrganizationRepository orgs;
     private final AppKeyProviderBindingRepository bindings;
     private final LlmProviderRepository providers;
+    private final WorkspaceRepository workspaces;
+    private final MenuService menuService;
 
     public SpokeService(OrganizationRepository orgs, AppKeyProviderBindingRepository bindings,
-                        LlmProviderRepository providers) {
+                        LlmProviderRepository providers, WorkspaceRepository workspaces, MenuService menuService) {
         this.orgs = orgs;
         this.bindings = bindings;
         this.providers = providers;
+        this.workspaces = workspaces;
+        this.menuService = menuService;
     }
 
     /**
@@ -79,5 +87,34 @@ public class SpokeService {
                 new SpokeOrgInfo(org.getId(), org.getName(), org.getSlug()),
                 providerInfos,
                 SpokePermissions.ALL);
+    }
+
+    /**
+     * 下发组织下的工作区及其公共菜单树（GET /api/spoke/workspaces）：仅 active 工作区；
+     * 菜单与组织无关、对所有 spoke 通用，hub 只下发配置不做 per-spoke 控制，可见性由 spoke 本地裁剪。
+     */
+    @Transactional(readOnly = true)
+    public List<SpokeWorkspaceInfo> distributeWorkspaces(AppKeyContext ctx) {
+        List<SpokeWorkspaceInfo> out = new ArrayList<>();
+        for (WorkspaceEntity w : workspaces.findByOrgIdAndStatus(ctx.orgId(), "active")) {
+            out.add(toWorkspaceInfo(w));
+        }
+        return out;
+    }
+
+    /** 下发单个工作区的菜单树（GET /api/spoke/workspaces/{id}/menu）：非本组织工作区→404，避免跨组织探测。 */
+    @Transactional(readOnly = true)
+    public List<SpokeMenuNode> distributeMenu(AppKeyContext ctx, Long workspaceId) {
+        WorkspaceEntity w = workspaces.findById(workspaceId)
+                .orElseThrow(() -> ApiException.notFound("工作区不存在"));
+        if (!w.getOrgId().equals(ctx.orgId())) {
+            throw ApiException.notFound("工作区不存在");
+        }
+        return menuService.buildTree(workspaceId);
+    }
+
+    private SpokeWorkspaceInfo toWorkspaceInfo(WorkspaceEntity w) {
+        return new SpokeWorkspaceInfo(w.getId(), w.getProjectId(), w.getOrgId(), w.getName(),
+                menuService.buildTree(w.getId()));
     }
 }

@@ -5,9 +5,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.xinl.easyclaw.hub.entity.AppKeyProviderBindingEntity;
+import com.xinl.easyclaw.hub.entity.AppKeyEntity;
 import com.xinl.easyclaw.hub.entity.GatewayLogEntity;
 import com.xinl.easyclaw.hub.entity.LlmProviderEntity;
 import com.xinl.easyclaw.hub.repository.AppKeyProviderBindingRepository;
+import com.xinl.easyclaw.hub.repository.AppKeyRepository;
 import com.xinl.easyclaw.hub.repository.LlmProviderRepository;
 import com.xinl.easyclaw.hub.security.AppKeyContext;
 import com.xinl.easyclaw.hub.service.CryptoService;
@@ -38,7 +40,14 @@ public class GatewayService {
 
     private static final Logger log = LoggerFactory.getLogger(GatewayService.class);
 
+    /**
+     * 逻辑模型别名：spoke（web 云端模式）恒定发送 {@code hub_cloud}，hub 按 appkey 配置的
+     * cloudProviderId/cloudModelName 解析到唯一真实 provider+model，再在转发前改写请求体 model。
+     */
+    public static final String HUB_CLOUD_MODEL = "hub_cloud";
+
     private final AppKeyProviderBindingRepository bindings;
+    private final AppKeyRepository appKeys;
     private final LlmProviderRepository providers;
     private final CryptoService cryptoService;
     private final UpstreamClient upstream;
@@ -46,11 +55,13 @@ public class GatewayService {
     private final GatewayLogWriter logWriter;
     private final ObjectMapper om;
 
-    public GatewayService(AppKeyProviderBindingRepository bindings, LlmProviderRepository providers,
+    public GatewayService(AppKeyProviderBindingRepository bindings, AppKeyRepository appKeys,
+                          LlmProviderRepository providers,
                           CryptoService cryptoService, UpstreamClient upstream,
                           AnthropicTranslator anthropicTranslator, GatewayLogWriter logWriter,
                           ObjectMapper om) {
         this.bindings = bindings;
+        this.appKeys = appKeys;
         this.providers = providers;
         this.cryptoService = cryptoService;
         this.upstream = upstream;
@@ -75,23 +86,28 @@ public class GatewayService {
         GatewayLogEntity logEntity = newLog(ctx, clientIp, rawBody);
         try {
             JsonNode request = parseRequest(rawBody);
-            String model = request.path("model").asText("");
-            if (model.isBlank()) {
+            String reqModel = request.path("model").asText("");
+            if (reqModel.isBlank()) {
                 throw new GatewayException(400, "缺少 model 字段", "invalid_request_error", "missing_model");
             }
             boolean stream = request.path("stream").asBoolean(false);
-            logEntity.setModel(model);
             logEntity.setStream(stream);
+            // 先记请求模型名：路由失败时详单仍是客户端实际所发（与重构前行为一致）
+            logEntity.setModel(reqModel);
 
-            LlmProviderEntity provider = route(ctx, model);
-            logEntity.setProviderId(provider.getId());
-            logEntity.setProviderSlug(provider.getSlug());
-            logEntity.setApiType(provider.getApiType());
-            String apiKey = cryptoService.decrypt(provider.getApiKeyCiphertext());
+            RoutePlan plan = route(ctx, reqModel);
+            String effectiveModel = plan.effectiveModel();
+            // hub_cloud 别名场景：成功路由的详单改记真实生效模型
+            logEntity.setModel(effectiveModel);
+            logEntity.setProviderId(plan.provider().getId());
+            logEntity.setProviderSlug(plan.provider().getSlug());
+            logEntity.setApiType(plan.provider().getApiType());
+            String apiKey = cryptoService.decrypt(plan.provider().getApiKeyCiphertext());
 
-            return "anthropic".equals(provider.getApiType())
-                    ? forwardAnthropic(logEntity, request, model, stream, provider, apiKey, startNanos)
-                    : forwardOpenAi(logEntity, rawBody, stream, provider, apiKey, startNanos);
+            return "anthropic".equals(plan.provider().getApiType())
+                    ? forwardAnthropic(logEntity, request, effectiveModel, stream, plan.provider(), apiKey,
+                            startNanos)
+                    : forwardOpenAi(logEntity, rawBody, plan, stream, plan.provider(), apiKey, startNanos);
         } catch (GatewayException e) {
             logEntity.setStatus("error");
             logEntity.setHttpStatus(e.status());
@@ -117,11 +133,53 @@ public class GatewayService {
     }
 
     /**
-     * 路由：精确绑定（modelName=model）优先，其次全模型绑定（modelName=''，要求 model 在 provider 清单内）；
-     * 同优先级取绑定 id 最小者。provider 必须 active。
+     * 路由规划：provider + 真实生效模型。
+     * <ul>
+     *   <li>逻辑别名 {@link #HUB_CLOUD_MODEL}：按 appkey 自身配置的 cloudProviderId/cloudModelName
+     *       解析到唯一真实 provider+model（未配置 → 404）。</li>
+     *   <li>其它模型名：走绑定面路由——精确绑定优先，其次“全部模型”绑定（要求模型在 provider 清单内）。</li>
+     * </ul>
+     * provider 必须 active；hub_cloud 另复核其 cloudModelName 仍在绑定面内（配置后绑定可能被改）。
      */
-    private LlmProviderEntity route(AppKeyContext ctx, String model) {
-        List<AppKeyProviderBindingEntity> bindingList = bindings.findByAppKeyId(ctx.appKeyId());
+    private RoutePlan route(AppKeyContext ctx, String reqModel) {
+        if (HUB_CLOUD_MODEL.equals(reqModel)) {
+            return resolveCloudRoute(ctx);
+        }
+        LlmProviderEntity provider = resolveByBinding(ctx.appKeyId(), reqModel);
+        return new RoutePlan(provider, reqModel, false);
+    }
+
+    /** hub_cloud 别名路由：取 appkey 配置，校验 active + 仍在绑定面内。 */
+    private RoutePlan resolveCloudRoute(AppKeyContext ctx) {
+        AppKeyEntity key = appKeys.findById(ctx.appKeyId()).orElseThrow(() ->
+                new GatewayException(401, "appkey 不存在", "authentication_error", "invalid_api_key"));
+        Long pid = key.getCloudProviderId();
+        String realModel = key.getCloudModelName();
+        if (pid == null || realModel == null || realModel.isBlank()) {
+            throw new GatewayException(404, "该 appkey 未配置 hub_cloud 路由",
+                    "invalid_request_error", "cloud_route_not_configured");
+        }
+        LlmProviderEntity provider = providers.findById(pid).orElseThrow(() ->
+                new GatewayException(404, "hub_cloud 路由的 provider 已被删除",
+                        "invalid_request_error", "cloud_route_not_configured"));
+        if (!"active".equals(provider.getStatus())) {
+            throw new GatewayException(404, "hub_cloud 路由的 provider 已禁用：" + provider.getSlug(),
+                    "invalid_request_error", "cloud_route_not_configured");
+        }
+        if (!ProviderService.parseModels(provider.getModels()).contains(realModel)) {
+            throw new GatewayException(404, "hub_cloud 路由的模型已不在 provider 可用清单：" + realModel,
+                    "invalid_request_error", "cloud_route_not_configured");
+        }
+        if (!bindingCovers(ctx.appKeyId(), pid, realModel)) {
+            throw new GatewayException(404, "hub_cloud 路由目标已不在 appkey 绑定模型面内",
+                    "invalid_request_error", "cloud_route_not_configured");
+        }
+        return new RoutePlan(provider, realModel, true);
+    }
+
+    /** 绑定面路由：精确绑定（modelName=model）优先，其次全模型绑定（modelName='' 且模型在 provider 清单）。 */
+    private LlmProviderEntity resolveByBinding(Long appKeyId, String model) {
+        List<AppKeyProviderBindingEntity> bindingList = bindings.findByAppKeyId(appKeyId);
         if (bindingList.isEmpty()) {
             throw new GatewayException(403, "appkey 未绑定任何 provider", "invalid_request_error", "no_binding");
         }
@@ -148,21 +206,36 @@ public class GatewayService {
         throw new GatewayException(404, "模型不可用或未绑定：" + model, "invalid_request_error", "model_not_found");
     }
 
+    /** 判定指定 provider+model 是否仍在 appkey 绑定面内（精确绑定，或“全部模型”绑定）。 */
+    private boolean bindingCovers(Long appKeyId, Long providerId, String model) {
+        return bindings.findByAppKeyId(appKeyId).stream()
+                .filter(b -> providerId.equals(b.getProviderId()))
+                .anyMatch(b -> model.equals(b.getModelName())
+                        || (b.getModelName() == null || b.getModelName().isEmpty()));
+    }
+
+    /** 路由结果：目标 provider + 真实生效模型 + 是否来自 hub_cloud 别名（决定是否改写请求体 model）。 */
+    private record RoutePlan(LlmProviderEntity provider, String effectiveModel, boolean cloudAlias) {
+    }
+
     // ==================== openai 兼容透传 ====================
 
-    private GatewayOutcome forwardOpenAi(GatewayLogEntity logEntity, byte[] rawBody, boolean stream,
-                                         LlmProviderEntity provider, String apiKey, long startNanos) {
+    private GatewayOutcome forwardOpenAi(GatewayLogEntity logEntity, byte[] rawBody, RoutePlan plan,
+                                         boolean stream, LlmProviderEntity provider, String apiKey,
+                                         long startNanos) {
         String url = joinUrl(provider.getBaseUrl(), "/chat/completions");
         Map<String, String> headers = Map.of("Authorization", "Bearer " + apiKey);
+        // hub_cloud 别名：上游看到的必须是真实模型名，转发前重写字节体里的 model。
+        byte[] outBody = plan.cloudAlias() ? rewriteOpenAiModel(rawBody, plan.effectiveModel()) : rawBody;
         if (!stream) {
-            UpstreamClient.UpstreamFull resp = upstream.post(url, headers, rawBody);
+            UpstreamClient.UpstreamFull resp = upstream.post(url, headers, outBody);
             boolean ok = resp.status() >= 200 && resp.status() < 300;
             String bodyStr = new String(resp.body(), StandardCharsets.UTF_8);
             fillLog(logEntity, resp.status(), ok, bodyStr, ok ? null : "上游返回 " + resp.status(), startNanos);
             logWriter.write(logEntity);
             return jsonOutcome(resp.status(), bodyStr);
         }
-        UpstreamClient.UpstreamResponse resp = upstream.postStream(url, headers, rawBody);
+        UpstreamClient.UpstreamResponse resp = upstream.postStream(url, headers, outBody);
         if (resp.status() < 200 || resp.status() >= 300) {
             String errBody = readAllQuietly(resp);
             fillLog(logEntity, resp.status(), false, errBody, "上游返回 " + resp.status(), startNanos);
@@ -170,6 +243,22 @@ public class GatewayService {
             return jsonOutcome(resp.status(), errBody);
         }
         return new GatewayOutcome.Stream(sseBody(logEntity, resp, null, startNanos));
+    }
+
+    /** 把 OpenAI 形态请求体里的 model 改写为真实模型名（仅 hub_cloud 别名场景），解析失败返回 400。 */
+    private byte[] rewriteOpenAiModel(byte[] rawBody, String effectiveModel) {
+        try {
+            JsonNode node = om.readTree(rawBody);
+            if (!node.isObject()) {
+                throw new GatewayException(400, "请求体必须是 JSON 对象", "invalid_request_error", "invalid_json");
+            }
+            ((ObjectNode) node).put("model", effectiveModel);
+            return om.writeValueAsBytes(node);
+        } catch (GatewayException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new GatewayException(400, "请求体不是合法 JSON", "invalid_request_error", "invalid_json");
+        }
     }
 
     // ==================== anthropic 转换转发 ====================
@@ -181,6 +270,8 @@ public class GatewayService {
         String url = base.endsWith("/v1") ? base + "/messages" : base + "/v1/messages";
         byte[] body;
         try {
+            // hub_cloud 别名场景下 request.model 仍是逻辑别名；Anthropic 上游必须收到真实模型名。
+            ((ObjectNode) request).put("model", model);
             body = om.writeValueAsBytes(anthropicTranslator.toAnthropicRequest(request));
         } catch (Exception e) {
             throw new GatewayException(400, "请求转换失败：" + e.getMessage(), "invalid_request_error",

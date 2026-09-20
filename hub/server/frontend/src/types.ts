@@ -141,6 +141,8 @@ export interface AppKeyDto {
   lastUsedAt: string | null;
   revokedAt: string | null;
   bindings: AppKeyBindingDto[];
+  /** 逻辑模型别名 hub_cloud 的默认路由落点；未配置时为 null */
+  cloudRoute: AppKeyBindingDto | null;
 }
 
 /** 创建 AppKey 响应：plainKey 仅此一次返回，必须立即保存 */

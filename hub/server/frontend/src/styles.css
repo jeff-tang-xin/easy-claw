@@ -454,6 +454,38 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
   font-size: 0.8em; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
 }
 
+/* ============ AppKey 接入指引（AccessGuide） ============ */
+.access-guide {
+  margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--panel); padding: 12px 14px;
+}
+.access-guide-collapsible { padding: 0; }
+.access-guide-collapsible > summary {
+  cursor: pointer; padding: 11px 14px; list-style: none;
+}
+.access-guide-collapsible > summary::-webkit-details-marker { display: none; }
+.access-guide-collapsible > summary::before { content: '▸ '; color: var(--text-tertiary); }
+.access-guide-collapsible[open] > summary::before { content: '▾ '; }
+.access-guide-collapsible > .guide-body { padding: 0 14px 14px; }
+.access-guide-title { margin: 0 0 6px; font-size: 0.92em; color: var(--text-secondary); }
+.guide-facts { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-bottom: 6px; }
+.guide-fact { display: flex; flex-direction: column; gap: 2px; font-size: 0.82em; }
+.guide-fact-label { color: var(--text-tertiary); }
+.guide-fact-val {
+  font-family: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border);
+  border-radius: var(--radius-sm); padding: 2px 6px; word-break: break-all;
+}
+.guide-model-note { margin: 2px 0 0; font-size: 0.82em; color: var(--text-tertiary); }
+.guide-warn {
+  margin: 8px 0 0; font-size: 0.82em; color: #b45309; background: var(--warning-bg, #fef3c7);
+  border: 1px solid #fde68a; border-radius: 8px; padding: 6px 10px;
+}
+.guide-tabs { display: flex; gap: 4px; margin: 12px 0 8px; flex-wrap: wrap; }
+.guide-snippet { position: relative; }
+.guide-code { max-height: 220px; }
+.guide-copy { position: absolute; top: 8px; right: 8px; }
+
 /* ============ 项目空间（ProjectSpacePage） ============ */
 .project-space { max-width: 1100px; }
 .ps-breadcrumb { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 0.9em; }
