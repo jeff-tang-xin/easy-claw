@@ -50,6 +50,7 @@ import java.nio.file.Path;
 import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -505,6 +506,11 @@ public class AgentService {
                 log.warn("releaseSession dispose 异常: sessionId={}, err={}", sessionId, e.getMessage());
             }
         }
+        // 同步驱逐转录静态缓存（LOCKS/COUNTS）：否则非删除路径释放的会话仍会在
+        // SessionTranscriptStore 的两个静态 Map 中永久残留条目，长期运行只增不减。
+        // 此处会话已无活跃回合（releaseSessionIfIdle 与清扫均先判 isRunning），
+        // 驱逐安全；下次访问会自动重建锁并重新扫描计数。
+        SessionTranscriptStore.evictBySessionId(sessionId);
     }
 
     /** 记录会话活跃时间（清扫任务据此判定空闲） */
@@ -1393,6 +1399,10 @@ public class AgentService {
         private final Map<String, SubBuf> subagentBufs = new HashMap<>();
         private final Map<String, SubBuf> subagentThinkBufs = new HashMap<>();
         private long lastEmitAt = 0;
+        /** [stream-probe] 临时：上一个 reasoning delta 到达时刻，用于定位流式卡顿，定位后删除 */
+        private long lastReasoningNanos = 0L;
+        /** [stream-probe] 临时：reasoning delta 序号 */
+        private int reasoningSeq = 0;
         private final Consumer<StreamEvent> emitter;
 
         /**
@@ -1428,6 +1438,17 @@ public class AgentService {
         }
 
         void onReasoning(String delta) {
+            // [stream-probe] 临时：应用层收到 reasoning delta 的间隔，定位后删除
+            long nowNanos = System.nanoTime();
+            reasoningSeq++;
+            if (lastReasoningNanos != 0L) {
+                long gapMs = (nowNanos - lastReasoningNanos) / 1_000_000L;
+                if (gapMs > 150L) {
+                    log.info("[stream-probe] batcher reasoning gap={}ms before delta#{} (len={})",
+                            gapMs, reasoningSeq, delta == null ? 0 : delta.length());
+                }
+            }
+            lastReasoningNanos = nowNanos;
             if (idle()) {
                 emitter.accept(StreamEvent.reasoning(delta));
                 lastEmitAt = System.currentTimeMillis();
@@ -1569,6 +1590,9 @@ public class AgentService {
         // 单独构造而非内联到 handleEvent，是为了让 Phase 3b 替换协议层时这条线不受影响。
         SideEffectSink sideEffects = new SessionSideEffects(sessionId, agent, eventSink);
 
+        // 本流订阅句柄占位：java 局部变量不能在自身初始化式的 lambda（doFinally）里被引用，
+        // 故借 AtomicReference 在订阅建立后回填；doFinally 据此判断「当前登记句柄是否仍是本流」。
+        final AtomicReference<Disposable> thisDisp = new AtomicReference<>();
         Disposable disp = agent.streamEvents(msg, context)
                 // 不设硬超时：LLM 思考/模型响应可能很久，事件流由 AgentScope 生命周期
                 // （AGENT_END / 错误 / 用户中断）控制结束，避免长思考被误杀
@@ -1631,8 +1655,9 @@ public class AgentService {
                     if (recorder != null) {
                         recorder.flushAll();
                     }
-                    // 清理本会话的订阅引用（已结束/出错/被 dispose 都要清）
-                    sessions.clearDisposable(sessionId);
+                    // 清理本会话的订阅引用：仅当登记句柄仍是本流时才清，避免旧流收尾误删后继流句柄
+                    // （clearDisposableIfSame 基于 Map.remove(key, value)，值不等则不动）
+                    sessions.clearDisposableIfSame(sessionId, thisDisp.get());
                     // 流终止（complete/error/cancel）兜底：确保 UI 一定复位，状态最终落盘
                     if (mainTurn) {
                         // 主回合结束：清空"本回合允许"授权，避免残留导致后续写工具不再弹窗
@@ -1683,6 +1708,7 @@ public class AgentService {
                 // （Reactor Context 是反应式链路中唯一可靠的会话标识传递方式）
                 .contextWrite(ctx -> ctx.put(RetryScope.CONTEXT_KEY, sessionId))
                 .subscribe();
+        thisDisp.set(disp);
         sessions.setDisposable(sessionId, disp);
     }
 

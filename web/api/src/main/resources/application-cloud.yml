@@ -30,11 +30,16 @@ agentscope:
       base-url: ${cloud.hub-url:}/api/gateway/v1
       # 逻辑别名：真实 provider+model 由 hub 按 appkey 的 hub_cloud 路由配置决定
       model-name: hub_cloud
-  model:
-    # web 侧不感知 hub 上 appkey 实际绑定的真实云端模型，统一下发 16384 可能超过
-    # 低上限模型并触发 400。显式覆盖 application.yml 中由顶层变量派生的全局兜底值：
-    # OpenAI 上游走服务端默认值，hub 的 Anthropic 转换器会在缺失时补 4096。
-    max-tokens: null
+  # 这里刻意【不配】max-tokens：写 `max-tokens: null` 并不能把值置空——Spring 的 PropertySource
+  # 把 null 视作「属性缺席」，Binder 会回落到 AgentScopeProperties.Model.maxTokens 的 Java 默认值
+  # 32768（实测见 ModelConfigModeInvariantTest）。真正保证 cloud 不下发任何输出上限的是下面的
+  # model-limits-enabled: false，resolveMaxTokens 在三级回退之前就被它短路。
+  # 注：缺失时 OpenAI 上游走服务端默认值，hub 的 Anthropic 转换器会补 4096。
+  # 上限整体不维护：真实 provider+model 由 hub 按 appkey 的 hub_cloud 路由决定，web 不感知
+  # 真实模型，公共 application.yml 的 model-limits 表（按真实模型名编写）在云端无一条该生效。
+  # 关掉它而不是靠「模型名恰好匹配不到」，避免有人给本 provider 补 max-tokens 或把
+  # agents.<id>.model-name 填成真实模型名时，web 又悄悄开始下发上限。
+  model-limits-enabled: false
 cloud:
   hub-url: http://localhost:18081
   app-key: ${HUB_APPKEY:}

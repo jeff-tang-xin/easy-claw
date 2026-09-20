@@ -530,8 +530,10 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
 }
 
 // ============ 消息渲染 ============
-function FoldBlock({ title, children, className, loading, defaultOpen }: {
+function FoldBlock({ title, children, className, loading, defaultOpen, plain }: {
   title: string; children: string; className?: string; loading?: boolean; defaultOpen?: boolean;
+  /** 流式期间为 true：正文纯文本直出（零 md 解析开销），回合结束切回 markdown 排版 */
+  plain?: boolean;
 }) {
   return (
     <details className={`fold ${className || ''} ${loading ? 'loading' : ''}`} open={loading || defaultOpen}>
@@ -539,7 +541,9 @@ function FoldBlock({ title, children, className, loading, defaultOpen }: {
         {loading && <span className="spinner-small" />}
         {title}
       </summary>
-      <div className="fold-body md-content" dangerouslySetInnerHTML={{ __html: md(children || '') }} />
+      {plain
+        ? <div className="fold-body md-content streaming-plain">{children}</div>
+        : <div className="fold-body md-content" dangerouslySetInnerHTML={{ __html: md(children || '') }} />}
     </details>
   );
 }
@@ -634,11 +638,13 @@ function subagentStateOf(seg: Segment): 'running' | 'error' | 'done' {
 }
 
 /** 子 Agent 内部单步渲染：思考 / 工具调用 折叠，正文直出 */
-function SubStepView({ step }: { step: SubStep }) {
+function SubStepView({ step, streaming }: { step: SubStep; streaming?: boolean }) {
   const [open, setOpen] = useState(false);
   if (step.kind === 'text') {
     const c = step.content || '';
     if (!c.trim()) return null;
+    // 流式期间纯文本直出（零 md 解析开销），运行结束切回 markdown 排版
+    if (streaming) return <div className="sa-step-text md-content streaming-plain">{c}</div>;
     return <div className="sa-step-text md-content" dangerouslySetInnerHTML={{ __html: md(c) }} />;
   }
   if (step.kind === 'reasoning') {
@@ -750,7 +756,7 @@ const TimelineNode = memo(function TimelineNode({ seg, index }: { seg: Segment; 
       {open && (
         <div className="sa-node-body">
           {steps.length > 0
-            ? steps.map((s, i) => <SubStepView key={i} step={s} />)
+            ? steps.map((s, i) => <SubStepView key={i} step={s} streaming={state === 'running'} />)
             : <span style={{ opacity: 0.6 }}>（该子 Agent 未返回内容）</span>}
           {state === 'running' && <span className="sa-typing" />}
         </div>
@@ -835,12 +841,16 @@ const AiMessage = memo(function AiMessage({ msg, isStreaming, agentLabel }: {
               case 'text':
                 return (
                   <div key={i} className="md-content-wrap">
-                    <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content || '') }} />
+                    {/* 正在增长的末段：流式期间纯文本直出（零 md 解析开销），回合结束切回 markdown */}
+                    {isStreaming && i === lastTextIdx
+                      ? <div className="md-content streaming-plain">{seg.content || ''}</div>
+                      : <div className="md-content" dangerouslySetInnerHTML={{ __html: md(seg.content || '') }} />}
                     {isStreaming && i === lastTextIdx && <span className="typing-cursor" />}
                   </div>
                 );
               case 'reasoning':
-                return <FoldBlock key={i} title="🧠 思考过程" className="reasoning">{seg.content || ''}</FoldBlock>;
+                // 折叠的 details 也会每帧执行 md()，流式期间同样走纯文本
+                return <FoldBlock key={i} title="🧠 思考过程" className="reasoning" plain={isStreaming}>{seg.content || ''}</FoldBlock>;
               case 'tool':
                 return <ToolCallCard key={i} seg={seg} />;
               case 'note':
@@ -2026,6 +2036,7 @@ export default function ChatPage() {
     CODE: '🧑‍💻 代码',
     WEB: '🌐 网络',
     MEMORY: '🧠 记忆',
+    KNOWLEDGE: '📚 知识库',
     SESSION: '💬 会话',
     AGENT: '🤖 多Agent',
     SHELL: '💻 Shell',

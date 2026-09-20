@@ -35,6 +35,21 @@ public class AgentScopeProperties {
      */
     private Map<String, ModelLimit> modelLimits = new LinkedHashMap<>();
 
+    /**
+     * 输出上限（{@code max_tokens}）是否由 web 侧维护，默认 true（local 模式）。
+     * <p>
+     * cloud 模式置 false：真实 provider + model 由 hub 按 appkey 的 {@code hub_cloud} 路由决定，
+     * web 侧根本不感知真实模型，此时任何按模型名算出的上限都可能高于真实上限而被上游拒 400，
+     * 或低于真实上限而无谓截断，故整体关闭下发（见 application-cloud.yml）。
+     * <p>
+     * 只影响 {@code max_tokens} 的解析与下发；{@code model-limits} 表里按模型覆盖
+     * {@code parallel-tool-calls} 的能力开关与此无关，仍然生效。
+     * <p>
+     * 注：不能靠在 profile 里写 {@code model-limits: {}} 来关闭——Spring 对 YAML map
+     * 是逐 key 合并而非整体替换，清不掉公共文件里的条目，必须由本开关在代码里短路。
+     */
+    private boolean modelLimitsEnabled = true;
+
     /** Agent 运行时配置（迭代、超时等） */
     private Agent agent = new Agent();
 
@@ -81,6 +96,14 @@ public class AgentScopeProperties {
 
     public Map<String, ModelLimit> getModelLimits() {
         return modelLimits;
+    }
+
+    public boolean isModelLimitsEnabled() {
+        return modelLimitsEnabled;
+    }
+
+    public void setModelLimitsEnabled(boolean modelLimitsEnabled) {
+        this.modelLimitsEnabled = modelLimitsEnabled;
     }
 
     public void setModelLimits(Map<String, ModelLimit> modelLimits) {
@@ -329,6 +352,14 @@ public class AgentScopeProperties {
         /** 该模型是否完全不支持 max_tokens 参数（部分推理模型会拒绝该字段），true 时不下发 */
         private Boolean maxTokensUnsupported;
 
+        /**
+         * 该模型是否只接受 {@code max_completion_tokens}（OpenAI 新协议字段）。
+         * <p>
+         * true 时输出上限改用 {@code max_completion_tokens} 下发，且不再带 {@code max_tokens}。
+         * 两个字段在协议上互斥，同时下发会被严格校验的上游（火山方舟等）判为非法参数组合直接 400。
+         */
+        private Boolean maxCompletionTokensOnly;
+
         public Integer getMaxTokens() {
             return maxTokens;
         }
@@ -351,6 +382,14 @@ public class AgentScopeProperties {
 
         public void setMaxTokensUnsupported(Boolean maxTokensUnsupported) {
             this.maxTokensUnsupported = maxTokensUnsupported;
+        }
+
+        public Boolean getMaxCompletionTokensOnly() {
+            return maxCompletionTokensOnly;
+        }
+
+        public void setMaxCompletionTokensOnly(Boolean maxCompletionTokensOnly) {
+            this.maxCompletionTokensOnly = maxCompletionTokensOnly;
         }
     }
 

@@ -29,7 +29,7 @@ import java.util.Set;
  * 后续远程知识库/黑板（B2/B3）的权限裁决同样以本快照为准。
  * <p>
  * <b>失败策略：不阻塞、不静默降级。</b>hub 不可达 / appkey 无效时快照置为不可用并记录原因，
- * 启动与设置热重载照常完成；cloud provider 条目仍在 providers 表中（配置驱动，不依赖快照），
+ * 应用启动照常完成；cloud provider 条目仍在 providers 表中（配置驱动，不依赖快照），
  * LLM 请求真实打到 hub 并以其响应为准——用户感知是请求报错，而不是被悄悄路由到本地端点。
  * <p>
  * 线程安全：快照整体替换（volatile 引用），读侧无锁。
@@ -137,11 +137,6 @@ public class CloudBootstrapService {
                 s == null ? List.of() : s.permissions(),
                 lastError,
                 lastAttemptAt);
-    }
-
-    /** 配置键面变化（hub-url/app-key）由 SettingsService 合并后调用，等价 refresh */
-    public void onConfigReloaded() {
-        refresh();
     }
 
     private static CloudSnapshot parse(String body) throws Exception {

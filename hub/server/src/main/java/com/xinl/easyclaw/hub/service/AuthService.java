@@ -9,6 +9,7 @@ import com.xinl.easyclaw.hub.contract.auth.TokenResponse;
 import com.xinl.easyclaw.hub.contract.org.OrgDto;
 import com.xinl.easyclaw.hub.contract.org.OrgOptionDto;
 import com.xinl.easyclaw.hub.contract.user.AdminCreateUserRequest;
+import com.xinl.easyclaw.hub.contract.user.CreatedUserDto;
 import com.xinl.easyclaw.hub.contract.user.UserDto;
 import com.xinl.easyclaw.hub.security.JwtProperties;
 import com.xinl.easyclaw.hub.security.JwtService;
@@ -35,7 +36,9 @@ import com.xinl.easyclaw.hub.repository.RefreshTokenRepository;
 
 /**
  * 认证：登录/刷新/登出/改密 + 平台管理员用户管理。access=JWT 无状态；refresh=随机串只存 SHA-256 hash，旋转 + 可吊销。
- * 公开注册已取消：初始 admin 由 {@link AdminBootstrap} 引导创建，后续用户由平台管理员添加（临时密码投递邮箱）。
+ * 公开注册已取消：初始 admin 由 {@link AdminBootstrap} 引导创建，后续用户由平台管理员添加。
+ * 初始/重置密码由服务端随机生成，<b>仅在当次响应中明文返回一次</b>（不再投递邮箱），由管理员线下交付；
+ * 密码有有效期（见 {@link PasswordPolicy}）：过期禁止登录须管理员重置，临期提醒用户尽快改密。
  * 认证链路是成功与失败都记审计的重点模块（登录失败尤其关键）。
  */
 @Service
@@ -52,12 +55,12 @@ public class AuthService {
     private final JwtProperties jwtProps;
     private final OrgService orgService;
     private final AuditService auditService;
-    private final PasswordMailer passwordMailer;
+    private final PasswordPolicy passwordPolicy;
 
     public AuthService(UserRepository users, RefreshTokenRepository refreshTokens, MembershipRepository memberships,
                        OrganizationRepository orgs, PasswordEncoder passwordEncoder, JwtService jwtService,
                        JwtProperties jwtProps, OrgService orgService, AuditService auditService,
-                       PasswordMailer passwordMailer) {
+                       PasswordPolicy passwordPolicy) {
         this.users = users;
         this.refreshTokens = refreshTokens;
         this.memberships = memberships;
@@ -67,7 +70,7 @@ public class AuthService {
         this.jwtProps = jwtProps;
         this.orgService = orgService;
         this.auditService = auditService;
-        this.passwordMailer = passwordMailer;
+        this.passwordPolicy = passwordPolicy;
     }
 
     @Transactional
@@ -83,6 +86,13 @@ public class AuthService {
             auditService.record(AuditModule.AUTH, "login", u.getId(), null, "user", String.valueOf(u.getId()),
                     "账号已被禁用", AuditModule.FAILURE);
             throw ApiException.authInvalid("账号已被禁用");
+        }
+        // 密码已过有效期：禁止登录（含正确密码），须联系平台管理员重置；重置后首登强制改密。
+        Instant now = Instant.now();
+        if (passwordPolicy.isExpired(u.getPasswordChangedAt(), now)) {
+            auditService.record(AuditModule.AUTH, "login", u.getId(), null, "user", String.valueOf(u.getId()),
+                    "密码已过期，拒绝登录", AuditModule.FAILURE);
+            throw ApiException.passwordExpired("密码已过期，请联系平台管理员重置密码");
         }
         auditService.record(AuditModule.AUTH, "login", u.getId(), null, "user", String.valueOf(u.getId()),
                 null, AuditModule.SUCCESS);
@@ -128,7 +138,7 @@ public class AuthService {
         });
     }
 
-    /** 改密（含首登强制改密）：校验旧密码 → 更新 hash → 清除强制标记 → 吊销全部 refresh token（各端重新登录）。 */
+    /** 改密（含首登强制改密）：校验旧密码 → 更新 hash 并刷新有效期起算点 → 清除强制标记 → 吊销全部 refresh token（各端重新登录）。 */
     @Transactional
     public void changePassword(Long userId, ChangePasswordRequest req) {
         UserEntity u = users.findById(userId)
@@ -140,6 +150,7 @@ public class AuthService {
         }
         u.setPasswordHash(passwordEncoder.encode(req.newPassword()));
         u.setMustChangePassword(false);
+        u.setPasswordChangedAt(Instant.now());
         users.save(u);
         List<RefreshTokenEntity> tokens = refreshTokens.findByUserId(userId);
         for (RefreshTokenEntity rt : tokens) {
@@ -150,9 +161,12 @@ public class AuthService {
                 null, AuditModule.SUCCESS);
     }
 
-    /** 平台管理员创建用户：临时密码服务端生成并投递邮箱，首登强制改密；orgId 给了则同时加入组织（默认 member）。 */
+    /**
+     * 平台管理员创建用户：服务端生成随机初始密码（一次性明文随响应返回，不再投递邮箱），首登强制改密；
+     * orgId 给了则同时加入组织（默认 member）。
+     */
     @Transactional
-    public UserDto adminCreateUser(Long actorId, AdminCreateUserRequest req) {
+    public CreatedUserDto adminCreateUser(Long actorId, AdminCreateUserRequest req) {
         requirePlatformAdmin(actorId);
         if (users.existsByUsername(req.username())) {
             throw ApiException.conflict("用户名已被占用");
@@ -181,6 +195,7 @@ public class AuthService {
         u.setDisplayName(req.displayName());
         u.setPasswordHash(passwordEncoder.encode(tempPassword));
         u.setMustChangePassword(true);
+        u.setPasswordChangedAt(Instant.now());
         users.save(u);
         if (orgId != null) {
             MembershipEntity m = new MembershipEntity();
@@ -189,10 +204,36 @@ public class AuthService {
             m.setRole(role);
             memberships.save(m);
         }
-        passwordMailer.sendInitialPassword(u.getEmail(), u.getUsername(), tempPassword);
         auditService.record(AuditModule.AUTH, "admin_create_user", actorId, orgId, "user", String.valueOf(u.getId()),
                 "username=" + u.getUsername() + (orgId != null ? ",orgRole=" + role : ""), AuditModule.SUCCESS);
-        return toUserDto(u);
+        return CreatedUserDto.of(toUserDto(u), tempPassword);
+    }
+
+    /**
+     * 平台管理员重置用户密码：服务端生成新随机密码（一次性明文随响应返回，不再投递邮箱），
+     * 重置后 mustChangePassword=true、刷新有效期起算点，并吊销该用户全部 refresh token（各端须用新密码重登）。
+     */
+    @Transactional
+    public CreatedUserDto adminResetPassword(Long actorId, Long targetUserId) {
+        requirePlatformAdmin(actorId);
+        UserEntity u = users.findById(targetUserId)
+                .orElseThrow(() -> ApiException.notFound("用户不存在"));
+        if (!"active".equals(u.getStatus())) {
+            throw ApiException.validation("账号已被禁用，无法重置密码");
+        }
+        String tempPassword = TempPasswords.generate();
+        u.setPasswordHash(passwordEncoder.encode(tempPassword));
+        u.setMustChangePassword(true);
+        u.setPasswordChangedAt(Instant.now());
+        users.save(u);
+        List<RefreshTokenEntity> tokens = refreshTokens.findByUserId(targetUserId);
+        for (RefreshTokenEntity rt : tokens) {
+            rt.setRevoked(true);
+        }
+        refreshTokens.saveAll(tokens);
+        auditService.record(AuditModule.AUTH, "admin_reset_password", actorId, null, "user", String.valueOf(targetUserId),
+                "username=" + u.getUsername(), AuditModule.SUCCESS);
+        return CreatedUserDto.of(toUserDto(u), tempPassword);
     }
 
     /** 全量组织选项（仅平台管理员）：添加用户/创建 provider 表单的组织下拉数据源。 */
@@ -208,7 +249,7 @@ public class AuthService {
     @Transactional(readOnly = true)
     public List<UserDto> adminListUsers(Long actorId) {
         requirePlatformAdmin(actorId);
-        return users.findAll(Sort.by("id")).stream().map(AuthService::toUserDto).toList();
+        return users.findAll(Sort.by("id")).stream().map(this::toUserDto).toList();
     }
 
     /**
@@ -277,8 +318,11 @@ public class AuthService {
         }
     }
 
-    private static UserDto toUserDto(UserEntity u) {
+    private UserDto toUserDto(UserEntity u) {
+        Instant now = Instant.now();
         return new UserDto(u.getId(), u.getUsername(), u.getEmail(), u.getDisplayName(), u.getStatus(),
-                u.isPlatformAdmin(), u.isMustChangePassword());
+                u.isPlatformAdmin(), u.isMustChangePassword(),
+                passwordPolicy.expiresAt(u.getPasswordChangedAt()),
+                passwordPolicy.isExpiringSoon(u.getPasswordChangedAt(), now));
     }
 }

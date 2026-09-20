@@ -37,6 +37,11 @@ public class ApiException extends RuntimeException {
         return of(ErrorCode.FORBIDDEN, HttpStatus.FORBIDDEN, message);
     }
 
+    /** 403 密码已过有效期，禁止登录，须管理员重置。 */
+    public static ApiException passwordExpired(String message) {
+        return of(ErrorCode.PASSWORD_EXPIRED, HttpStatus.FORBIDDEN, message);
+    }
+
     public static ApiException notFound(String message) {
         return of(ErrorCode.NOT_FOUND, HttpStatus.NOT_FOUND, message);
     }
@@ -48,6 +53,16 @@ public class ApiException extends RuntimeException {
     /** 409 并携带补充数据（如乐观锁冲突时回传最新快照，供调用方手动合并）。 */
     public static ApiException conflict(String message, Object details) {
         return new ApiException(ErrorCode.CONFLICT, HttpStatus.CONFLICT, message, details);
+    }
+
+    /** 409 乐观锁版本冲突，details 携带最新资源快照供客户端手动合并。 */
+    public static ApiException versionConflict(String message, Object details) {
+        return new ApiException(ErrorCode.VERSION_CONFLICT, HttpStatus.CONFLICT, message, details);
+    }
+
+    /** 409 同项目下业务键（如知识条目 topic）已存在。 */
+    public static ApiException topicExists(String message) {
+        return of(ErrorCode.TOPIC_EXISTS, HttpStatus.CONFLICT, message);
     }
 
     public static ApiException validation(String message) {

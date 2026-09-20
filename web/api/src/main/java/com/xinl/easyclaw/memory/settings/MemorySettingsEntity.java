@@ -39,7 +39,7 @@ public class MemorySettingsEntity {
     @Column(name = "context_window_tokens")
     private Integer contextWindowTokens;
 
-    /** 记忆提取模式：always / throttled / never。默认 throttled。 */
+    /** 记忆提取模式：always / throttled / never。默认 always（每回合作一次全量上下文提取）。 */
     @Column(name = "flush_mode", length = 16)
     private String flushMode;
 
@@ -63,11 +63,20 @@ public class MemorySettingsEntity {
     @Column(name = "flush_async_enabled")
     private Boolean flushAsyncEnabled;
 
-    /** 每次提取框定的新消息窗口上限（条）。超出的增量留待下轮，不丢只延迟。默认 10。 */
+    /**
+     * @deprecated 增量切片时代的「单次提取新消息窗口」旋钮。记忆提取已改回 vendored 原生
+     * 全量上下文载荷（方案 A，2026-09-10），该值不再被任何提取逻辑消费；字段与 DB 列保留
+     * 仅为兼容存量行（ddl-auto 只加列不删列），设置页已移除对应控件。
+     */
+    @Deprecated
     @Column(name = "flush_window_messages")
     private Integer flushWindowMessages;
 
-    /** 窗口前携带的背景消息条数（仅供提取模型理解语境，标注勿重复提取）。默认 5。 */
+    /**
+     * @deprecated 增量切片时代的「窗口前背景消息条数」旋钮。全量上下文改造后不再被消费，
+     * 保留理由同 {@link #flushWindowMessages}。
+     */
+    @Deprecated
     @Column(name = "flush_background_messages")
     private Integer flushBackgroundMessages;
 
@@ -81,7 +90,7 @@ public class MemorySettingsEntity {
             contextWindowTokens = 48000;
         }
         if (flushMode == null || flushMode.isBlank()) {
-            flushMode = "throttled";
+            flushMode = "always";
         }
         if (flushMinGapMinutes == null) {
             flushMinGapMinutes = 30;

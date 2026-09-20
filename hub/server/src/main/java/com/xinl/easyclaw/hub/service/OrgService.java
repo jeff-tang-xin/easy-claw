@@ -1,7 +1,6 @@
 package com.xinl.easyclaw.hub.service;
 
 import com.xinl.easyclaw.hub.common.AuditModule;
-import com.xinl.easyclaw.hub.service.AuditService;
 import com.xinl.easyclaw.hub.common.ApiException;
 import com.xinl.easyclaw.hub.contract.org.AddMemberRequest;
 import com.xinl.easyclaw.hub.contract.org.CreateOrgRequest;
@@ -32,14 +31,14 @@ public class OrgService {
 
     private static final Set<String> VALID_ROLES = Set.of("owner", "admin", "member", "guest");
 
-    private final OrganizationRepository orgs;
+    private final OrganizationRepository org;
     private final MembershipRepository memberships;
     private final UserRepository users;
     private final AuditService auditService;
 
     public OrgService(OrganizationRepository orgs, MembershipRepository memberships, UserRepository users,
                       AuditService auditService) {
-        this.orgs = orgs;
+        this.org = orgs;
         this.memberships = memberships;
         this.users = users;
         this.auditService = auditService;
@@ -49,7 +48,7 @@ public class OrgService {
     public List<OrgDto> listMyOrgs(Long userId) {
         List<OrgDto> out = new ArrayList<>();
         for (MembershipEntity m : memberships.findByUserId(userId)) {
-            orgs.findById(m.getOrgId()).ifPresent(o ->
+            org.findById(m.getOrgId()).ifPresent(o ->
                     out.add(new OrgDto(o.getId(), o.getName(), o.getSlug(), m.getRole(), o.getPlan())));
         }
         return out;
@@ -63,7 +62,7 @@ public class OrgService {
         o.setName(req.name());
         o.setSlug(slug);
         o.setOwnerUserId(ownerId);
-        orgs.save(o);
+        org.save(o);
 
         MembershipEntity m = new MembershipEntity();
         m.setOrgId(o.getId());
@@ -79,17 +78,17 @@ public class OrgService {
     private String resolveOrgSlug(String name, String requested) {
         if (requested != null && !requested.isBlank()) {
             String slug = requested.trim();
-            if (!Slugger.isValid(slug)) {
+            if (Slugger.isValid(slug)) {
                 throw ApiException.validation("slug 只能包含小写字母/数字/连字符");
             }
-            if (orgs.existsBySlug(slug)) {
+            if (org.existsBySlug(slug)) {
                 throw ApiException.conflict("组织 slug 已存在");
             }
             return slug;
         }
         String base = Slugger.derive(name, "org");
         String candidate = base;
-        for (int i = 2; orgs.existsBySlug(candidate); i++) {
+        for (int i = 2; org.existsBySlug(candidate); i++) {
             candidate = base + "-" + i;
         }
         return candidate;

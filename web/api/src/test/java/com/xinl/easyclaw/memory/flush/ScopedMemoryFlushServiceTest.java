@@ -22,7 +22,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 /**
- * {@link ScopedMemoryFlushService} 行为测试：游标推进/窗口限幅/失败重试/节流/压缩重置/异步提交。
+ * {@link ScopedMemoryFlushService} 行为测试（方案 A：全量上下文载荷）：
+ * 每次提取都喂入 state.getContext() 的完整快照、上下文增长后仍整段重扫、空上下文跳过、
+ * 失败无游标副作用、throttled 节流、异步提交最终执行且不抛回调用方。
+ * <p>
  * 提取执行点经包私有构造注入捕获器，不触碰真实模型与落盘。
  */
 class ScopedMemoryFlushServiceTest {
@@ -63,12 +66,10 @@ class ScopedMemoryFlushServiceTest {
         return list;
     }
 
-    private static MemorySettingsEntity settings(String mode, int window, int background) {
+    private static MemorySettingsEntity settings(String mode) {
         return MemorySettingsEntity.builder()
                 .flushMode(mode)
                 .flushMinGapMinutes(30)
-                .flushWindowMessages(window)
-                .flushBackgroundMessages(background)
                 .build();
     }
 
@@ -77,76 +78,59 @@ class ScopedMemoryFlushServiceTest {
     }
 
     @Test
-    void 增量未超窗全取游标推进到末尾() {
+    void 每次提取都喂入完整上下文快照() {
         when(state.getContext()).thenReturn(msgs(8));
-        runSync("s1", settings("always", 10, 5));
+        runSync("s1", settings("always"));
         assertEquals(1, calls.get());
         assertEquals(8, captured.get().size());
-        assertEquals(8, service.cursorOf("s1"));
     }
 
     @Test
-    void 超窗分批提取游标逐批推进且带背景() {
+    void 上下文增长后下轮仍全量提取而非增量() {
+        when(state.getContext()).thenReturn(msgs(10));
+        runSync("s2", settings("always"));
+        assertEquals(10, captured.get().size());
+
+        // 上下文从 10 增长到 25：全量语义应再次喂入全部 25 条，而非仅新增的 15 条
         when(state.getContext()).thenReturn(msgs(25));
-        MemorySettingsEntity settings = settings("always", 10, 5);
-
-        runSync("s2", settings);
-        assertEquals(10, service.cursorOf("s2"));
-        assertEquals(10, captured.get().size(), "首批游标在 0、无背景，仅 10 条新消息");
-
-        runSync("s2", settings);
-        assertEquals(20, service.cursorOf("s2"));
-        assertEquals(15, captured.get().size(), "第二批 = 10 条新 + 5 条背景");
-
-        runSync("s2", settings);
-        assertEquals(25, service.cursorOf("s2"), "末批不足窗口也取完");
-
-        int before = calls.get();
-        runSync("s2", settings);
-        assertEquals(before, calls.get(), "游标追平后空增量不再提取");
+        runSync("s2", settings("always"));
+        assertEquals(2, calls.get());
+        assertEquals(25, captured.get().size(), "全量模式每轮都重扫整段上下文");
     }
 
     @Test
-    void 提取失败游标不推进下轮重试() {
+    void 上下文为空时不发起提取() {
+        when(state.getContext()).thenReturn(List.of());
+        runSync("s3", settings("always"));
+        assertEquals(0, calls.get());
+    }
+
+    @Test
+    void 提取失败被吞掉且不影响后续回合提取() {
         when(state.getContext()).thenReturn(msgs(6));
-        MemorySettingsEntity settings = settings("always", 10, 5);
 
         failNext = true;
-        runSync("s3", settings);
+        runSync("s4", settings("always"));
         assertEquals(0, calls.get());
-        assertEquals(0, service.cursorOf("s3"), "失败游标不得推进");
 
+        // 全量模式无游标，失败后下一轮照常整段重扫，无重试窗口状态残留
         failNext = false;
-        runSync("s3", settings);
+        runSync("s4", settings("always"));
         assertEquals(1, calls.get());
-        assertEquals(6, service.cursorOf("s3"));
+        assertEquals(6, captured.get().size());
     }
 
     @Test
     void throttled模式间隔内不重复提取() {
         when(state.getContext()).thenReturn(msgs(6));
-        MemorySettingsEntity settings = settings("throttled", 10, 5);
+        MemorySettingsEntity settings = settings("throttled");
 
-        runSync("s4", settings);
+        runSync("s5", settings);
         assertEquals(1, calls.get());
 
         when(state.getContext()).thenReturn(msgs(9));
-        runSync("s4", settings);
+        runSync("s5", settings);
         assertEquals(1, calls.get(), "minGap 内第二次被节流");
-    }
-
-    @Test
-    void 压缩后游标越界重置提取最后窗口() {
-        when(state.getContext()).thenReturn(msgs(30));
-        MemorySettingsEntity settings = settings("always", 10, 5);
-        runSync("s5", settings);
-        assertEquals(10, service.cursorOf("s5"));
-
-        // 模拟压缩：上下文从 30 条缩到 8 条，游标 10 越界
-        when(state.getContext()).thenReturn(msgs(8));
-        runSync("s5", settings);
-        assertEquals(2, calls.get(), "游标重置后提取现有 8 条");
-        assertEquals(8, service.cursorOf("s5"));
     }
 
     @Test
@@ -159,10 +143,9 @@ class ScopedMemoryFlushServiceTest {
         });
         // submit 立即返回，不阻塞
         asyncService.submitScopedFlush("s6", agent, RuntimeContext.empty(),
-                settings("always", 10, 5), null);
+                settings("always"), null);
         assertTrue(latch.await(10, TimeUnit.SECONDS), "异步提取应在宽限内执行");
         assertEquals(5, captured.get().size());
-        assertEquals(5, asyncService.cursorOf("s6"));
         asyncService.shutdown();
     }
 }

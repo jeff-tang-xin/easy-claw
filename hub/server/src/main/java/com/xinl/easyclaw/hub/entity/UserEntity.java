@@ -4,6 +4,7 @@ import com.xinl.easyclaw.hub.common.BaseEntity;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
+import java.time.Instant;
 import lombok.Getter;
 import lombok.Setter;
 
@@ -39,4 +40,8 @@ public class UserEntity extends BaseEntity {
     /** 首次登录强制改密：true 时除改密/登出/查询自身外的 API 一律拒绝。 */
     @Column(name = "must_change_password", nullable = false)
     private boolean mustChangePassword = false;
+
+    /** 当前密码的设置/上次修改时刻，密码有效期从此起算（建号/管理员重置/自助改密均刷新）。 */
+    @Column(name = "password_changed_at", nullable = false)
+    private Instant passwordChangedAt = Instant.now();
 }

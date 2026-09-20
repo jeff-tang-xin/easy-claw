@@ -56,7 +56,11 @@ public final class ToolPermissionPolicy {
             // 每登记一条结论都要弹一次确认，而子 Agent 的确认请求对用户来说毫无上下文，
             // 实际效果等于把多智能体协作变成不断打断用户 —— 权限收益为零，代价是功能不可用。
             // blackboard_append 虽是写操作，写入范围仅限本次会话的黑板存储，故与只读同档。
-            "blackboard_read", "blackboard_append"
+            "blackboard_read", "blackboard_append",
+            // 本地知识库只读工具：knowledge 目录虽在沙箱禁止路径内，但这三个工具只能读
+            // 知识库自己的条目、不触碰用户文件、不对外发送，性质与 memory_search/get 相同。
+            // knowledge_write 不在此列 —— 它会真正落盘新增/覆盖知识条目，必须保留确认。
+            "knowledge_list", "knowledge_search", "knowledge_read"
     );
 
     /**

@@ -2,7 +2,8 @@ import {useCallback, useEffect, useState} from 'react';
 import {NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams} from 'react-router-dom';
 import {archiveProject, getProject, restoreProject, updateProject} from '../api';
 import type {ProjectDto} from '../types';
-import DocsPage from './DocsPage';
+import BlackboardPage from './BlackboardPage';
+import KnowledgePage from './KnowledgePage';
 
 interface OrgRef {
   id: number;
@@ -24,7 +25,7 @@ const VIS_LABELS: Record<string, string> = {
 
 /**
  * 项目空间（IA 乙方案核心）：/projects/:pid 独立空间，内置二级导航。
- * 概览/文档当前可用；知识库/黑板/设置为后续模块占位，业务模块均落此空间内、不新增顶层菜单。
+ * 概览/知识库/黑板当前可用；设置为项目管理入口，业务模块均落此空间内、不新增顶层菜单。
  */
 export default function ProjectSpacePage({orgs, meUserId}: Props) {
   const {pid} = useParams();
@@ -124,9 +125,6 @@ export default function ProjectSpacePage({orgs, meUserId}: Props) {
         <NavLink to={base} end className={({isActive}) => (isActive ? 'tab-btn active' : 'tab-btn')}>
           概览
         </NavLink>
-        <NavLink to={`${base}/docs`} className={({isActive}) => (isActive ? 'tab-btn active' : 'tab-btn')}>
-          文档
-        </NavLink>
         <NavLink to={`${base}/knowledge`} className={({isActive}) => (isActive ? 'tab-btn active' : 'tab-btn')}>
           知识库
         </NavLink>
@@ -140,14 +138,13 @@ export default function ProjectSpacePage({orgs, meUserId}: Props) {
 
       <Routes>
         <Route index element={<OverviewTab project={project} role={role} meUserId={meUserId} />} />
-        <Route path="docs/*" element={<DocsPage project={project} role={role} meUserId={meUserId} />} />
         <Route
           path="knowledge"
-          element={<PlaceholderTab title="知识库" desc="A3 将在此提供项目级知识库与语义检索。" />}
+          element={<KnowledgePage project={project} role={role} meUserId={meUserId} />}
         />
         <Route
           path="blackboard"
-          element={<PlaceholderTab title="黑板" desc="A4 将在此提供项目共享任务板（多 Agent 协作交接）。" />}
+          element={<BlackboardPage project={project} role={role} meUserId={meUserId} />}
         />
         <Route
           path="settings"
@@ -185,32 +182,19 @@ function OverviewTab({project, role, meUserId}: {project: ProjectDto; role: stri
       </div>
       <div className="ps-quicknav">
         <div className="ps-quick-item">
-          <div className="ps-quick-title">📄 文档</div>
-          <div className="ps-quick-desc">需求 / 任务协作，支持乐观锁并发与版本历史。</div>
-        </div>
-        <div className="ps-quick-item ps-quick-disabled">
           <div className="ps-quick-title">📚 知识库</div>
-          <div className="ps-quick-desc">A3 规划中。</div>
+          <div className="ps-quick-desc">项目级知识条目，支持乐观锁并发与版本历史。</div>
         </div>
-        <div className="ps-quick-item ps-quick-disabled">
+        <div className="ps-quick-item">
           <div className="ps-quick-title">📋 黑板</div>
-          <div className="ps-quick-desc">A4 规划中。</div>
+          <div className="ps-quick-desc">项目共享记录本，多 Agent 协作交接。</div>
         </div>
       </div>
       {role === 'guest' && (
         <div className="form-error" style={{marginTop: 14}}>
-          访客（guest）为只读角色：可查看项目与文档，但不能创建或编辑。
+          访客（guest）为只读角色：可查看项目与知识库/黑板，但不能创建或编辑。
         </div>
       )}
-    </div>
-  );
-}
-
-function PlaceholderTab({title, desc}: {title: string; desc: string}) {
-  return (
-    <div className="empty-state">
-      <h3>{title}</h3>
-      <p>{desc}</p>
     </div>
   );
 }

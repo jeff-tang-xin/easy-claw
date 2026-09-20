@@ -43,8 +43,6 @@ class ScopedMemoryFlushMiddlewareTest {
         return MemorySettingsEntity.builder()
                 .flushMode(mode)
                 .flushAsyncEnabled(async)
-                .flushWindowMessages(10)
-                .flushBackgroundMessages(5)
                 .build();
     }
 

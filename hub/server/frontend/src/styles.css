@@ -116,6 +116,23 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 }
 .modal-form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 
+/* ============ 密码临期提醒横幅 ============ */
+.pwd-expiry-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  background: #fffbeb;
+  border: 1px solid #fcd34d;
+  color: #92400e;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin: 4px 0 16px;
+  font-size: 0.88em;
+}
+.pwd-expiry-actions { display: inline-flex; gap: 8px; flex-shrink: 0; }
+
 /* ============ 侧边栏外壳 ============ */
 .app-shell { display: flex; height: 100%; width: 100%; overflow: hidden; }
 .app-sidebar {
@@ -541,12 +558,8 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 }
 .project-card-link:hover .project-card-enter { opacity: 1; }
 
-/* ============ Docs 列表 ============ */
-.doc-type-tabs { display: flex; gap: 4px; }
+/* ============ 知识库列表 ============ */
 .doc-table .doc-title-cell { font-weight: 500; }
-.doc-task-mark { color: var(--text-tertiary); font-size: 0.85em; font-weight: 400; }
-.badge.doc-type-requirement { background: #dbeafe; color: #1d4ed8; }
-.badge.doc-type-task { background: #fef3c7; color: #b45309; }
 
 /* ============ Docs 编辑器 ============ */
 .doc-editor { display: flex; flex-direction: column; gap: 10px; }
@@ -568,6 +581,34 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 }
 .doc-content-input:focus { outline: none; border-color: var(--accent); }
 .doc-content-input:disabled, .doc-title-input:disabled { background: var(--bg); color: var(--text); cursor: default; }
+
+/* ============ 知识库（A3） ============ */
+.ps-knowledge { display: flex; flex-direction: column; gap: 16px; }
+.link-btn { background: none; border: none; padding: 0; color: var(--accent); cursor: pointer; font: inherit; text-align: left; }
+.link-btn:hover { text-decoration: underline; }
+.text-muted { color: var(--text-tertiary); }
+.btn-danger-text { color: var(--danger); }
+.btn-danger-text:hover:not(:disabled) { color: #fff; background: var(--danger); border-color: var(--danger); }
+.conflict-banner {
+  border: 1px solid #fecaca; background: #fef2f2; border-radius: var(--radius-sm);
+  padding: 14px; display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
+}
+.conflict-title { font-weight: 600; color: var(--danger); }
+.history-content {
+  margin: 0; white-space: pre-wrap; word-break: break-word; background: var(--bg);
+  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px;
+  font-size: 0.85em; line-height: 1.6; max-height: 380px; overflow: auto;
+}
+
+/* ============ 黑板报（A4） ============ */
+.ps-blackboard { display: flex; flex-direction: column; gap: 16px; }
+.bb-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.bb-item {
+  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--panel);
+  padding: 12px 14px; display: flex; flex-direction: column; gap: 8px;
+}
+.bb-content { white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
+.bb-meta { display: flex; align-items: center; gap: 8px; font-size: 0.82em; color: var(--text-tertiary); }
 
 /* 409 冲突并排对比 */
 .conflict-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
@@ -604,3 +645,29 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 .role-perm-list li { display: flex; align-items: baseline; gap: 10px; font-size: 0.88em; line-height: 1.5; }
 .role-perm-list .badge { flex: 0 0 auto; min-width: 96px; text-align: center; }
 .role-perm-note { margin: 12px 0 0; font-size: 0.82em; color: var(--text-tertiary); line-height: 1.6; }
+
+/* 角色与权限矩阵页（只读） */
+.roles-section-title { margin: 20px 0 10px; font-size: 1em; }
+.roles-table { table-layout: auto; }
+.roles-col, .roles-cell { text-align: center; white-space: nowrap; width: 72px; }
+.roles-cell { font-size: 0.95em; }
+.roles-group-tag { white-space: nowrap; font-size: 0.82em; }
+.roles-code { font-size: 0.78em; }
+.roles-legend { margin: 8px 2px 0; font-size: 0.8em; line-height: 1.6; }
+
+/* ============ Spoke 工作区 / 公共菜单配置 ============ */
+.menu-table .menu-label { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+.menu-tree-guide { color: var(--text-tertiary); font-size: 0.85em; }
+.menu-icon { font-size: 1em; }
+.menu-key { font-size: 0.78em; color: var(--text-secondary); }
+.menu-row-disabled td { opacity: 0.6; }
+.menu-toggle {
+  border: 1px solid var(--border); border-radius: 999px; padding: 2px 10px;
+  font-size: 11px; font-weight: 600; cursor: pointer; line-height: 1.6;
+}
+.menu-toggle.on { background: var(--success-bg); color: var(--success); border-color: var(--success); }
+.menu-toggle.off { background: #f1f5f9; color: var(--text-tertiary); border-color: var(--border); }
+.menu-del { color: var(--danger); }
+.menu-del:hover:not(:disabled) { color: #fff; background: var(--danger); border-color: var(--danger); }
+.menu-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.menu-enabled-check { flex-direction: row !important; align-items: center; gap: 8px; font-weight: 500; }

@@ -75,9 +75,11 @@ public class MemorySettingsService {
      * 把用户级记忆设置翻译为 vendored {@link MemoryConfig}（装配层在 build 时调用）。
      * <p>
      * flush 触发恒为 NEVER：每回合提取已由 web 侧 ScopedMemoryFlushMiddleware 接管
-     * （游标框定窗口 + 同步/异步开关 + minGap 节流），vendored MemoryFlushMiddleware
-     * 注册但永不触发——避免其「全量上下文载荷 + concatWith 拖住主流直至提取完成」
-     * 双重缺陷复发。本配置仅保留 retention 等账簿策略；flushMode/minGap 由 web 侧消费。
+     * （全量上下文载荷 + 同步/异步开关 + minGap 节流），vendored MemoryFlushMiddleware
+     * 注册但永不触发——仅绕开其「concatWith 拖住主流直至提取完成」的执行期缺陷；
+     * 载荷本身仍是 vendored 原生的全量上下文（web 侧 ScopedMemoryFlushService 快照
+     * state.getContext() 后复用同一个 MemoryFlushManager）。本配置仅保留 retention
+     * 等账簿策略；flushMode/minGap 由 web 侧消费。
      */
     public MemoryConfig toMemoryConfig(MemorySettingsEntity settings) {
         return MemoryConfig.builder()

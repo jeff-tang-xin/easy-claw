@@ -8,7 +8,7 @@ spring:
     # 生产：PostgreSQL。连接信息走环境变量，不入仓。
     url: ${HUB_DB_URL:jdbc:postgresql://localhost:5432/easy_claw}
     username: ${HUB_DB_USER:postgres}
-    password: ${HUB_DB_PASSWORD:}
+    password: ${HUB_DB_PASSWORD:xinl.tang123}
     driver-class-name: org.postgresql.Driver
     hikari:
       schema: hub

@@ -177,6 +177,25 @@ public final class SessionTranscriptStore {
     }
 
     /**
+     * 按会话 ID 驱逐锁与计数缓存（无需知道状态目录绝对路径）。
+     * <p>
+     * 供仅持有 sessionId 的释放路径使用（空闲清扫、断连回收）：缓存键是归一化的
+     * 会话状态目录，其末段目录名即全局唯一的 sessionId，按键的文件名匹配即可精确
+     * 命中。驱逐后下次访问会自动重建锁并重新扫描计数，安全无副作用。
+     */
+    public static void evictBySessionId(String sessionId) {
+        if (sessionId == null || sessionId.isBlank()) {
+            return;
+        }
+        removeBySessionId(LOCKS, sessionId);
+        removeBySessionId(COUNTS, sessionId);
+    }
+
+    private static <V> void removeBySessionId(Map<Path, V> map, String sessionId) {
+        map.keySet().removeIf(dir -> sessionId.equals(dir.getFileName().toString()));
+    }
+
+    /**
      * 种子化：转录文件不存在时，把 agent_state.json 当前全部历史一次性快照进转录。
      * 旧会话升级后首次发消息时调用——赶在未来的上下文压缩之前把历史固化下来。
      */

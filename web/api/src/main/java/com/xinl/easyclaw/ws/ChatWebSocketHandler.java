@@ -56,6 +56,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     /** connectionId → 线程安全包装后的连接（WebSocketSession 本身非线程安全） */
     private final Map<String, WebSocketSession> connections = new ConcurrentHashMap<>();
+
+    /**
+     * [stream-probe] 临时诊断：按会话记录上一个 reasoning 事件的发送时刻与序号，
+     * 仅在相邻 reasoning 发送间隔 >150ms 时打印，用于把“后端→浏览器”这一跳与上游区分。
+     * 定位流式卡顿根因后整组探针一并删除。
+     */
+    private final Map<String, long[]> probeReasoningNanos = new ConcurrentHashMap<>();
+    private final Map<String, int[]> probeReasoningSeq = new ConcurrentHashMap<>();
     /**
      * sessionId → 订阅该会话的 connectionId 集合。
      * <p>事件只投递给订阅了该 sessionId 的连接，而非全体广播——否则 A 用户的对话正文、
@@ -474,6 +482,21 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         } catch (Exception e) {
             log.warn("WS JSON 序列化失败: sessionId={}, err={}", sessionId, e.getMessage());
             return;
+        }
+        // [stream-probe] 临时：WS 发送 reasoning 的间隔，定位后删除
+        if (evt != null && "reasoning".equals(evt.type())) {
+            long[] prev = probeReasoningNanos.computeIfAbsent(sessionId, k -> new long[1]);
+            int[] seqBox = probeReasoningSeq.computeIfAbsent(sessionId, k -> new int[1]);
+            seqBox[0]++;
+            long nowNanos = System.nanoTime();
+            if (prev[0] != 0L) {
+                long gapMs = (nowNanos - prev[0]) / 1_000_000L;
+                if (gapMs > 150L) {
+                    log.info("[stream-probe] ws-send reasoning gap={}ms before evt#{} session={}",
+                            gapMs, seqBox[0], sessionId);
+                }
+            }
+            prev[0] = nowNanos;
         }
         if (workspaceId.isEmpty() && warnedEmptyWorkspace.size() < MAX_WARNED_SESSIONS
                 && warnedEmptyWorkspace.add(sessionId)) {

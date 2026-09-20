@@ -5,32 +5,41 @@ import type {
   AppKeyCreatedResponse,
   AppKeyDto,
   AuditLogPage,
-  DocDto,
-  DocEventDto,
-  DocListItemDto,
+  BlackboardEntryDto,
+  CreatedUserDto,
   GatewayLogDetailDto,
   GatewayLogPage,
   GatewayUsageDto,
+  KnowledgeHistoryItemDto,
+  KnowledgeHistoryVersionDto,
+  KnowledgeItemDto,
+  KnowledgeItemListItemDto,
   MeResponse,
   MemberDto,
+  MenuItemDto,
   OrgDto,
   OrgOptionDto,
   ProjectDto,
   ProviderDto,
+  RoleMatrixResponse,
   TokenResponse,
   UserDto,
+  WorkspaceDto,
 } from './types';
 
-/** 统一 API 错误：携带 HTTP 状态码与可选 details（如 409 时后端返回的最新文档快照）。 */
+/** 统一 API 错误：携带 HTTP 状态码、业务错误码 code（后端 ApiError.code）与可选 details（如 409 时最新文档快照）。 */
 export class ApiRequestError extends Error {
   status: number;
   details: unknown;
+  /** 业务错误码（如 PASSWORD_EXPIRED），调用方据此分支处理；非 JSON 响应时为 undefined */
+  code?: string;
 
-  constructor(status: number, message: string, details?: unknown) {
+  constructor(status: number, message: string, details?: unknown, code?: string) {
     super(message);
     this.name = 'ApiRequestError';
     this.status = status;
     this.details = details;
+    this.code = code;
   }
 }
 
@@ -38,7 +47,12 @@ async function parseError(res: Response): Promise<Error> {
   try {
     const body = await res.json();
     if (body && typeof body.message === 'string') {
-      return new ApiRequestError(res.status, body.message, (body as {details?: unknown}).details);
+      return new ApiRequestError(
+        res.status,
+        body.message,
+        (body as {details?: unknown}).details,
+        (body as {code?: string}).code,
+      );
     }
   } catch {
     // 非 JSON 响应，落到状态码
@@ -117,7 +131,7 @@ export const logout = () => {
 // ============ 平台管理员：用户管理（公开注册已取消，用户仅由管理员开通） ============
 export const adminListUsers = () => request<UserDto[]>('GET', '/api/users');
 
-/** 临时密码由服务端生成并投递邮箱（A0 无 SMTP，服务端日志兜底），响应不含密码；
+/** 创建用户：响应含一次性明文 tempPassword（仅本次返回，服务端不落库、不投递邮箱，关掉即不可再查）；
  *  orgId 给了则创建即入组（role 默认 member，owner 由服务端拒绝） */
 export const adminCreateUser = (
   username: string,
@@ -125,7 +139,11 @@ export const adminCreateUser = (
   displayName: string | null,
   orgId: number | null,
   role: string | null,
-) => request<UserDto>('POST', '/api/users', {username, email, displayName, orgId, role});
+) => request<CreatedUserDto>('POST', '/api/users', {username, email, displayName, orgId, role});
+
+/** 重置密码：返回一次性新密码；该用户当前各端登录立即失效，且下次登录强制改密 */
+export const adminResetUserPassword = (id: number) =>
+  request<CreatedUserDto>('POST', `/api/users/${id}/reset-password`);
 
 /** 全量组织下拉选项（仅 platformAdmin 可调通）：添加用户/分配 provider 归属用 */
 export const listOrgOptions = () => request<OrgOptionDto[]>('GET', '/api/users/org-options');
@@ -135,6 +153,9 @@ export const adminDeleteUser = (id: number) => request<void>('DELETE', `/api/use
 
 // ============ 当前用户 ============
 export const fetchMe = () => request<MeResponse>('GET', '/api/me');
+
+/** 只读角色→权限码矩阵（含平台管理员叠加权限）；登录即可读，数据为全局静态规则 */
+export const fetchRoleMatrix = () => request<RoleMatrixResponse>('GET', '/api/role-matrix');
 
 // ============ 组织与成员 ============
 export const listMyOrgs = () => request<OrgDto[]>('GET', '/api/orgs');
@@ -186,45 +207,6 @@ export const updateProject = (id: number, body: UpdateProjectBody) =>
 export const archiveProject = (id: number) => request<void>('DELETE', `/api/projects/${id}`);
 
 export const restoreProject = (id: number) => request<void>('POST', `/api/projects/${id}/restore`);
-
-// ============ 项目文档（需求/任务，A2） ============
-export const listDocs = (projectId: number, docType?: string) => {
-  const params = new URLSearchParams({projectId: String(projectId)});
-  if (docType) params.set('docType', docType);
-  return request<DocListItemDto[]>('GET', `/api/docs?${params.toString()}`);
-};
-
-export const getDoc = (id: number) => request<DocDto>('GET', `/api/docs/${id}`);
-
-export const getDocHistory = (id: number) =>
-  request<DocEventDto[]>('GET', `/api/docs/${id}/history`);
-
-export interface CreateDocBody {
-  projectId: number;
-  title: string;
-  docType?: string | null;
-  content?: string | null;
-  parentDocId?: number | null;
-}
-
-export const createDoc = (body: CreateDocBody) => request<DocDto>('POST', '/api/docs', body);
-
-/** 更新走乐观锁：expectedVersion 为编辑时基于的版本；冲突时 catch 到 ApiRequestError(status=409)，details 为最新 DocDto */
-export interface UpdateDocBody {
-  title?: string | null;
-  content?: string | null;
-  expectedVersion: number;
-}
-
-export const updateDoc = (id: number, body: UpdateDocBody) =>
-  request<DocDto>('POST', `/api/docs/${id}`, body);
-
-/** assigneeUserId=null 取消负责人 */
-export const assignDoc = (id: number, assigneeUserId: number | null) =>
-  request<DocDto>('POST', `/api/docs/${id}/assign`, {assigneeUserId});
-
-/** 硬删文档（历史版本 doc_events 保留留痕） */
-export const deleteDoc = (id: number) => request<void>('DELETE', `/api/docs/${id}`);
 
 // ============ 审计日志 ============
 /** 组织维度审计日志分页查询（仅 owner/admin 可调通，服务端强制校验） */
@@ -333,3 +315,114 @@ export const fetchGatewayUsage = (orgId: number, days?: number) => {
   const qs = params.toString();
   return request<GatewayUsageDto>('GET', `/api/orgs/${orgId}/gateway-logs/usage${qs ? `?${qs}` : ''}`);
 };
+
+// ============ Spoke 工作区（project 面向 spoke 的扩展面，1:1 绑定） ============
+/** 组织下工作区列表：按绑定 project 的可见性过滤 */
+export const listWorkspaces = (orgId: number) =>
+  request<WorkspaceDto[]>('GET', `/api/workspaces?orgId=${orgId}`);
+
+/** 单工作区查询（读鉴权按绑定 project 可见性） */
+export const getWorkspace = (id: number) => request<WorkspaceDto>('GET', `/api/workspaces/${id}`);
+
+/** 创建工作区：projectId 指定要绑定的项目（1:1，重复绑定→409）；name 留空由服务端取项目名 */
+export const createWorkspace = (projectId: number, name: string) =>
+  request<WorkspaceDto>('POST', '/api/workspaces', {projectId, name: name.trim() || null});
+
+/** 改工作区：name 改展示名，status 归档/恢复（active|archived） */
+export const updateWorkspace = (id: number, body: {name?: string; status?: string}) =>
+  request<WorkspaceDto>('PATCH', `/api/workspaces/${id}`, body);
+
+/** 归档工作区（软删）并级联删除其菜单配置 */
+export const archiveWorkspace = (id: number) => request<void>('DELETE', `/api/workspaces/${id}`);
+
+// ============ Spoke 公共菜单（绑定工作区，与组织无关） ============
+export const listMenus = (workspaceId: number) =>
+  request<MenuItemDto[]>('GET', `/api/workspaces/${workspaceId}/menus`);
+
+export interface CreateMenuBody {
+  menuKey?: string;
+  label: string;
+  icon?: string;
+  path?: string;
+  parentId?: number | null;
+  requiredPerm?: string;
+  visibleRoles?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+}
+
+export const createMenu = (workspaceId: number, body: CreateMenuBody) =>
+  request<MenuItemDto>('POST', `/api/workspaces/${workspaceId}/menus`, body);
+
+export interface UpdateMenuBody {
+  menuKey?: string;
+  label?: string;
+  icon?: string;
+  path?: string;
+  requiredPerm?: string;
+  visibleRoles?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+}
+
+export const updateMenu = (menuId: number, body: UpdateMenuBody) =>
+  request<MenuItemDto>('PATCH', `/api/menus/${menuId}`, body);
+
+/** 启用/停用菜单项（下发时仅含 enabled 项） */
+export const toggleMenu = (menuId: number, enabled: boolean) =>
+  request<MenuItemDto>('POST', `/api/menus/${menuId}/toggle?enabled=${enabled}`);
+
+/** 删除菜单项，级联删除其全部子孙 */
+export const deleteMenu = (menuId: number) => request<void>('DELETE', `/api/menus/${menuId}`);
+
+// ============ 项目知识库（A3-S1：CRUD + 乐观锁 + 软删 + 版本历史） ============
+export const listKnowledgeItems = (projectId: number) =>
+  request<KnowledgeItemListItemDto[]>('GET', `/api/knowledge?projectId=${projectId}`);
+
+export const getKnowledgeItem = (id: number) =>
+  request<KnowledgeItemDto>('GET', `/api/knowledge/${id}`);
+
+export const getKnowledgeHistory = (id: number) =>
+  request<KnowledgeHistoryItemDto[]>('GET', `/api/knowledge/${id}/history`);
+
+export const getKnowledgeHistoryVersion = (id: number, version: number) =>
+  request<KnowledgeHistoryVersionDto>('GET', `/api/knowledge/${id}/history/${version}`);
+
+export interface CreateKnowledgeItemBody {
+  projectId: number;
+  topic: string;
+  summary?: string | null;
+  content?: string | null;
+}
+
+export const createKnowledgeItem = (body: CreateKnowledgeItemBody) =>
+  request<KnowledgeItemDto>('POST', '/api/knowledge', body);
+
+/** 更新走乐观锁：expectedVersion 为编辑时基于的版本；冲突时 catch 到 ApiRequestError(status=409)，details 为最新 KnowledgeItemDto */
+export interface UpdateKnowledgeItemBody {
+  topic?: string | null;
+  summary?: string | null;
+  content?: string | null;
+  expectedVersion: number;
+}
+
+export const updateKnowledgeItem = (id: number, body: UpdateKnowledgeItemBody) =>
+  request<KnowledgeItemDto>('POST', `/api/knowledge/${id}`, body);
+
+/** 软删知识条目（历史版本 knowledge_item_events 保留留痕） */
+export const deleteKnowledgeItem = (id: number) =>
+  request<void>('DELETE', `/api/knowledge/${id}`);
+
+// ============ 项目黑板报（A4：追加型 + 归档状态标签） ============
+export const listBlackboardActive = (projectId: number) =>
+  request<BlackboardEntryDto[]>('GET', `/api/blackboard?projectId=${projectId}`);
+
+export const listBlackboardArchives = (projectId: number) =>
+  request<BlackboardEntryDto[]>('GET', `/api/blackboard/archives?projectId=${projectId}`);
+
+export const appendBlackboardEntry = (projectId: number, content: string) =>
+  request<BlackboardEntryDto>('POST', '/api/blackboard', {projectId, content});
+
+/** 归档条目（幂等：已归档直接返回当前态） */
+export const archiveBlackboardEntry = (id: number) =>
+  request<BlackboardEntryDto>('POST', `/api/blackboard/${id}/archive`);

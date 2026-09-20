@@ -6,8 +6,6 @@ interface MemorySettings {
   flushMode: string;
   flushMinGapMinutes: number;
   flushAsyncEnabled: boolean;
-  flushWindowMessages: number;
-  flushBackgroundMessages: number;
   subagentFlushEnabled: boolean;
   memoryMdMaxKb: number;
   dailyRetentionDays: number;
@@ -55,8 +53,6 @@ function MemorySettingsCard() {
         flushMode: settings.flushMode,
         flushMinGapMinutes: settings.flushMinGapMinutes,
         flushAsyncEnabled: settings.flushAsyncEnabled,
-        flushWindowMessages: settings.flushWindowMessages,
-        flushBackgroundMessages: settings.flushBackgroundMessages,
         subagentFlushEnabled: settings.subagentFlushEnabled,
         memoryMdMaxKb: settings.memoryMdMaxKb,
         dailyRetentionDays: settings.dailyRetentionDays,
@@ -104,11 +100,11 @@ function MemorySettingsCard() {
           <label style={fieldStyle}>
             <span>记忆提取策略</span>
             <select value={settings.flushMode} onChange={(e) => patch({ flushMode: e.target.value })}>
+              <option value="always">always（每回合·全量上下文提取，默认）</option>
               <option value="throttled">throttled（按间隔节流）</option>
-              <option value="always">always（每回合提取）</option>
               <option value="never">never（关闭自动提取）</option>
             </select>
-            <span className="hint">never 时仅保留手动 memory_save</span>
+            <span className="hint">每回合把当前上下文整体喂给提取模型；never 时仅保留手动 memory_save</span>
           </label>
 
           <label style={fieldStyle}>
@@ -126,20 +122,6 @@ function MemorySettingsCard() {
               <option value="sync">同步（等提取完成再结束回合）</option>
             </select>
             <span className="hint">同步档仅用于对照排查提取本身的问题</span>
-          </label>
-
-          <label style={fieldStyle}>
-            <span>单次提取窗口（条）</span>
-            <input type="number" min={1} max={50} value={settings.flushWindowMessages}
-                   onChange={(e) => patch({ flushWindowMessages: num(e.target.value) })} />
-            <span className="hint">每回合最多提取多少条新消息，超出下轮继续，默认 10</span>
-          </label>
-
-          <label style={fieldStyle}>
-            <span>窗口前背景（条）</span>
-            <input type="number" min={0} max={20} value={settings.flushBackgroundMessages}
-                   onChange={(e) => patch({ flushBackgroundMessages: Math.max(0, parseInt(e.target.value || '0', 10) || 0) })} />
-            <span className="hint">让提取模型看懂窗口语境，默认 5</span>
           </label>
 
           <label style={fieldStyle}>

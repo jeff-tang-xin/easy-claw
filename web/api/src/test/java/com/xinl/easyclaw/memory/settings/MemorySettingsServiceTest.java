@@ -33,7 +33,7 @@ class MemorySettingsServiceTest {
     @InjectMocks
     private MemorySettingsService service;
 
-    /** 首次读取：按实体默认值落库一行（48K 窗 / throttled 30min / 子 Agent 关提取）。 */
+    /** 首次读取：按实体默认值落库一行（48K 窗 / always 每回合全量提取 / 子 Agent 关提取）。 */
     @Test
     void 首次读取按默认值落库() {
         when(repository.findByUserId("local")).thenReturn(Optional.empty());
@@ -46,7 +46,7 @@ class MemorySettingsServiceTest {
         MemorySettingsEntity settings = service.getOrCreate();
 
         assertEquals(48000, settings.getContextWindowTokens());
-        assertEquals("throttled", settings.getFlushMode());
+        assertEquals("always", settings.getFlushMode());
         assertEquals(30, settings.getFlushMinGapMinutes());
         assertEquals(false, settings.getSubagentFlushEnabled());
         assertEquals(64, settings.getMemoryMdMaxKb());
@@ -83,7 +83,7 @@ class MemorySettingsServiceTest {
 
         assertEquals(96000, saved.getContextWindowTokens());
         assertEquals(true, saved.getSubagentFlushEnabled());
-        assertEquals("throttled", saved.getFlushMode()); // 未触碰
+        assertEquals("always", saved.getFlushMode()); // 未触碰
         assertEquals(30, saved.getFlushMinGapMinutes()); // 未触碰
     }
 

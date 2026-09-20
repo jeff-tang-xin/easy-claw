@@ -2,6 +2,7 @@ package com.xinl.easyclaw.api;
 
 import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
+import com.xinl.easyclaw.tool.service.ToolPermissionPolicy;
 import com.xinl.easyclaw.workspace.*;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
 import org.springframework.http.HttpHeaders;
@@ -264,7 +265,13 @@ public class WorkspaceController {
 
     @GetMapping("/{id}/permissions")
     public List<PermissionRuleEntity> permissions(@PathVariable String id) {
-        return permissionRuleService.findForWorkspace(id);
+        // 只返回「仍需确认的工具」的授权。某工具一旦被加入 ToolPermissionPolicy 的静默放行
+        // 清单（如只读工具），它就不再出现在白名单开关里；若历史上对其点过「总是允许」，
+        // 那条 DB 记录对 UI 已无意义，不过滤会让「已启用数 > 可选项总数」（曾出现 19/18）。
+        // 这里按同一权威策略过滤，分子分母天然一致；规则本身保留在 DB，不做物理删除。
+        return permissionRuleService.findForWorkspace(id).stream()
+                .filter(r -> ToolPermissionPolicy.requiresConfirm(r.getToolName()))
+                .toList();
     }
 
     @PostMapping("/{id}/permissions/{toolName}")
@@ -389,13 +396,11 @@ public class WorkspaceController {
             boolean isText = TEXT_EXT.contains(ext) || size <= 4096;
             if (isText) {
                 byte[] bytes;
-                boolean truncated = false;
-                if (size > MAX_TEXT_SIZE) {
-                    byte[] full = Files.readAllBytes(target);
-                    bytes = Arrays.copyOf(full, (int) MAX_TEXT_SIZE);
-                    truncated = true;
-                } else {
-                    bytes = Files.readAllBytes(target);
+                boolean truncated = size > MAX_TEXT_SIZE;
+                // 有界读取：无论文件多大，最多只读 MAX_TEXT_SIZE 字节，避免先把整个
+                // 大文件 readAllBytes 进内存再截断造成的内存尖峰。
+                try (java.io.InputStream in = Files.newInputStream(target)) {
+                    bytes = in.readNBytes((int) Math.min(size, MAX_TEXT_SIZE));
                 }
                 MediaType mediaType = MediaType.parseMediaType("text/plain;charset=UTF-8");
                 return ResponseEntity.ok()

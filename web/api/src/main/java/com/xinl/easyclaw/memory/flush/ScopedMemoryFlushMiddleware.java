@@ -16,14 +16,15 @@ import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * 框定范围的记忆提取中间件：回合结束后按「游标窗口 + 同步/异步开关」触发提取，
- * 全面替代 vendored MemoryFlushMiddleware（其 trigger 已置 NEVER，注册但永不触发）。
+ * 全量上下文的记忆提取中间件：回合结束后按「全量上下文 + 同步/异步开关」触发提取，
+ * 接管 vendored MemoryFlushMiddleware（其 trigger 已置 NEVER，注册但永不触发）。
  *
- * <p>与 vendored 的两处根本差异：
+ * <p>与 vendored 的唯一执行期差异在<b>触发方式</b>，载荷语义保持 vendored 原生：
  * <ol>
- *   <li><b>载荷框定</b>：vendored 每次把「全量上下文 + MEMORY.md 全文 + 当日流水全文」
- *       塞给提取模型（13-16 万字符且随记忆增长自膨胀）；本类只提取会话游标后的增量
- *       （默认 ≤10 条新消息 + 5 条背景），载荷有界——见 {@link ScopedMemoryFlushService}。</li>
+ *   <li><b>载荷同源</b>：vendored 每次把「全量上下文 + MEMORY.md 全文 + 当日流水全文」
+ *       塞给提取模型；本类同样喂入 state.getContext() 的完整快照（上下文窗已调至
+ *       100K tokens，载荷随窗有界），再复用同一个 MemoryFlushManager 落盘——
+ *       见 {@link ScopedMemoryFlushService}。</li>
  *   <li><b>异步可选</b>：vendored 以 concatWith 把提取串进主流，提取不完回合不收尾；
  *       本类 flushAsyncEnabled=true（默认）时 doOnComplete 提交守护线程即返回，
  *       主流立即 complete；false 时保留 concatWith 同步等待语义（对照档）。
@@ -66,7 +67,7 @@ public class ScopedMemoryFlushMiddleware implements HarnessRuntimeMiddleware {
             log.warn("记忆设置读取失败，跳过本轮提取: {}", e.toString());
             return main;
         }
-        String mode = settings.getFlushMode() == null ? "throttled" : settings.getFlushMode();
+        String mode = settings.getFlushMode() == null ? "always" : settings.getFlushMode();
         if ("never".equals(mode)) {
             return main;
         }
@@ -77,7 +78,7 @@ public class ScopedMemoryFlushMiddleware implements HarnessRuntimeMiddleware {
             return main.doOnComplete(
                     () -> flushService.submitScopedFlush(key, agent, rc, settings, model));
         }
-        // 同步：保留 vendored 等待语义，但载荷已框定、执行有兜底时限与异常吞咽
+        // 同步：保留 vendored 等待语义，但执行有兜底时限与异常吞咽
         return main.concatWith(
                 Mono.defer(() -> {
                             flushService.runFlushBlocking(key, agent, rc, settings, model);

@@ -10,6 +10,18 @@ export interface UserDto {
   platformAdmin: boolean;
   /** 首次登录须先改密（改密前其余 API 不可用，mcp 门禁） */
   mustChangePassword: boolean;
+  /** 当前密码到期时刻（改密后重新起算）；ISO-8601 字符串 */
+  passwordExpiresAt: string | null;
+  /** 已进入到期前提醒窗口 */
+  passwordExpiringSoon: boolean;
+}
+
+/**
+ * 管理员创建用户 / 重置密码的响应：UserDto + 一次性明文密码。
+ * tempPassword 仅本次返回，服务端不落库、不投递邮箱，关闭弹窗后无法再次查看。
+ */
+export interface CreatedUserDto extends UserDto {
+  tempPassword: string;
 }
 
 export interface OrgDto {
@@ -151,53 +163,66 @@ export interface AppKeyCreatedResponse {
   plainKey: string;
 }
 
-// ============ Docs（项目内协作文档：需求 requirement / 任务 task） ============
-/** 文档列表项：不含正文 */
-export interface DocListItemDto {
+// ============ 知识库（项目内共享知识条目，乐观锁 + 软删 + 版本历史） ============
+/** 知识条目列表项：不含正文 */
+export interface KnowledgeItemListItemDto {
   id: number;
   projectId: number;
-  parentDocId: number | null;
-  title: string;
-  /** requirement | task */
-  docType: string;
-  /** active | archived */
+  topic: string;
+  summary: string;
+  version: number;
   status: string;
   ownerUserId: number;
   ownerUsername: string | null;
-  assigneeUserId: number | null;
-  assigneeUsername: string | null;
-  version: number;
-  updatedAt: string | null;
-}
-
-/** 文档详情：含当前版正文 */
-export interface DocDto {
-  id: number;
-  projectId: number;
-  parentDocId: number | null;
-  title: string;
-  docType: string;
-  status: string;
-  ownerUserId: number;
-  ownerUsername: string | null;
-  assigneeUserId: number | null;
-  assigneeUsername: string | null;
-  version: number;
-  content: string;
+  updatedBy: number | null;
+  updatedByUsername: string | null;
   createdAt: string | null;
   updatedAt: string | null;
 }
 
-/** 历史版本项（doc_events 一行快照，不可变） */
-export interface DocEventDto {
+/** 知识条目详情：含当前版正文 */
+export interface KnowledgeItemDto {
   id: number;
-  docId: number;
-  version: number;
-  title: string;
+  projectId: number;
+  topic: string;
+  summary: string;
   content: string;
+  version: number;
+  status: string;
+  ownerUserId: number;
+  ownerUsername: string | null;
+  updatedBy: number | null;
+  updatedByUsername: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** 历史版本项（knowledge_item_events 一行快照，不可变） */
+export interface KnowledgeHistoryItemDto {
+  version: number;
+  topic: string;
+  summary: string;
   actorUserId: number | null;
   actorUsername: string | null;
   createdAt: string | null;
+}
+
+/** 历史版本详情：含该版正文 */
+export interface KnowledgeHistoryVersionDto extends KnowledgeHistoryItemDto {
+  content: string;
+}
+
+// ============ 黑板报（项目共享，追加型 + 归档状态标签） ============
+export interface BlackboardEntryDto {
+  id: number;
+  projectId: number;
+  content: string;
+  authorUserId: number;
+  authorUsername: string | null;
+  /** active | archived */
+  status: string;
+  createdAt: string | null;
+  updatedAt: string | null;
 }
 
 // ============ LLM 网关（详单/用量，组织维度，仅 owner/admin 可见） ============
@@ -252,4 +277,53 @@ export interface GatewayUsageDto {
   promptTokens: number;
   completionTokens: number;
   byModel: GatewayModelUsage[];
+}
+
+// ============ Spoke 工作区（project 面向 spoke 的扩展面，1:1 绑定） ============
+/** 工作区视图：menuCount 为该工作区已配置的菜单项总数（含子项），不含菜单明细 */
+export interface WorkspaceDto {
+  id: number;
+  projectId: number;
+  orgId: number;
+  name: string;
+  /** active | archived */
+  status: string;
+  menuCount: number;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** 菜单项视图（管理面，扁平结构）：绑定工作区、与组织无关 */
+export interface MenuItemDto {
+  id: number;
+  workspaceId: number;
+  parentId: number | null;
+  /** spoke 侧稳定标识（同工作区内唯一） */
+  menuKey: string;
+  label: string;
+  icon: string;
+  path: string;
+  /** 可见性权限码；空=不要求 */
+  requiredPerm: string;
+  /** 逗号分隔角色；空=全部角色可见 */
+  visibleRoles: string;
+  sortOrder: number;
+  enabled: boolean;
+  createdAt: string | null;
+  updatedAt: string | null;
+}
+
+/** 单个组织角色及其权限码（后端 roles 顺序固定：owner/admin/member/guest） */
+export interface RolePerms {
+  role: string;
+  permissions: string[];
+}
+
+/**
+ * GET /api/role-matrix 响应：组织角色 → 权限码的只读快照。
+ * 数据由服务端 Permissions 单一定义，platformAdminPerms 为平台管理员叠加的权限码。
+ */
+export interface RoleMatrixResponse {
+  roles: RolePerms[];
+  platformAdminPerms: string[];
 }

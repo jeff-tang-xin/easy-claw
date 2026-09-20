@@ -593,6 +593,8 @@ tr:hover td { background: rgba(59, 130, 246, 0.025); }
 
 .md-content { width: 100%; min-width: 0; }
 .md-content-wrap { width: 100%; min-width: 0; }
+/* 流式期间的纯文本正文：不做 md 解析，保留换行，回合结束切回完整排版 */
+.md-content.streaming-plain { white-space: pre-wrap; word-break: break-word; }
 .md-content p { margin: 4px 0; }
 .md-content p:first-child { margin-top: 0; }
 .md-content p:last-child { margin-bottom: 0; }
@@ -800,6 +802,8 @@ details.fold .fold-body.md-content {
   word-break: normal;
   color: var(--text-secondary);
 }
+/* 流式纯文本态优先级更高：折叠块流式期间仍保留换行 */
+details.fold .fold-body.md-content.streaming-plain { white-space: pre-wrap; word-break: break-word; }
 details.fold .fold-body.md-content pre {
   background: #0f172a; color: #e2e8f0;
   border-radius: 8px; padding: 10px 12px;
@@ -1671,71 +1675,4 @@ details.fold.loading summary::before {
   line-height: 1.6;
   margin: 4px 0;
   color: var(--text);
-}
-
-/* 团队 / 定时工作区「建设中」标准占位页 */
-.coming-soon {
-  margin: 24px;
-  padding: 56px 32px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-sm);
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-}
-
-.coming-soon-icon {
-  width: 72px;
-  height: 72px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 36px;
-  border-radius: var(--radius-xl);
-  background: var(--panel-hover);
-  border: 1px solid var(--border);
-  margin-bottom: 20px;
-}
-
-.coming-soon-title {
-  margin: 0 0 8px;
-  font-size: 20px;
-  font-weight: 700;
-  color: var(--text);
-}
-
-.coming-soon-desc {
-  margin: 0 0 20px;
-  font-size: 14px;
-  line-height: 1.7;
-  color: var(--text-secondary);
-  max-width: 420px;
-}
-
-.coming-soon-features {
-  margin: 0 0 28px;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: center;
-}
-
-.coming-soon-features li {
-  padding: 5px 14px;
-  font-size: 13px;
-  color: var(--text-secondary);
-  background: var(--panel-hover);
-  border: 1px solid var(--border);
-  border-radius: 999px;
-}
-
-.coming-soon-btn {
-  display: inline-flex;
-  align-items: center;
-  text-decoration: none;
 }

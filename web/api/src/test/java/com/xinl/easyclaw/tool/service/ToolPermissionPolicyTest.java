@@ -103,4 +103,15 @@ class ToolPermissionPolicyTest {
         // 字符串做正则清理并返回，写回磁盘必须另走 edit_file（那一步会确认）。
         assertThat(ToolPermissionPolicy.requiresConfirm("format_code")).isFalse();
     }
+
+    @Test
+    @DisplayName("knowledge 只读工具静默放行，knowledge_write 因落盘必须确认")
+    void knowledgeReadOnlyToolsSilentButWriteRequiresConfirm() {
+        // 这三个只能读 knowledge/ 下的知识库条目，不触碰用户文件、不对外发送
+        assertThat(ToolPermissionPolicy.requiresConfirm("knowledge_list")).isFalse();
+        assertThat(ToolPermissionPolicy.requiresConfirm("knowledge_search")).isFalse();
+        assertThat(ToolPermissionPolicy.requiresConfirm("knowledge_read")).isFalse();
+        // 会真正新增/覆盖知识条目文件，保留确认
+        assertThat(ToolPermissionPolicy.requiresConfirm("knowledge_write")).isTrue();
+    }
 }

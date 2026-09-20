@@ -21,8 +21,6 @@ interface ScenarioOption { id: number; name: string; displayName: string; icon?:
 /** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序 */
 const WS_TYPES = [
   { type: 'single', label: 'SOLO', icon: '👤', hint: '单个主智能体独立完成任务' },
-  { type: 'team', label: '团队', icon: '👥', hint: '主智能体编排多个子智能体协作' },
-  { type: 'schedule', label: '定时', icon: '⏰', hint: '按工作流编排任务（定时触发能力规划中，当前可手动执行）' },
 ] as const;
 
 type WsType = typeof WS_TYPES[number]['type'];

@@ -2,7 +2,6 @@ import {useEffect, useState} from 'react';
 import {Navigate, NavLink, Route, Routes} from 'react-router-dom';
 import {isIconUrl, loadBranding, useBranding} from './branding';
 import WorkspacesPage from './pages/WorkspacesPage';
-import ComingSoonPage from './pages/ComingSoonPage';
 import ChatPage from './pages/ChatPage';
 import SkillsPage from './pages/SkillsPage';
 import ScenariosPage from './pages/ScenariosPage';
@@ -22,8 +21,6 @@ const menuGroups: MenuGroup[] = [
     title: '工作区',
     items: [
       { to: '/workspaces/single', icon: '👤', label: 'SOLO' },
-      { to: '/workspaces/team', icon: '👥', label: '团队' },
-      { to: '/workspaces/schedule', icon: '⏰', label: '定时' },
     ],
   },
   {
@@ -114,21 +111,6 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Navigate to="/workspaces/single" replace />} />
           <Route path="/workspaces" element={<Navigate to="/workspaces/single" replace />} />
-          {/* 团队 / 定时工作区详情标准尚未定稿：入口保留可点，详情页显示建设中占位，不挂载完整工作区管理 */}
-          <Route path="/workspaces/team" element={
-            <ComingSoonPage
-              icon="👥"
-              title="团队工作区"
-              features={['多角色分工协作', '任务自动派发与汇总', '团队过程可观测']}
-            />
-          } />
-          <Route path="/workspaces/schedule" element={
-            <ComingSoonPage
-              icon="⏰"
-              title="定时工作区"
-              features={['定时 / 周期任务调度', '执行结果自动留痕', '计划任务集中管理']}
-            />
-          } />
           <Route path="/workspaces/:wsType" element={<WorkspacesPage />} />
           <Route path="/chat/:workspaceId" element={<ChatPage />} />
           <Route path="/skills" element={<SkillsPage />} />

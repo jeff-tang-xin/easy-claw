@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import {fetchMe, login} from '../api';
+import {ApiRequestError, fetchMe, login} from '../api';
 import {saveSession} from '../auth';
 import ChangePasswordCard from '../components/ChangePasswordCard';
 import type {MeResponse} from '../types';
@@ -32,7 +32,12 @@ export default function LoginPage({onLoggedIn}: Props) {
       }
       onLoggedIn(await fetchMe());
     } catch (err) {
-      setError(err instanceof Error ? err.message : '登录失败，请重试');
+      // 密码已过期（超过 60 天有效期）：禁止登录，提示联系平台管理员重置
+      if (err instanceof ApiRequestError && err.code === 'PASSWORD_EXPIRED') {
+        setError(err.message || '密码已过期，请联系平台管理员重置密码后再登录。');
+      } else {
+        setError(err instanceof Error ? err.message : '登录失败，请重试');
+      }
     } finally {
       setBusy(false);
     }

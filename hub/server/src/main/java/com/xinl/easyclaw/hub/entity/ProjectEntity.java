@@ -9,7 +9,7 @@ import lombok.Getter;
 import lombok.Setter;
 
 /**
- * 项目实体（projects 表）：组织内的归类锚点，后续 docs/知识库/blackboard 都挂载 project_id。
+ * 项目实体（projects 表）：组织内的归类锚点，后续知识库/blackboard 都挂载 project_id。
  * 公共字段 id/created_at/updated_at 见 {@link BaseEntity}。
  */
 @Getter

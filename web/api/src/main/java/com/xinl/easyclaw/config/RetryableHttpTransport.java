@@ -160,6 +160,13 @@ public class RetryableHttpTransport implements HttpTransport {
      * </ul>
      */
     private boolean isRetryable(Throwable t) {
+        if (isTimeout(t)) {
+            // 读/连接超时（SocketTimeout）＝上游挂起或 prefill/思考过慢：重试无益，
+            // 反而会把单请求拖成数小时并长期占用 boundedElastic 线程。
+            // 直接上抛，由调用方按会话中止/重建处理，避免放大成线程池耗尽。
+            log.debug("超时异常不重试: {}", String.valueOf(t.getMessage()));
+            return false;
+        }
         if (t instanceof HttpTransportException hte) {
             if (hte.isRetryable()) {
                 return true;
@@ -173,6 +180,17 @@ public class RetryableHttpTransport implements HttpTransport {
         }
         // 其他 RuntimeException：网络抖动也算可重试
         return t.getCause() instanceof java.io.IOException;
+    }
+
+    /** 沿 cause 链检测读/连接超时：ReadTimeout / SocketTimeout 不值得重试 */
+    private boolean isTimeout(Throwable t) {
+        for (Throwable c = t; c != null; c = c.getCause()) {
+            if (c instanceof java.net.SocketTimeoutException
+                    || c instanceof java.util.concurrent.TimeoutException) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

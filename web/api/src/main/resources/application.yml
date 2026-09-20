@@ -61,7 +61,13 @@ agentscope:
     # 原值 10min：记忆提取/长上下文调用一旦挂起，会话最长 20min 无任何反馈。
     # 降为 3min 后真空期 ~6min 封顶。注意：本值是「整流完成时限」而非空闲超时——
     # 极端长输出（逼近 max-tokens 16384）的合法生成可能触线，若观察到误杀可调回 5。
-    model-timeout-minutes: 3
+    # 实况修正：Flux.timeout 语义是「相邻产出间隔」而非总时长——长对话上下文大时，
+    # 模型 prefill / 首 token 延迟（TTFT）常 >3min，导致刚发消息就被「Model request
+    # timeout after PT3M」误杀（用户实测）。故回抬到 10min 容忍大上下文 TTFT。
+    # 且超时触发时底层阻塞读线程已被 OkHttpTransport 的 onCancel 立刻释放（不再泄漏
+    # boundedElastic 线程 / 挂死连接，见 OkHttpTransport.stream），误杀/挂死后 6min 内
+    # 必然错误返回给前端，不会卡死整个 workspace。
+    model-timeout-minutes: ${AGENTSCOPE_MODEL_TIMEOUT_MINUTES:10}
     # 下界受两个硬约束钳制，调低前务必确认：
     #  1) agent_spawn 同步等待上限 600s（AgentSpawnTool.MAX_TIMEOUT_SECONDS），到点自行
     #     「提升为后台任务」返回。本值必须 > 600s，否则外层工具超时先掐断 spawn，
@@ -92,15 +98,22 @@ agentscope:
   #       ② api-key 属于密钥，请勿写进本文件（本文件随源码进入版本库），
   #         如需按智能体独立密钥，写到用户级配置 ~/.easyClaw/application.yml。
   # ============================
-  agents:
-    coder:
-      provider: openapi          # 引用下方 providers 表中的 key
-      model-name:   # 覆盖模型名
-      base-url:                   # 覆盖 base-url（一般留空继承 provider）
-      api-key:                    # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
-      temperature:                # 覆盖采样温度
-      max-tokens:                 # 覆盖单次最大输出 token
-      parallel-tool-calls:        # 覆盖是否允许并行 tool_call
+  # ⚠ 本段是【示例】，默认整段注释掉，不要裸留 key。
+  #   踩过的坑：曾经写成 `agents: coder: provider: openapi`（providers 表里并无此 key），
+  #   于是 providerCfg 解析为 null → 模型名静默回退到 Java 字段默认值 gpt-4o-mini
+  #   （AgentScopeProperties.Model.modelName）→ cloud 下等于绕过 hub_cloud 别名直发
+  #   真实模型名给 hub（被绑定面校验拒 404），local 下等于向当前 provider 发不存在的模型；
+  #   两种模式下该子 Agent 都不可用，且日志里看不出是配置笔误所致。
+  #   要按智能体指定模型：取消注释，并务必填 providers 表中真实存在的 key。
+  # agents:
+  #   coder:
+  #     provider: deepseek         # 必须是 providers 表中的 key
+  #     model-name:                # 覆盖模型名
+  #     base-url:                  # 覆盖 base-url（一般留空继承 provider）
+  #     api-key:                   # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
+  #     temperature:               # 覆盖采样温度
+  #     max-tokens:                # 覆盖单次最大输出 token
+  #     parallel-tool-calls:       # 覆盖是否允许并行 tool_call
   # ---- providers 表：按模式拆分到 profile 文件（同一份公共结构，两个供给方）----
   # local（默认）→ application-local.yml：本地多 provider 表 + 顶层 local:/model: 变量段
   # cloud        → application-cloud.yml：hub 网关条目 + 顶层 cloud:/model: 变量段
@@ -113,6 +126,12 @@ agentscope:
   #         - 统一取小值 → 大文件 write_file 的 arguments JSON 被截断 → 参数丢失
   # 匹配优先级：provider:model 精确 > model 精确 > 前缀通配（xxx*，最长优先）> providers.*.max-tokens > model.max-tokens
   # 说明：max-tokens-unsupported: true 表示该模型完全不接受 max_tokens 字段，届时不下发该参数。
+  #       max-completion-tokens-only: true 表示该模型只认新协议字段，改用 max_completion_tokens 下发。
+  #       注意 max_tokens 与 max_completion_tokens 互斥，代码保证只发其一；两者同时下发会被
+  #       严格校验的上游（如火山方舟）判为「cannot be set at the same time」直接 400。
+  #       本表只在 local 模式生效：cloud 模式由 application-cloud.yml 置
+  #       model-limits-enabled: false 整体关闭上限下发——真实模型由 hub 按 appkey 路由决定，
+  #       web 不感知真实模型，任何按模型名算出的上限都可能超其真实上限而触发 400。
   # ============================
   model-limits:
     # —— DeepSeek ——（deepseek-chat 8K；reasoner 含思维链，上限更高）

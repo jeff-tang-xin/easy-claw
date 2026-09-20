@@ -6,6 +6,8 @@ import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
 import com.xinl.easyclaw.tools.CodeGenerationTools;
 import com.xinl.easyclaw.tools.FileOperationTools;
 import com.xinl.easyclaw.tools.BlackboardTools;
+import com.xinl.easyclaw.tools.KnowledgeTools;
+import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.tools.WebSearchTools;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
@@ -36,6 +38,8 @@ public class ToolRegistryService {
     private final BlackboardTools blackboardTools;
     private final WebSearchTools searchTools;
     private final CodeGenerationTools codeTools;
+    private final SkillScriptTools skillScriptTools;
+    private final KnowledgeTools knowledgeTools;
 
     /** 工具参数定义 */
     public record ToolParamDef(String name, boolean required, String description) {
@@ -169,7 +173,12 @@ public class ToolRegistryService {
             Map.entry("run_python", "Python 执行"),
             Map.entry("run_skill_script", "Skill 脚本执行"),
             Map.entry("web_search", "网络搜索"),
-            Map.entry("fetch_webpage", "网页获取")
+            Map.entry("fetch_webpage", "网页获取"),
+            // 自定义补充工具（KnowledgeTools；SkillScriptTools 的 run_skill_script 已在上方）
+            Map.entry("knowledge_write", "知识写入"),
+            Map.entry("knowledge_list", "知识列表"),
+            Map.entry("knowledge_search", "知识搜索"),
+            Map.entry("knowledge_read", "知识读取")
     );
 
     private static final Map<String, String> GROUPS = Map.ofEntries(
@@ -189,6 +198,10 @@ public class ToolRegistryService {
             Map.entry("run_skill_script", "CODE"),
             Map.entry("web_search", "WEB"),
             Map.entry("fetch_webpage", "WEB"),
+            Map.entry("knowledge_write", "KNOWLEDGE"),
+            Map.entry("knowledge_list", "KNOWLEDGE"),
+            Map.entry("knowledge_search", "KNOWLEDGE"),
+            Map.entry("knowledge_read", "KNOWLEDGE"),
             Map.entry("memory_search", "MEMORY"),
             Map.entry("memory_get", "MEMORY"),
             Map.entry("session_search", "SESSION"),
@@ -211,12 +224,16 @@ public class ToolRegistryService {
                                FileOperationTools fileTools,
                                BlackboardTools blackboardTools,
                                WebSearchTools searchTools,
-                               CodeGenerationTools codeTools) {
+                               CodeGenerationTools codeTools,
+                               SkillScriptTools skillScriptTools,
+                               KnowledgeTools knowledgeTools) {
         this.toolService = toolService;
         this.fileTools = fileTools;
         this.blackboardTools = blackboardTools;
         this.searchTools = searchTools;
         this.codeTools = codeTools;
+        this.skillScriptTools = skillScriptTools;
+        this.knowledgeTools = knowledgeTools;
     }
 
     /**
@@ -263,7 +280,11 @@ public class ToolRegistryService {
         }
 
         // 2. 自定义补充工具（反射 @Tool 注解）
-        for (Object instance : List.of(fileTools, searchTools, codeTools, blackboardTools)) {
+        // 清单必须与 AgentFactory.createWorkspaceToolkit 注册的 6 个工具类严格一致；
+        // 少挂一个，该工具仍能被 Agent 调用/弹确认/写白名单，却不出现在工具目录与
+        // 白名单开关里（曾因此漏掉 KnowledgeTools/SkillScriptTools，表现为白名单 19/18）。
+        for (Object instance : List.of(fileTools, searchTools, codeTools, skillScriptTools,
+                blackboardTools, knowledgeTools)) {
             for (Method m : instance.getClass().getMethods()) {
                 Tool tool = m.getAnnotation(Tool.class);
                 if (tool == null) {

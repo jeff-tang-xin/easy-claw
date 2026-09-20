@@ -218,7 +218,7 @@ public class ModelRegistryService {
                 .apiKey(apiKey)
                 .modelName(modelName == null ? "" : modelName.trim())
                 .stream(stream == null || stream)
-           //     .generateOptions(buildGenerateOptions(providerName, cfg, modelName))
+                .generateOptions(buildGenerateOptions(providerName, cfg, modelName))
                 .httpTransport(transport)
                 .build();
     }
@@ -234,8 +234,9 @@ public class ModelRegistryService {
      *       上游 {@code ToolCallBuilder.build()} 会用
      *       {@code JsonUtils.isValidJsonObject(raw)} 校验，不合法就把整个 arguments
      *       替换成 {@code "{}"}，且只打 debug 日志不抛错 —— 于是工具方法拿到
-     *       全 null 的入参，报「未找到 path/content 参数」。同时
-     *       {@code maxCompletionTokens} 一并设置以兼容较新的 OpenAI 端点。</li>
+     *       全 null 的入参，报「未找到 path/content 参数」。
+     *       {@code maxCompletionTokens} 是 {@code maxTokens} 在新协议里的互斥替代字段，
+     *       两者同时下发会被上游判为非法参数组合，因此只按模型配置发其中一个。</li>
      *   <li><b>parallelToolCalls=false</b> —— 上游流式累积器
      *       {@code ToolCallsAccumulator.determineKey()} 对「只有 arguments 分片、
      *       没有 id 和 name」的 chunk 用 {@code lastToolCallKey} 兜底归组。
@@ -247,11 +248,12 @@ public class ModelRegistryService {
      * deepseek、glm 等模型，各家输出 token 上限差异极大，统一下发一个值会让上限低的
      * 模型直接报 400。因此这里按
      * 「模型名（{@code agentscope.model-limits}）→ provider（{@code agentscope.providers.*.max-tokens}）→ 全局」
-     * 三级回退取值，并支持对个别不接受 {@code max_tokens} 的模型完全不下发该参数。
+     * 三级回退取值，并支持对个别不接受 {@code max_tokens} 的模型完全不下发该参数，
+     * 或改用 {@code max_completion_tokens} 下发（{@code max-completion-tokens-only}）。
      */
-    private GenerateOptions buildGenerateOptions(String providerName,
-                                                 AgentScopeProperties.ProviderConfig cfg,
-                                                 String modelName) {
+    GenerateOptions buildGenerateOptions(String providerName,
+                                         AgentScopeProperties.ProviderConfig cfg,
+                                         String modelName) {
         AgentScopeProperties.Model global = props.getModel();
         AgentScopeProperties.ModelLimit limit = resolveModelLimit(providerName, modelName);
 
@@ -261,7 +263,17 @@ public class ModelRegistryService {
         if (!unsupported) {
             Integer maxTokens = resolveMaxTokens(providerName, cfg, modelName);
             if (maxTokens != null && maxTokens > 0) {
-                builder.maxTokens(maxTokens).maxCompletionTokens(maxTokens);
+                // max_tokens 与 max_completion_tokens 在协议上互斥，只能下发其中一个。
+                // 同时带两个字段会被严格校验的上游判为非法参数组合直接 400：
+                // 「max_tokens and max_completion_tokens cannot be set at the same time」
+                // （火山方舟 doubao/ark 即此行为）。默认发 max_tokens（兼容端点支持面最广，
+                // 且它是防 tool_call arguments 被截断的那个关键限制）；确实只认新字段的模型，
+                // 在 model-limits 里显式配 max-completion-tokens-only: true 切换。
+                if (limit != null && Boolean.TRUE.equals(limit.getMaxCompletionTokensOnly())) {
+                    builder.maxCompletionTokens(maxTokens);
+                } else {
+                    builder.maxTokens(maxTokens);
+                }
             }
         }
 
@@ -291,6 +303,10 @@ public class ModelRegistryService {
     Integer resolveMaxTokens(String providerName,
                              AgentScopeProperties.ProviderConfig cfg,
                              String modelName) {
+        if (!props.isModelLimitsEnabled()) {
+            // cloud 模式：真实模型由 hub 按 appkey 路由决定，web 不感知，上限整体不下发
+            return null;
+        }
         AgentScopeProperties.ModelLimit limit = resolveModelLimit(providerName, modelName);
         if (limit != null && Boolean.TRUE.equals(limit.getMaxTokensUnsupported())) {
             return null;
@@ -364,7 +380,7 @@ public class ModelRegistryService {
      * 最后回退到 OPENAI_API_KEY（OpenAI 兼容协议统一约定）
      */
     private String resolveApiKey(String providerName, String configured) {
-        log.info("resolveApiKey: provider={}, configured='{}'", providerName, configured);
+        log.info("resolveApiKey: provider={}, configured={}", providerName, maskSecret(configured));
         if (configured != null && !configured.isBlank()
                 && !configured.startsWith("${") && !configured.contains("your-api-key")) {
             return configured;
@@ -388,5 +404,26 @@ public class ModelRegistryService {
             return openaiProp;
         }
         return configured != null ? configured : "";
+    }
+
+    /**
+     * 密钥脱敏：日志只留前 4 位与长度，绝不打原值。
+     * <p>
+     * 与 {@code ModelPreference.toString()} 的 {@code "***"} 处理保持同一约定。cloud 模式下
+     * 这里的 configured 就是 hub app-key（来自 HUB_APPKEY），而 app-key 属密钥、不入库不回显，
+     * 建模型时每次打 INFO 即等于持续泄露。
+     */
+    private static String maskSecret(String secret) {
+        if (secret == null) {
+            return "unset";
+        }
+        if (secret.isBlank()) {
+            return "blank";
+        }
+        if (secret.startsWith("${")) {
+            // 未解析的占位符本身不是密钥，原样输出便于定位配置缺失
+            return secret;
+        }
+        return secret.substring(0, Math.min(4, secret.length())) + "***(len=" + secret.length() + ")";
     }
 }

@@ -1,12 +1,10 @@
 package com.xinl.easyclaw.hub.service;
 
 import com.xinl.easyclaw.hub.common.AuditModule;
-import com.xinl.easyclaw.hub.service.AuditService;
 import com.xinl.easyclaw.hub.common.ApiException;
 import com.xinl.easyclaw.hub.contract.project.CreateProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.ProjectDto;
 import com.xinl.easyclaw.hub.contract.project.UpdateProjectRequest;
-import com.xinl.easyclaw.hub.service.OrgService;
 import com.xinl.easyclaw.hub.common.Slugger;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -173,7 +171,7 @@ public class ProjectService {
     private String resolveProjectSlug(Long orgId, String name, String requested) {
         if (requested != null && !requested.isBlank()) {
             String slug = requested.trim();
-            if (!Slugger.isValid(slug)) {
+            if (Slugger.isValid(slug)) {
                 throw ApiException.validation("slug 只能包含小写字母/数字/连字符");
             }
             if (projects.existsByOrgIdAndSlug(orgId, slug)) {

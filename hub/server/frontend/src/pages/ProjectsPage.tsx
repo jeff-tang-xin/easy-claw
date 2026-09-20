@@ -164,7 +164,7 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
       <div className="page-head">
         <div>
           <h2>项目</h2>
-          <p className="page-desc">当前组织下的全部项目；项目是 docs / 知识库 / 记录本的归类锚点。</p>
+          <p className="page-desc">当前组织下的全部项目；项目是知识库 / 黑板的归类锚点。</p>
         </div>
         <div className="page-head-right">
           <label className="toggle-archived">

@@ -6,27 +6,27 @@ import com.xinl.easyclaw.hub.contract.auth.RefreshRequest;
 import com.xinl.easyclaw.hub.contract.auth.TokenResponse;
 import com.xinl.easyclaw.hub.contract.org.CreateOrgRequest;
 import com.xinl.easyclaw.hub.contract.user.AdminCreateUserRequest;
-import com.xinl.easyclaw.hub.service.PasswordMailer;
+import com.xinl.easyclaw.hub.contract.user.CreatedUserDto;
+import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.support.HubIntegrationTestSupport;
 import org.junit.jupiter.api.Test;
-import org.mockito.ArgumentCaptor;
-import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.verify;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
  * 认证流端到端：登录 / JWT 过滤器放行与拦截 / refresh 旋转 / logout 吊销 /
- * 首登强制改密 / 平台管理员开通用户（临时密码投递）。
+ * 首登强制改密 / 平台管理员开通与重置用户（一次性随机密码随响应返回）/ 密码有效期（临期、过期禁登）。
  * 公开注册已取消，只验证端点不复存在。用户名统一 auth_ 前缀。
  */
 class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
@@ -34,9 +34,18 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
     private static final String PW = "password123";
     private static final String NEW_PW = "newpassword456";
 
-    /** 捕获临时密码投递，替代 LoggingPasswordMailer（否则密码只出现在控制台，测试拿不到）。 */
-    @MockitoBean
-    private PasswordMailer passwordMailer;
+    /** 平台管理员创建用户并断言响应结构，返回一次性初始密码（仅创建当次响应可见）。 */
+    private String adminCreateTempPassword(String adminToken, String username, String email,
+                                           Long orgId, String role) throws Exception {
+        String json = postJson("/api/users", new AdminCreateUserRequest(username, email, username, orgId, role), adminToken)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.username").value(username))
+                .andExpect(jsonPath("$.mustChangePassword").value(true))
+                .andExpect(jsonPath("$.platformAdmin").value(false))
+                .andExpect(jsonPath("$.tempPassword").isNotEmpty())
+                .andReturn().getResponse().getContentAsString();
+        return om.readValue(json, CreatedUserDto.class).tempPassword();
+    }
 
     // ---------- 注册已取消 ----------
 
@@ -211,24 +220,11 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
     }
 
     @Test
-    void adminCreateUser_tempPasswordMailed_firstLoginForcesChange() throws Exception {
+    void adminCreateUser_tempPasswordReturnedOnce_firstLoginForcesChange() throws Exception {
         createPlatformAdminOk("auth_admin2", PW);
         String adminToken = loginOk("auth_admin2", PW).accessToken();
 
-        postJson("/api/users", new AdminCreateUserRequest("auth_newbie", "auth_newbie@example.com", "Newbie", null, null),
-                adminToken)
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.username").value("auth_newbie"))
-                .andExpect(jsonPath("$.email").value("auth_newbie@example.com"))
-                .andExpect(jsonPath("$.mustChangePassword").value(true))
-                .andExpect(jsonPath("$.platformAdmin").value(false));
-
-        // 临时密码经 PasswordMailer 投递邮箱，不出现在响应体。
-        ArgumentCaptor<String> pwCaptor = ArgumentCaptor.forClass(String.class);
-        verify(passwordMailer).sendInitialPassword(eq("auth_newbie@example.com"), eq("auth_newbie"),
-                pwCaptor.capture());
-        String tempPw = pwCaptor.getValue();
-        assertFalse(tempPw.isBlank());
+        String tempPw = adminCreateTempPassword(adminToken, "auth_newbie", "auth_newbie@example.com", null, null);
 
         // 新用户首登：标记强制改密 → 改密 → 旧临时密码失效、新密码可登录。
         TokenResponse t = loginOk("auth_newbie", tempPw);
@@ -237,7 +233,11 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
                 .andExpect(status().isNoContent());
         postJson("/api/auth/login", new LoginRequest("auth_newbie", tempPw), null)
                 .andExpect(status().isUnauthorized());
-        assertFalse(loginOk("auth_newbie", NEW_PW).user().mustChangePassword());
+        TokenResponse after = loginOk("auth_newbie", NEW_PW);
+        assertFalse(after.user().mustChangePassword());
+        // 改密后重新起算：应返回到期时间且非临期。
+        assertNotNull(after.user().passwordExpiresAt());
+        assertFalse(after.user().passwordExpiringSoon());
     }
 
     @Test
@@ -265,17 +265,10 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
         long orgId = om.readTree(orgJson).get("id").asLong();
 
         // 建用户即入组（默认 member）：新用户改密登录后 /api/me 可见该组织。
-        postJson("/api/users",
-                        new AdminCreateUserRequest("auth_orgnew", "auth_orgnew@example.com", "OrgNew", orgId, null),
-                        adminToken)
-                .andExpect(status().isCreated())
-                .andExpect(jsonPath("$.username").value("auth_orgnew"));
+        String orgNewPw = adminCreateTempPassword(adminToken, "auth_orgnew", "auth_orgnew@example.com", orgId, null);
 
-        ArgumentCaptor<String> pwCaptor = ArgumentCaptor.forClass(String.class);
-        verify(passwordMailer).sendInitialPassword(eq("auth_orgnew@example.com"), eq("auth_orgnew"),
-                pwCaptor.capture());
-        TokenResponse t = loginOk("auth_orgnew", pwCaptor.getValue());
-        postJson("/api/auth/change-password", new ChangePasswordRequest(pwCaptor.getValue(), NEW_PW), t.accessToken())
+        TokenResponse t = loginOk("auth_orgnew", orgNewPw);
+        postJson("/api/auth/change-password", new ChangePasswordRequest(orgNewPw, NEW_PW), t.accessToken())
                 .andExpect(status().isNoContent());
         TokenResponse t2 = loginOk("auth_orgnew", NEW_PW);
         String meJson = getJson("/api/me", t2.accessToken())
@@ -284,10 +277,7 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
         assertTrue(meJson.contains("\"id\":" + orgId), "建用户带 orgId 应立即入组，/api/me 可见该组织");
 
         // 指定角色 admin 入组；不存在的 orgId → 400；owner 角色直接拒绝 → 400。
-        postJson("/api/users",
-                        new AdminCreateUserRequest("auth_orgadm", "auth_orgadm@example.com", "OrgAdm", orgId, "admin"),
-                        adminToken)
-                .andExpect(status().isCreated());
+        adminCreateTempPassword(adminToken, "auth_orgadm", "auth_orgadm@example.com", orgId, "admin");
         postJson("/api/users",
                         new AdminCreateUserRequest("auth_noorg", "auth_noorg@example.com", "NoOrg", 999999999L, null),
                         adminToken)
@@ -316,5 +306,93 @@ class AuthFlowIntegrationTest extends HubIntegrationTestSupport {
         getJson("/api/users/org-options", ownerToken)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    // ---------- 管理员重置密码 ----------
+
+    @Test
+    void adminResetPassword_returnsNewTempPasswordAndRevokesOldSession() throws Exception {
+        createPlatformAdminOk("auth_rp_admin", PW);
+        String adminToken = loginOk("auth_rp_admin", PW).accessToken();
+        String userPw = adminCreateTempPassword(adminToken, "auth_rp_user", "auth_rp_user@example.com", null, null);
+        // 用户完成首登改密，拿到有效会话。
+        TokenResponse before = loginOk("auth_rp_user", userPw);
+        postJson("/api/auth/change-password", new ChangePasswordRequest(userPw, NEW_PW), before.accessToken())
+                .andExpect(status().isNoContent());
+        TokenResponse session = loginOk("auth_rp_user", NEW_PW);
+
+        // 管理员重置：返回一次性新密码，重置后强制改密。
+        String resetJson = postJson("/api/users/" + session.user().id() + "/reset-password", Map.of(), adminToken)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.tempPassword").isNotEmpty())
+                .andExpect(jsonPath("$.mustChangePassword").value(true))
+                .andReturn().getResponse().getContentAsString();
+        String resetPw = om.readValue(resetJson, CreatedUserDto.class).tempPassword();
+        assertNotEquals(NEW_PW, resetPw);
+
+        // 旧密码失效。
+        postJson("/api/auth/login", new LoginRequest("auth_rp_user", NEW_PW), null)
+                .andExpect(status().isUnauthorized());
+        // 旧 refresh token 在重置时已被吊销：拒绝刷新。
+        postJson("/api/auth/refresh", new RefreshRequest(session.refreshToken()), null)
+                .andExpect(status().isUnauthorized());
+        // 新一次性密码可登录，且强制改密。
+        assertTrue(loginOk("auth_rp_user", resetPw).user().mustChangePassword());
+    }
+
+    @Test
+    void adminResetPassword_requiresPlatformAdmin() throws Exception {
+        createPlatformAdminOk("auth_rp_owner", PW);
+        String adminToken = loginOk("auth_rp_owner", PW).accessToken();
+        long targetId = createUserOk("auth_rp_target", null, PW);
+
+        String normalUserToken = createUserAndLogin("auth_rp_normal", PW);
+        postJson("/api/users/" + targetId + "/reset-password", Map.of(), normalUserToken)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        // 不存在用户 → 404（管理员视角）。
+        postJson("/api/users/999999999/reset-password", Map.of(), adminToken)
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+    }
+
+    // ---------- 密码有效期：临期 / 过期 ----------
+
+    /** 直接落库一个指定密码起算时刻的活跃用户（绕过管理端建号接口）。 */
+    private long createUserWithPasswordChangedAt(String username, String password, Instant changedAt) {
+        UserEntity u = new UserEntity();
+        u.setUsername(username);
+        u.setDisplayName(username);
+        u.setPasswordHash(passwordEncoder.encode(password));
+        u.setPasswordChangedAt(changedAt);
+        userRepository.save(u);
+        return u.getId();
+    }
+
+    @Test
+    void expiredPassword_blocksLoginWithClearError() throws Exception {
+        // 起算时刻 = 61 天前（超过 60 天有效期）。
+        createUserWithPasswordChangedAt("auth_expired", PW, Instant.now().minus(61, ChronoUnit.DAYS));
+        // 密码正确也禁止登录，返回明确的 PASSWORD_EXPIRED，提示联系管理员重置。
+        postJson("/api/auth/login", new LoginRequest("auth_expired", PW), null)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("PASSWORD_EXPIRED"));
+    }
+
+    @Test
+    void nearExpiry_loginSucceedsWithFlag_andChangePasswordResetsWindow() throws Exception {
+        // 起算时刻 = 55 天前：剩余 5 天 < 7 天临期窗口，未过期。
+        createUserWithPasswordChangedAt("auth_near", PW, Instant.now().minus(55, ChronoUnit.DAYS));
+        TokenResponse near = loginOk("auth_near", PW);
+        assertFalse(near.user().mustChangePassword(), "临期不等于强制改密，可正常使用");
+        assertTrue(near.user().passwordExpiringSoon(), "剩余有效期不足 7 天应标记临期");
+        assertNotNull(near.user().passwordExpiresAt());
+
+        // 改密后重新起算 60 天：临期标记清除。
+        postJson("/api/auth/change-password", new ChangePasswordRequest(PW, NEW_PW), near.accessToken())
+                .andExpect(status().isNoContent());
+        TokenResponse refreshed = loginOk("auth_near", NEW_PW);
+        assertFalse(refreshed.user().passwordExpiringSoon());
+        assertNotNull(refreshed.user().passwordExpiresAt());
     }
 }

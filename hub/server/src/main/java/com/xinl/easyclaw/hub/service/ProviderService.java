@@ -80,7 +80,7 @@ public class ProviderService {
         }
         requireManageScope(actorId, orgId);
         String slug = req.slug().trim();
-        if (!Slugger.isValid(slug)) {
+        if (Slugger.isValid(slug)) {
             throw ApiException.validation("slug 只能包含小写字母/数字/连字符");
         }
         boolean slugTaken = orgId == null

@@ -54,16 +54,17 @@ class ToolRegistryIsRegisteredTest {
         }
     }
 
-    /** isRegistered 只依赖 toolService，其余协作者不参与，传 null 即可暴露误用。 */
+    /** isRegistered 只依赖静态表与 toolService，其余协作者不参与，传 null 即可暴露误用。 */
     private ToolRegistryService service() {
-        return new ToolRegistryService(new EmptyToolService(), null, null, null, null);
+        return new ToolRegistryService(new EmptyToolService(), null, null, null, null, null, null);
     }
 
     @Test
     void annotationRegisteredToolsAreAcceptedWithoutDbRow() {
         ToolRegistryService svc = service();
         for (String name : List.of("run_skill_script", "run_python", "analyze_code",
-                "format_code", "diff_code", "list_directory", "search_files")) {
+                "format_code", "diff_code", "list_directory", "search_files",
+                "knowledge_write", "knowledge_read")) {
             assertTrue(svc.isRegistered(name),
                     "DB 无行时被误判为未知工具，确认弹窗「始终允许」会失败: " + name);
         }

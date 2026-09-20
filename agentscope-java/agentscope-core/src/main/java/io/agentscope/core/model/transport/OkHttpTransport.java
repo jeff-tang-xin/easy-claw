@@ -31,10 +31,12 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocketFactory;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509TrustManager;
+import okhttp3.Call;
 import okhttp3.ConnectionPool;
 import okhttp3.Credentials;
 import okhttp3.MediaType;
@@ -223,12 +225,30 @@ public class OkHttpTransport implements HttpTransport {
         boolean isNdjson =
                 TransportConstants.STREAM_FORMAT_NDJSON.equals(
                         request.getHeaders().get(TransportConstants.STREAM_FORMAT_HEADER));
+        // 关键：取消必须真正中断底层阻塞读。若只靠 sink.isCancelled()（在 readLine 返回后才查到），
+        // 下游取消（如 ModelUtils 的 Flux.timeout 触发、stopChat dispose）不会打断阻塞在
+        // reader.readLine() 的 boundedElastic 线程，连接要等 socket readTimeout（最长 30 分钟）
+        // 才释放——多会话累积会耗尽线程池、拖垮整个 workspace。故 via onCancel 关闭 OkHttp Call，
+        // 让阻塞的 execute()/readLine() 立即以 IOException 退出。
+        AtomicReference<Call> callRef = new AtomicReference<>();
         return Flux.<String>create(
                         sink -> {
+                            sink.onCancel(
+                                    () -> {
+                                        Call c = callRef.get();
+                                        if (c != null) {
+                                            log.debug(
+                                                    "Stream cancelled, cancelling OkHttp call to"
+                                                            + " release blocked reader thread");
+                                            c.cancel();
+                                        }
+                                    });
                             Response response = null;
                             BufferedReader reader = null;
                             try {
-                                response = client.newCall(okHttpRequest).execute();
+                                Call call = client.newCall(okHttpRequest);
+                                callRef.set(call);
+                                response = call.execute();
 
                                 if (!response.isSuccessful()) {
                                     String errorBody = getResponseBodyString(response);
@@ -257,6 +277,11 @@ public class OkHttpTransport implements HttpTransport {
                                                         body.byteStream(), StandardCharsets.UTF_8));
 
                                 String line;
+                                // [stream-probe] 临时诊断：原始 SSE data 行到达间隔。
+                                // 正常 token 节奏 50-100ms/行；相邻行间隔 >150ms 即出现“憋住”，
+                                // 用于判定停顿首先发生在模型/网络侧还是后端应用层。定位后删除。
+                                long probePrevNanos = 0L;
+                                int probeLineNo = 0;
                                 while ((line = reader.readLine()) != null) {
                                     if (sink.isCancelled()) {
                                         break;
@@ -277,6 +302,22 @@ public class OkHttpTransport implements HttpTransport {
                                     if (line.startsWith(SSE_DATA_PREFIX)) {
                                         String data =
                                                 line.substring(SSE_DATA_PREFIX.length()).trim();
+
+                                        // [stream-probe] 仅统计真实 data 行（跳过 event:/id:/空行）
+                                        long probeNow = System.nanoTime();
+                                        probeLineNo++;
+                                        if (probePrevNanos != 0L) {
+                                            long gapMs = (probeNow - probePrevNanos) / 1_000_000L;
+                                            if (gapMs > 150L) {
+                                                log.info(
+                                                        "[stream-probe] transport gap={}ms before"
+                                                                + " SSE line#{} (len={})",
+                                                        gapMs,
+                                                        probeLineNo,
+                                                        data.length());
+                                            }
+                                        }
+                                        probePrevNanos = probeNow;
 
                                         // Check for stream end marker
                                         if (SSE_DONE_MARKER.equals(data)) {

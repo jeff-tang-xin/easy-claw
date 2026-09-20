@@ -136,19 +136,19 @@ export default function OrgDetailPage({me, onChanged}: Props) {
         <ul className="role-perm-list">
           <li>
             <span className="badge role-owner">所有者 owner</span>
-            <span>组织最高权限：管理成员 / AppKey、审计与网关日志、Provider、全部项目与文档。</span>
+            <span>组织最高权限：管理成员 / AppKey、审计与网关日志、Provider、全部项目与知识库。</span>
           </li>
           <li>
             <span className="badge role-admin">管理员 admin</span>
-            <span>除组织级结算外等同所有者：管成员与密钥、读写全部项目与文档。</span>
+            <span>除组织级结算外等同所有者：管成员与密钥、读写全部项目与知识库。</span>
           </li>
           <li>
             <span className="badge role-member">成员 member</span>
-            <span>可创建项目；可读写团队（team）/公开（public）项目，可被指派为文档负责人；他人私有（private）项目不可见。</span>
+            <span>可创建项目；可读写团队（team）/公开（public）项目；可管理自己创建的 AppKey；他人私有（private）项目不可见。</span>
           </li>
           <li>
             <span className="badge role-guest">访客 guest</span>
-            <span>只读：可查看 team / public 项目与文档，不能创建或编辑，也不能被指派为文档负责人。</span>
+            <span>只读：可查看 team / public 项目与知识库，不能创建或编辑。</span>
           </li>
         </ul>
         <p className="role-perm-note">

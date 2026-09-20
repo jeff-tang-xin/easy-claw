@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.hub.security;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 /**
@@ -15,16 +16,22 @@ public final class Permissions {
     /** 平台管理员叠加权限：平台级资源（用户 / provider 池）管理。 */
     public static final Set<String> PLATFORM_ADMIN_PERMS = Set.of("user.manage", "provider.manage");
 
+    /** 组织角色固定顺序（权限从高到低），供角色-权限矩阵等只读展示复用。 */
+    public static final List<String> ORG_ROLES = List.of("owner", "admin", "member", "guest");
+
     public static Set<String> forRole(String role) {
         if (role == null) {
             return Set.of();
         }
         return switch (role) {
             case "owner" -> Set.of("org.read", "org.manage", "org.delete", "member.manage",
-                    "project.read", "project.write", "asset.write", "appkey.manage", "audit.read", "provider.manage");
+                    "project.read", "project.write", "asset.write", "appkey.self", "appkey.manage",
+                    "audit.read", "provider.manage");
             case "admin" -> Set.of("org.read", "org.manage", "member.manage",
-                    "project.read", "project.write", "asset.write", "appkey.manage", "audit.read", "provider.manage");
-            case "member" -> Set.of("org.read", "project.read", "project.write");
+                    "project.read", "project.write", "asset.write", "appkey.self", "appkey.manage",
+                    "audit.read", "provider.manage");
+            // appkey.self：成员可颁发/管理自己的接入密钥；owner/admin 另持 appkey.manage 可治理组织内全部
+            case "member" -> Set.of("org.read", "project.read", "project.write", "appkey.self");
             case "guest" -> Set.of("org.read", "project.read");
             default -> Set.of();
         };

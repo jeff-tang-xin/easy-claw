@@ -1,10 +1,11 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Navigate, NavLink, Route, Routes, useLocation} from 'react-router-dom';
+import {Navigate, NavLink, Route, Routes, useLocation, useParams} from 'react-router-dom';
 import {fetchMe, logout} from './api';
 import {clearSession, getCurrentOrgId, loadSession, setCurrentOrgId} from './auth';
 import type {MeResponse} from './types';
 import Breadcrumb, {type Crumb} from './components/Breadcrumb';
 import ChangePasswordCard from './components/ChangePasswordCard';
+import ChangePasswordModal from './components/ChangePasswordModal';
 import AppKeysPage from './pages/AppKeysPage';
 import AuditLogsPage from './pages/AuditLogsPage';
 import GatewayPage from './pages/GatewayPage';
@@ -14,14 +15,10 @@ import OrgsPage from './pages/OrgsPage';
 import ProjectsPage from './pages/ProjectsPage';
 import ProjectSpacePage from './pages/ProjectSpacePage';
 import ProvidersPage from './pages/ProvidersPage';
+import RolesPage from './pages/RolesPage';
 import UsersPage from './pages/UsersPage';
-
-const ROLE_LABELS: Record<string, string> = {
-  owner: '所有者',
-  admin: '管理员',
-  member: '成员',
-  guest: '访客',
-};
+import WorkspacesPage, {MenuConfigView} from './pages/WorkspacesPage';
+import {NAV_GROUPS, ROLE_LABELS, groupVisible, itemVisible} from './nav';
 
 const COLLAPSED_KEY = 'hub.sidebar.collapsed';
 
@@ -55,11 +52,15 @@ function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
   } else if (path.startsWith('/projects')) {
     items.push({text: orgName}, {text: '项目'});
   } else if (path.startsWith('/appkeys')) {
-    items.push({text: orgName}, {text: 'AppKey'});
+    items.push({text: orgName}, {text: '我的 AppKey'});
+  } else if (path.startsWith('/roles')) {
+    items.push({text: orgName}, {text: '角色与权限'});
   } else if (path.startsWith('/audit')) {
     items.push({text: orgName}, {text: '审计'});
   } else if (path.startsWith('/gateway')) {
     items.push({text: orgName}, {text: 'LLM 网关'});
+  } else if (path.startsWith('/workspaces')) {
+    items.push({text: orgName}, {text: 'Spoke 工作区'});
   } else if (path.startsWith('/providers')) {
     items.push({text: '平台'}, {text: '模型 Provider'});
   } else if (path.startsWith('/users')) {
@@ -69,11 +70,23 @@ function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
   return <Breadcrumb items={items} />;
 }
 
+/** 菜单配置路由包装：从路径参数取工作区 id，非法则回工作区列表。 */
+function MenuConfigRoute() {
+  const {wid} = useParams();
+  const id = Number(wid);
+  if (!Number.isFinite(id) || id <= 0) return <Navigate to="/workspaces" replace />;
+  return <MenuConfigView workspaceId={id} />;
+}
+
 export default function App() {
   const [booting, setBooting] = useState(true);
   const [me, setMe] = useState<MeResponse | null>(null);
   const [orgId, setOrgId] = useState<number | null>(getCurrentOrgId());
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(COLLAPSED_KEY) === '1');
+  // 密码临期提醒 → 自助改密弹窗
+  const [pwdModalOpen, setPwdModalOpen] = useState(false);
+  // 本次登录是否已关闭/处理过临期提醒（刷新页面前不再重复弹横幅文案，仅保留可忽略的内联条）
+  const [pwdBannerDismissed, setPwdBannerDismissed] = useState(false);
 
   // 启动：有本地会话则拉 me 校准（同时校验 token 有效性与组织列表）
   useEffect(() => {
@@ -194,58 +207,22 @@ export default function App() {
           )}
 
           <nav className="app-nav">
-            <div className="nav-group">
-              <div className="nav-group-title">工作</div>
-              <NavLink to="/projects" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="项目">
-                <span className="nav-icon">📁</span>
-                <span className="nav-label">项目</span>
-              </NavLink>
-            </div>
-            <div className="nav-group">
-              <div className="nav-group-title">组织资源</div>
-              {has('appkey.manage') && (
-                <NavLink to="/appkeys" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="AppKey">
-                  <span className="nav-icon">🔑</span>
-                  <span className="nav-label">AppKey</span>
-                </NavLink>
-              )}
-              {has('audit.read') && (
-                <NavLink to="/gateway" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="LLM 网关">
-                  <span className="nav-icon">🌐</span>
-                  <span className="nav-label">LLM 网关</span>
-                </NavLink>
-              )}
-              {has('audit.read') && (
-                <NavLink to="/audit" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="审计日志">
-                  <span className="nav-icon">🛡️</span>
-                  <span className="nav-label">审计日志</span>
-                </NavLink>
-              )}
-            </div>
-            <div className="nav-group">
-              <div className="nav-group-title">组织管理</div>
-              <NavLink to="/orgs" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="组织">
-                <span className="nav-icon">🏛️</span>
-                <span className="nav-label">组织</span>
-              </NavLink>
-            </div>
-            {(has('user.manage') || has('provider.manage')) && (
-              <div className="nav-group">
-                <div className="nav-group-title">平台</div>
-                {has('user.manage') && (
-                  <NavLink to="/users" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="用户管理">
-                    <span className="nav-icon">👥</span>
-                    <span className="nav-label">用户管理</span>
+            {NAV_GROUPS.filter((g) => groupVisible(g, has)).map((group) => (
+              <div className="nav-group" key={group.title}>
+                <div className="nav-group-title">{group.title}</div>
+                {group.items.filter((item) => itemVisible(item, has)).map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')}
+                    title={item.title}
+                  >
+                    <span className="nav-icon">{item.icon}</span>
+                    <span className="nav-label">{item.label}</span>
                   </NavLink>
-                )}
-                {has('provider.manage') && (
-                  <NavLink to="/providers" className={({isActive}) => (isActive ? 'nav-btn active' : 'nav-btn')} title="Provider">
-                    <span className="nav-icon">🧩</span>
-                    <span className="nav-label">Provider</span>
-                  </NavLink>
-                )}
+                ))}
               </div>
-            )}
+            ))}
           </nav>
 
           <div className="sidebar-user">
@@ -264,6 +241,22 @@ export default function App() {
 
         <main className="app-main">
           <TopBreadcrumb me={me} orgId={orgId} />
+          {me.user.passwordExpiringSoon && !pwdBannerDismissed && (
+            <div className="pwd-expiry-banner" role="status">
+              <span>
+                ⚠️ 你的密码将于 {me.user.passwordExpiresAt ? new Date(me.user.passwordExpiresAt).toLocaleDateString() : '近期'}{' '}
+                到期（有效期 60 天）。为避免到期后无法登录，请尽快修改密码。
+              </span>
+              <span className="pwd-expiry-actions">
+                <button type="button" className="btn btn-primary btn-sm" onClick={() => setPwdModalOpen(true)}>
+                  立即修改
+                </button>
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => setPwdBannerDismissed(true)}>
+                  稍后
+                </button>
+              </span>
+            </div>
+          )}
           <Routes>
             <Route path="/" element={<Navigate to="/projects" replace />} />
             <Route path="/login" element={<Navigate to="/projects" replace />} />
@@ -280,14 +273,27 @@ export default function App() {
               element={<OrgsPage me={me} currentOrgId={orgId} onSwitchOrg={switchOrg} onChanged={reloadMe} />}
             />
             <Route path="/orgs/:orgId" element={<OrgDetailPage me={me} onChanged={reloadMe} />} />
+            <Route path="/roles" element={<RolesPage role={currentRole} />} />
             <Route path="/audit" element={<AuditLogsPage orgId={orgId} role={currentRole} />} />
             <Route path="/appkeys" element={<AppKeysPage orgId={orgId} />} />
             <Route path="/gateway" element={<GatewayPage orgId={orgId} role={currentRole} />} />
+            <Route path="/workspaces" element={<WorkspacesPage orgId={orgId} />} />
+            <Route path="/workspaces/:wid/menus" element={<MenuConfigRoute />} />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/providers" element={<ProvidersPage />} />
             <Route path="*" element={<Navigate to="/projects" replace />} />
           </Routes>
         </main>
+        {pwdModalOpen && (
+          <ChangePasswordModal
+            onClose={() => setPwdModalOpen(false)}
+            onChanged={(m) => {
+              setMe(m);
+              setPwdModalOpen(false);
+              setPwdBannerDismissed(true);
+            }}
+          />
+        )}
     </div>
   );
 }

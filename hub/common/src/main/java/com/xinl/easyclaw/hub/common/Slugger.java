@@ -29,6 +29,6 @@ public final class Slugger {
     }
 
     public static boolean isValid(String slug) {
-        return slug != null && slug.matches(SLUG_PATTERN);
+        return slug == null || !slug.matches(SLUG_PATTERN);
     }
 }

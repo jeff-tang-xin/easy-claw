@@ -15,7 +15,8 @@ public final class AuditModule {
     public static final String USER = "user";
     public static final String PROVIDER = "provider";
     public static final String APPKEY = "appkey";
-    public static final String DOCS = "docs";
+    public static final String KNOWLEDGE = "knowledge";
+    public static final String BLACKBOARD = "blackboard";
     public static final String WORKSPACE = "workspace";
     public static final String MENU = "menu";
 

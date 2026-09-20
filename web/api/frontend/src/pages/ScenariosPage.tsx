@@ -490,14 +490,21 @@ export default function ScenariosPage() {
             </div>
             <div className="field" style={{width: 130}}>
               <label>模式</label>
-              <select
-                value={editing.mode}
-                onChange={(e) => setEditing({...editing, mode: e.target.value as Scenario['mode']})}
-              >
-                <option value="single">single 单智能体</option>
-                <option value="team">team 团队编排</option>
-                <option value="schedule">schedule 定时工作流</option>
-              </select>
+              {editing.mode === 'single' ? (
+                <select
+                  value={editing.mode}
+                  onChange={(e) => setEditing({...editing, mode: e.target.value as Scenario['mode']})}
+                >
+                  <option value="single">single 单智能体</option>
+                </select>
+              ) : (
+                // 存量编排型场景（team/schedule）只读展示，避免误保存把 mode 改成 single 并清空 workflow
+                <input
+                  value={modeLabel(editing.mode)}
+                  disabled
+                  title="存量编排型场景，模式不可修改（后端能力保留中）"
+                />
+              )}
             </div>
             <div className="field" style={{width: 160}}>
               <label>主控智能体</label>
