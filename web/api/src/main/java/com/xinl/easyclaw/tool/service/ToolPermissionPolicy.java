@@ -71,7 +71,11 @@ public final class ToolPermissionPolicy {
      * （便于排查「为什么这个工具弹窗了」）。这里保持与历史行为完全一致，不扩大。
      */
     private static final List<String> EXPLICIT_ASK = List.of(
-            "write_file", "edit_file", "execute"
+            "write_file", "edit_file", "execute",
+            // 运维远程执行：命令在用户服务器上真实生效，必须每次显式确认。
+            // 仅注册 ASK 规则还不够「无法绕过」——ops 场景同时停用白名单机制
+            // （ScenarioResolver.whitelistEnabled），回合/永久授权都不会摘掉这条 ASK 规则
+            "remote_shell"
     );
 
     /** 静默放行的只读工具名（不可变） */

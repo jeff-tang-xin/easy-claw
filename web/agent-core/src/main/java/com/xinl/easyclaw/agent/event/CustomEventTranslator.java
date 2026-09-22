@@ -4,10 +4,10 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.xinl.easyclaw.agent.domain.StreamEvent;
-import com.xinl.easyclaw.middleware.CompactionNoticeMiddleware;
 import com.xinl.easyclaw.middleware.FileChangeMiddleware;
 import com.xinl.easyclaw.middleware.ToolFailGuard;
 import io.agentscope.core.event.CustomEvent;
+import io.agentscope.harness.agent.middleware.CompactionMiddleware;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -78,19 +78,36 @@ public final class CustomEventTranslator {
                     log.debug("tool_fail_guard 事件序列化失败，跳过: {}", ex.getMessage());
                 }
             }
-            case CompactionNoticeMiddleware.EVENT_NAME -> {
-                // 压缩提示与 tool_fail_guard 同构：JSON 经 context 事件下发，前端按 type 路由。
+            case CompactionMiddleware.EVENT_NAME -> {
+                // 压缩生命周期事件（vendored CompactionMiddleware 经 AgentEventEmitter 发出）：
+                // {phase:"start"} 压缩开始；{phase:"end", keeping:N} 压缩完成；
+                // {phase:"end", failed:true} 压缩失败（继续用原上下文）。
+                // 兼容旧形状 {keeping:N}（无 phase，视为完成）。
                 // 文案在后端组装（前端不拼数字），message 同时是转录落盘的内容。
                 try {
-                    ObjectNode payload = mapper.createObjectNode();
-                    payload.put("type", CompactionNoticeMiddleware.EVENT_NAME);
+                    Object phase = value == null ? null : value.get("phase");
+                    boolean failed =
+                            value != null && Boolean.TRUE.equals(value.get("failed"));
                     Object keeping = value == null ? null : value.get("keeping");
                     int kept = keeping instanceof Number n ? n.intValue() : 0;
-                    payload.put("keeping", kept);
-                    payload.put("message", kept > 0
-                            ? "上下文已压缩为摘要（当前上下文保留 " + kept
-                                    + " 条消息）；更早的完整对话仍保存在会话转录中"
-                            : "上下文已压缩为摘要；更早的完整对话仍保存在会话转录中");
+                    ObjectNode payload = mapper.createObjectNode();
+                    payload.put("type", CompactionMiddleware.EVENT_NAME);
+                    if (CompactionMiddleware.PHASE_START.equals(phase)) {
+                        payload.put("phase", CompactionMiddleware.PHASE_START);
+                        payload.put("message", "上下文压缩中：正在将较早的对话折叠为摘要，请稍候…");
+                    } else {
+                        payload.put("phase", CompactionMiddleware.PHASE_END);
+                        if (failed) {
+                            payload.put("failed", true);
+                            payload.put("message", "上下文压缩失败，本次继续使用完整上下文");
+                        } else {
+                            payload.put("keeping", kept);
+                            payload.put("message", kept > 0
+                                    ? "上下文已压缩为摘要（当前上下文保留 " + kept
+                                            + " 条消息）；更早的完整对话仍保存在会话转录中"
+                                    : "上下文已压缩为摘要；更早的完整对话仍保存在会话转录中");
+                        }
+                    }
                     onEvent.accept(StreamEvent.context(mapper.writeValueAsString(payload)));
                 } catch (JsonProcessingException ex) {
                     log.debug("compaction 事件序列化失败，跳过: {}", ex.getMessage());

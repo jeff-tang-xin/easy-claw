@@ -69,11 +69,11 @@ class RoleMatrixIntegrationTest extends HubIntegrationTestSupport {
         assertThat(guest).contains("org.read", "project.read")
                 .doesNotContain("project.write", "appkey.self", "org.manage");
 
-        // 平台管理员叠加权限只有这两项
+        // 平台管理员叠加权限：目录管理 + 用户管理 + 提供商管理
         assertThat(body.get("platformAdminPerms")).isNotNull();
         Set<String> platform = new HashSet<>();
         body.get("platformAdminPerms").forEach(p -> platform.add(p.asText()));
-        assertThat(platform).containsExactlyInAnyOrder("user.manage", "provider.manage");
+        assertThat(platform).containsExactlyInAnyOrder("platform.catalog.manage", "user.manage", "provider.manage");
     }
 
     @Test

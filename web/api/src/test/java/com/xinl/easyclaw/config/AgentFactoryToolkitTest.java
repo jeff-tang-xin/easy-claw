@@ -5,11 +5,15 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
 
 /**
  * 回归测试：主控 Toolkit 必须包含全部内置工具类的工具。
@@ -43,6 +47,9 @@ class AgentFactoryToolkitTest {
     @Autowired
     private AgentFactory agentFactory;
 
+    @MockitoBean
+    private CloudFeatureGate featureGate;
+
     @Test
     @DisplayName("六类内置工具全部注册，不因 registration 覆盖而丢失")
     void workspaceToolkitContainsAllBuiltinTools() {
@@ -67,5 +74,19 @@ class AgentFactoryToolkitTest {
         int count = toolkit.getToolSchemas().size();
         assertTrue(count >= 15,
                 "主控 Toolkit 只有 " + count + " 个工具，疑似多数工具类被覆盖丢失");
+    }
+
+    @Test
+    @DisplayName("cloud 目录禁用的工具（含框架工具）从主控 Toolkit 摘除")
+    void cloudDisabledToolsRemovedFromToolkit() {
+        when(featureGate.disabledTools()).thenReturn(Set.of("read_file", "web_search"));
+
+        Toolkit toolkit = agentFactory.createWorkspaceToolkit();
+
+        assertNull(toolkit.getTool("read_file"), "框架工具 read_file 应被 cloud 目录摘除");
+        assertNull(toolkit.getTool("web_search"), "web_search 应被 cloud 目录摘除");
+        // 未列入禁用集的工具不受影响
+        assertNotNull(toolkit.getTool("list_directory"));
+        assertNotNull(toolkit.getTool("blackboard_append"));
     }
 }

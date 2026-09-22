@@ -139,7 +139,7 @@ public class WorkspaceManager {
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         fileLayout.initialize(workspacePath, easyClawDir);
 
-        HarnessAgent agent = agentBuilder.build(workspaceId, name, workspacePath, easyClawDir, null);
+        HarnessAgent agent = agentBuilder.build(workspaceId, name, workspacePath, easyClawDir, null, type);
 
         WorkspaceContext context = WorkspaceContext.builder()
                 .workspaceId(workspaceId)
@@ -221,7 +221,8 @@ public class WorkspaceManager {
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         fileLayout.initialize(workspacePath, easyClawDir);
 
-        HarnessAgent agent = agentBuilder.build(workspaceId, meta.getName(), workspacePath, easyClawDir, sysPromptAugment);
+        HarnessAgent agent = agentBuilder.build(workspaceId, meta.getName(), workspacePath, easyClawDir,
+                sysPromptAugment, meta.getType());
 
         return WorkspaceContext.builder()
                 .workspaceId(workspaceId)
@@ -540,7 +541,7 @@ public class WorkspaceManager {
         String t = type.trim();
         if (!com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(t).isPresent()) {
             throw new IllegalArgumentException("非法的工作区类型: " + t
-                    + "（仅支持 single / team / schedule）");
+                    + "（仅支持已注册的编排模式: single / team / schedule / ops）");
         }
         return t;
     }

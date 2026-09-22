@@ -18,6 +18,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -62,6 +63,12 @@ public abstract class HubIntegrationTestSupport {
 
     protected ResultActions patchJson(String url, Object body, String accessToken) throws Exception {
         return mvc.perform(withAuth(patch(url), accessToken)
+                .contentType(MediaType.APPLICATION_JSON)
+                .content(om.writeValueAsString(body)));
+    }
+
+    protected ResultActions putJson(String url, Object body, String accessToken) throws Exception {
+        return mvc.perform(withAuth(put(url), accessToken)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(om.writeValueAsString(body)));
     }

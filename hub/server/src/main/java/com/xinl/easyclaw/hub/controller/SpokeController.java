@@ -1,13 +1,13 @@
 package com.xinl.easyclaw.hub.controller;
 
 import com.xinl.easyclaw.hub.contract.spoke.SpokeBootstrapResponse;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeFlagInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeMenuNode;
-import com.xinl.easyclaw.hub.contract.spoke.SpokeWorkspaceInfo;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeToolInfo;
 import com.xinl.easyclaw.hub.security.AppKeyContextHolder;
 import com.xinl.easyclaw.hub.service.SpokeService;
 import java.util.List;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -29,15 +29,21 @@ public class SpokeController {
         return spokeService.bootstrap(AppKeyContextHolder.require());
     }
 
-    /** 下发本组织 active 工作区及其公共菜单树（配置分发，spoke 侧消费在后续阶段）。 */
-    @GetMapping("/api/spoke/workspaces")
-    public List<SpokeWorkspaceInfo> workspaces() {
-        return spokeService.distributeWorkspaces(AppKeyContextHolder.require());
+    /** 下发本组织的生效菜单树（平台目录 × 组织可见性，仅生效项；spoke 侧消费在后续阶段）。 */
+    @GetMapping("/api/spoke/menus")
+    public List<SpokeMenuNode> menus() {
+        return spokeService.distributeMenu(AppKeyContextHolder.require());
     }
 
-    /** 下发单个工作区的菜单树（仅 enabled 项；非本组织工作区→404）。 */
-    @GetMapping("/api/spoke/workspaces/{id}/menu")
-    public List<SpokeMenuNode> menu(@PathVariable Long id) {
-        return spokeService.distributeMenu(AppKeyContextHolder.require(), id);
+    /** 下发本组织的生效功能开关（仅平台 enabled 项，enabled=平台 AND 组织）。 */
+    @GetMapping("/api/spoke/feature-flags")
+    public List<SpokeFlagInfo> featureFlags() {
+        return spokeService.distributeFlags(AppKeyContextHolder.require());
+    }
+
+    /** 下发本组织的生效工具（仅平台 enabled 项，enabled=平台 AND 组织）。 */
+    @GetMapping("/api/spoke/tools")
+    public List<SpokeToolInfo> tools() {
+        return spokeService.distributeTools(AppKeyContextHolder.require());
     }
 }

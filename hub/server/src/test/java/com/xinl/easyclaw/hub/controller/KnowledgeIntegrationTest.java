@@ -289,4 +289,80 @@ class KnowledgeIntegrationTest extends HubIntegrationTestSupport {
         }
         org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(a, b), ids);
     }
+
+    // ---------- 关键词检索（A3-S2） ----------
+
+    private java.util.Set<Long> search(long projectId, String q, String token) throws Exception {
+        // 用 .param() 让 MockMvc 按原始（未编码）值设置查询参数；不要用 URLEncoder.encode 拼 URL——
+        // 它把空格编成 '+'，而 MockMvc 不会像 Servlet 容器那样把 '+' 还原为空格，会导致多词/空白用例假失败。
+        var req = org.springframework.test.web.servlet.request.MockMvcRequestBuilders
+                .get("/api/knowledge").param("projectId", String.valueOf(projectId)).param("q", q);
+        if (token != null) {
+            req.header("Authorization", "Bearer " + token);
+        }
+        String json = mvc.perform(req)
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        java.util.Set<Long> ids = new java.util.HashSet<>();
+        for (JsonNode n : om.readTree(json)) {
+            ids.add(n.get("id").asLong());
+        }
+        return ids;
+    }
+
+    @Test
+    void search_singleTerm_crossField_caseInsensitive() throws Exception {
+        Fixture f = newFixture("s1");
+        long pid = createProject(f.member(), f.orgId(), "s1-p", "team");
+        long inTopic = createItem(f.member(), pid, "Deploy Guide", "x", "y");
+        long inSummary = createItem(f.member(), pid, "b", "Deployment notes", "y");
+        long inContent = createItem(f.member(), pid, "c", "x", "how to deploy");
+        long noMatch = createItem(f.member(), pid, "其他", "无关", "正文");
+
+        // 小写关键词命中 topic/summary/content 三处（大小写不敏感）。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(inTopic, inSummary, inContent),
+                search(pid, "deploy", f.member()));
+        // 空白 q 等同不带检索，返回全部。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(inTopic, inSummary, inContent, noMatch),
+                search(pid, "  ", f.member()));
+    }
+
+    @Test
+    void search_multipleTerms_AND() throws Exception {
+        Fixture f = newFixture("s2");
+        long pid = createProject(f.member(), f.orgId(), "s2-p", "team");
+        long both = createItem(f.member(), pid, "Kafka 部署", "集群", "y");
+        createItem(f.member(), pid, "Kafka 简介", "x", "y");
+        createItem(f.member(), pid, "应用部署", "x", "y");
+
+        // 两词须同时命中（可跨字段）：仅第一条同时含 kafka 与部署。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(both),
+                search(pid, "kafka 部署", f.member()));
+        // 无任何匹配 → 空集。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(), search(pid, "不存在的词", f.member()));
+    }
+
+    @Test
+    void search_wildcardCharsEscaped_noInjection() throws Exception {
+        Fixture f = newFixture("s3");
+        long pid = createProject(f.member(), f.orgId(), "s3-p", "team");
+        // 条目内容含字面 % 与 _，不应被当成通配符。
+        long literal = createItem(f.member(), pid, "折扣", "100%off", "a_b");
+        createItem(f.member(), pid, "普通", "无关", "xyz");
+
+        // 搜 "%" 字面：只命中含字面百分号的条目，而不是「全部」。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(literal), search(pid, "%", f.member()));
+        // 搜 "_" 字面：只命中 a_b，而不是任意单字符全匹配。
+        org.junit.jupiter.api.Assertions.assertEquals(java.util.Set.of(literal), search(pid, "_", f.member()));
+    }
+
+    @Test
+    void search_respectsReadPermission() throws Exception {
+        Fixture f = newFixture("s4");
+        long pid = createProject(f.member(), f.orgId(), "s4-p", "team");
+        createItem(f.member(), pid, "SecretDeploy", null, null);
+        // 组织外不可借检索枚举。
+        getJson("/api/knowledge?projectId=" + pid + "&q=deploy", f.outsider())
+                .andExpect(status().isForbidden());
+    }
 }

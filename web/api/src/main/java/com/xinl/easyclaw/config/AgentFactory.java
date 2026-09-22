@@ -46,6 +46,9 @@ public class AgentFactory {
     private final McpConnectionService mcpConnectionService;
     private final ToolRegistryService toolRegistryService;
     private final ToolManagementService toolManagementService;
+    private final CloudFeatureGate featureGate;
+    /** 运维场景专用工具集（remote_shell）：仅装配进 ops 工作区的最小 toolkit */
+    private final com.xinl.easyclaw.tools.OpsTools opsTools;
 
     public AgentFactory(AgentScopeProperties props,
                         ModelRegistryService modelRegistryService,
@@ -57,7 +60,9 @@ public class AgentFactory {
                         KnowledgeTools knowledgeTools,
                         McpConnectionService mcpConnectionService,
                         ToolRegistryService toolRegistryService,
-                        ToolManagementService toolManagementService) {
+                        ToolManagementService toolManagementService,
+                        CloudFeatureGate featureGate,
+                        com.xinl.easyclaw.tools.OpsTools opsTools) {
         this.props = props;
         this.modelRegistryService = modelRegistryService;
         this.fileTools = fileTools;
@@ -69,6 +74,23 @@ public class AgentFactory {
         this.mcpConnectionService = mcpConnectionService;
         this.toolRegistryService = toolRegistryService;
         this.toolManagementService = toolManagementService;
+        this.featureGate = featureGate;
+        this.opsTools = opsTools;
+    }
+
+    /**
+     * 创建运维（ops）工作区的最小 Toolkit：只有 {@code remote_shell} 一个工具。
+     * <p>
+     * 场景决定能力边界：运维智能体只通过 remote_shell 触达远程服务器，
+     * 不注册本地文件/代码/搜索工具、HTTP 工具与 MCP 工具（LLM 永不直接触碰服务器之外的资源）。
+     * 刻意不走 disabledToolNames / cloud 门控过滤——ops 工具集只有一项，
+     * 若被工具管理页误关会导致运维场景完全不可用；如需停用请直接停用场景。
+     */
+    public Toolkit createOpsToolkit() {
+        Toolkit toolkit = new Toolkit();
+        toolkit.registration().tool(opsTools).apply();
+        log.info("已创建运维最小 toolkit（仅 remote_shell）");
+        return toolkit;
     }
 
     /**
@@ -171,6 +193,18 @@ public class AgentFactory {
                 log.warn("注册外部 MCP 客户端失败 (serviceId={}): {}", serviceId, e.getMessage());
             }
         });
+
+        // cloud 平台工具目录过滤（spec §4.4）：独立于本地工具管理页的一层，
+        // 生效态为否的 toolKey 直接摘除（含框架工具）；本地模式/无快照为空集，行为不变
+        Set<String> cloudDisabled = featureGate.disabledTools();
+        if (!cloudDisabled.isEmpty()) {
+            Set<String> present = toolkit.getToolSchemas().stream()
+                    .map(ToolSchema::getName)
+                    .collect(Collectors.toSet());
+            List<String> removed = cloudDisabled.stream().filter(present::contains).toList();
+            removed.forEach(toolkit::removeTool);
+            log.info("cloud 目录已禁用工具: {}", removed);
+        }
         return toolkit;
     }
 

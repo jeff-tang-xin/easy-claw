@@ -125,11 +125,16 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 flushTool();
             }
             case "context" -> {
-                // 压缩提示必须入转录：它是「AI 为什么忽然不记得上文」的唯一解释，
+                // 压缩完成提示必须入转录：它是「AI 为什么忽然不记得上文」的唯一解释，
                 // 刷新/回放时缺失会让用户对着摘要化的上下文一头雾水。
+                // 压缩开始（phase=start）与压缩失败（failed=true）是瞬态状态，不入转录——
+                // 刷新后残留一条「压缩中」只会造成困惑。
                 // 其余 context（token 计数等瞬态）不入转录。
                 String content = evt.content();
-                if (content != null && content.contains("\"type\":\"compaction\"")) {
+                if (content != null
+                        && content.contains("\"type\":\"compaction\"")
+                        && !content.contains("\"phase\":\"start\"")
+                        && !content.contains("\"failed\":true")) {
                     flushText();
                     appendSystemNotice(content);
                 }

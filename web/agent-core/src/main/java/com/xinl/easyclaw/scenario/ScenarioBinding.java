@@ -2,6 +2,7 @@ package com.xinl.easyclaw.scenario;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xinl.easyclaw.base.orchestration.AgentOrchestrator;
 import com.xinl.easyclaw.base.orchestration.OrchestrationModes;
 import com.xinl.easyclaw.base.profile.ScenarioProfile;
 import org.slf4j.Logger;
@@ -35,7 +36,7 @@ public final class ScenarioBinding {
     /** 无绑定单例：任何 isEmpty() 判断都为真，调用方走原有不限制路径 */
     public static final ScenarioBinding EMPTY =
             new ScenarioBinding(List.of(), List.of(), List.of(),
-                    CapabilityTier.STANDARD, false, List.of(), false);
+                    CapabilityTier.STANDARD, false, List.of(), false, true);
 
     private final List<String> skills;
     private final List<String> subagents;
@@ -60,11 +61,19 @@ public final class ScenarioBinding {
      * 由 {@link OrchestrationModes#isOrchestrated} 统一判定。
      */
     private final boolean orchestratedMode;
+    /**
+     * 本模式是否允许主控派遣子智能体。
+     * <p>
+     * 与 {@link OrchestrationModes} 的模式自声明同源：{@code AgentOrchestrator
+     * .subagentDispatchEnabled()} 的解析结果。false 时主控的子 Agent 名册整体为空
+     * （如 ops：远程操作是单执行体串行动作，无并行拆解需求）。
+     */
+    private final boolean subagentDispatchEnabled;
 
     private ScenarioBinding(List<String> skills, List<String> subagents,
                             List<String> mcpServices, CapabilityTier tier,
                             boolean tierExplicit, List<String> mcpTools,
-                            boolean orchestratedMode) {
+                            boolean orchestratedMode, boolean subagentDispatchEnabled) {
         this.skills = Collections.unmodifiableList(skills);
         this.subagents = Collections.unmodifiableList(subagents);
         this.mcpServices = Collections.unmodifiableList(mcpServices);
@@ -72,6 +81,7 @@ public final class ScenarioBinding {
         this.tierExplicit = tierExplicit;
         this.mcpTools = Collections.unmodifiableList(mcpTools);
         this.orchestratedMode = orchestratedMode;
+        this.subagentDispatchEnabled = subagentDispatchEnabled;
     }
 
     /**
@@ -99,7 +109,10 @@ public final class ScenarioBinding {
                 CapabilityTier.parse(rawTier, CapabilityTier.STANDARD),
                 explicit,
                 List.of(),
-                OrchestrationModes.isOrchestrated(scenario.getMode()));
+                OrchestrationModes.isOrchestrated(scenario.getMode()),
+                OrchestrationModes.find(scenario.getMode())
+                        .map(AgentOrchestrator::subagentDispatchEnabled)
+                        .orElse(true));
     }
 
     /**
@@ -181,7 +194,7 @@ public final class ScenarioBinding {
         return new ScenarioBinding(
                 new ArrayList<>(skills), new ArrayList<>(subagents),
                 new ArrayList<>(mcpServices), tier, tierExplicit, new ArrayList<>(safe),
-                orchestratedMode);
+                orchestratedMode, subagentDispatchEnabled);
     }
 
     /** 是否存在 MCP 硬约束（决定 toolkit 是否走白名单路径） */
@@ -201,6 +214,15 @@ public final class ScenarioBinding {
      */
     public boolean isOrchestratedMode() {
         return orchestratedMode;
+    }
+
+    /**
+     * 本模式是否允许主控派遣子智能体。
+     * <p><b>注意</b>：{@link #EMPTY}（无激活场景）返回 true，因此单智能体场景与
+     * 「场景查询失败降级」都走原有名册装配，不受影响。
+     */
+    public boolean isSubagentDispatchEnabled() {
+        return subagentDispatchEnabled;
     }
 
     /**

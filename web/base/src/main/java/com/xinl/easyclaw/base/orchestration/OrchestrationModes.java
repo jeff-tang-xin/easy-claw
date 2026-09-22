@@ -60,11 +60,13 @@ public final class OrchestrationModes {
     }
 
     /**
-     * 该模式是否需要多智能体编排（执行计划可能多于一步）。
+     * 该模式是否需要多智能体编排（执行计划可能多于一步，且步骤来自场景预配置的 workflow）。
      * <p>
-     * <b>替代散落各处的 {@code "team".equals(mode)}</b>。判据是「已注册且不是 single」
-     * 而非「等于 team」—— 这样新增 schedule 等编排型模式时，所有调用点自动生效，
-     * 无需再逐处补分支。
+     * <b>替代散落各处的 {@code "team".equals(mode)}</b>。判据是模式自声明
+     * {@link AgentOrchestrator#requiresWorkflowSteps()}（默认「已注册且不是 single」）——
+     * 这样新增 schedule 等编排型模式时，所有调用点自动生效，无需再逐处补分支；
+     * 而 ops 这类单执行体模式（计划恒为单阶段单步、不消费 workflow）覆写返回 false，
+     * 不会被「编排型才有的配置校验 / 直派 / 审计」误伤。
      * <p>
      * 未注册的 mode 视为非编排（走单智能体兜底），与 {@code resolveOrDefault} 的降级一致。
      * <p>
@@ -75,7 +77,7 @@ public final class OrchestrationModes {
      */
     public static boolean isOrchestrated(String modeId) {
         return find(modeId)
-                .map(o -> !DEFAULT_MODE.equals(o.modeId()))
+                .map(AgentOrchestrator::requiresWorkflowSteps)
                 .orElse(false);
     }
 

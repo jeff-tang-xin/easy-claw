@@ -6,6 +6,7 @@ import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.middleware.FileChangeMiddleware;
 import com.xinl.easyclaw.middleware.ToolFailGuard;
 import io.agentscope.core.event.CustomEvent;
+import io.agentscope.harness.agent.middleware.CompactionMiddleware;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -120,5 +121,65 @@ class CustomEventTranslatorTest {
         List<StreamEvent> out = collect(new CustomEvent(FileChangeMiddleware.EVENT_NAME, null));
         assertEquals(1, out.size());
         assertEquals("", out.get(0).content());
+    }
+
+    @Test
+    @DisplayName("compaction phase=start：翻译为 context 事件，phase 与提示文案就位")
+    void compactionPhaseStart() throws Exception {
+        List<StreamEvent> out = collect(new CustomEvent(
+                CompactionMiddleware.EVENT_NAME, Map.of("phase", CompactionMiddleware.PHASE_START)));
+
+        assertEquals(1, out.size());
+        assertEquals("context", out.get(0).type());
+
+        JsonNode payload = mapper.readTree(out.get(0).content());
+        assertEquals("compaction", payload.get("type").asText());
+        assertEquals("start", payload.get("phase").asText());
+        assertTrue(payload.get("message").asText().contains("压缩中"),
+                "start 提示应表明压缩正在进行");
+    }
+
+    @Test
+    @DisplayName("compaction phase=end：携带 keeping 与完成文案")
+    void compactionPhaseEndWithKeeping() throws Exception {
+        List<StreamEvent> out = collect(new CustomEvent(
+                CompactionMiddleware.EVENT_NAME,
+                Map.of("phase", CompactionMiddleware.PHASE_END, "keeping", 2)));
+
+        assertEquals(1, out.size());
+        JsonNode payload = mapper.readTree(out.get(0).content());
+        assertEquals("compaction", payload.get("type").asText());
+        assertEquals("end", payload.get("phase").asText());
+        assertEquals(2, payload.get("keeping").asInt());
+        assertTrue(payload.get("message").asText().contains("保留 2 条消息"),
+                "完成文案应携带保留条数");
+        assertTrue(!payload.has("failed"), "成功路径不得带 failed 字段");
+    }
+
+    @Test
+    @DisplayName("compaction phase=end failed=true：失败文案，不拼 keeping")
+    void compactionPhaseEndFailed() throws Exception {
+        List<StreamEvent> out = collect(new CustomEvent(
+                CompactionMiddleware.EVENT_NAME,
+                Map.of("phase", CompactionMiddleware.PHASE_END, "failed", true)));
+
+        assertEquals(1, out.size());
+        JsonNode payload = mapper.readTree(out.get(0).content());
+        assertEquals("end", payload.get("phase").asText());
+        assertEquals(true, payload.get("failed").asBoolean());
+        assertTrue(payload.get("message").asText().contains("失败"),
+                "失败路径应明确告知压缩失败");
+    }
+
+    @Test
+    @DisplayName("compaction 旧形状（无 phase，仅 keeping）：视为完成事件，兼容不中断")
+    void compactionLegacyShapeTreatedAsEnd() throws Exception {
+        List<StreamEvent> out = collect(new CustomEvent(
+                CompactionMiddleware.EVENT_NAME, Map.of("keeping", 3)));
+
+        assertEquals(1, out.size());
+        JsonNode payload = mapper.readTree(out.get(0).content());
+        assertEquals("end", payload.get("phase").asText(), "缺 phase 应降级为 end 而非丢弃");
+        assertEquals(3, payload.get("keeping").asInt());
     }
 }

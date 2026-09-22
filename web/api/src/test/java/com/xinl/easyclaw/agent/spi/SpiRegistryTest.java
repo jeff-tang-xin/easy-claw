@@ -25,16 +25,16 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class SpiRegistryTest {
 
-    /** 期望注册的 7 个平级智能体 */
+    /** 期望注册的 8 个平级智能体（ops 为运维模式专属主控，2026-09 新增） */
     private static final List<String> EXPECTED_AGENTS = List.of(
             "main", "coder", "reviewer", "planner",
-            "researcher", "code-expert", "file-expert");
+            "researcher", "code-expert", "file-expert", "ops");
 
-    /** 期望注册的 3 种编排模式 */
-    private static final List<String> EXPECTED_MODES = List.of("single", "team", "schedule");
+    /** 期望注册的 4 种编排模式（ops 为单执行体模式：isOrchestrated=false 但 SPI 可发现） */
+    private static final List<String> EXPECTED_MODES = List.of("single", "team", "schedule", "ops");
 
     @Test
-    @DisplayName("7 个智能体全部能被 ServiceLoader 发现")
+    @DisplayName("8 个智能体全部能被 ServiceLoader 发现")
     void discoversAllAgents() {
         AgentRegistry registry = new AgentRegistry();
 
@@ -46,7 +46,7 @@ class SpiRegistryTest {
     }
 
     @Test
-    @DisplayName("3 种编排模式全部能被 ServiceLoader 发现")
+    @DisplayName("4 种编排模式全部能被 ServiceLoader 发现")
     void discoversAllModes() {
         OrchestratorRegistry registry = new OrchestratorRegistry();
 

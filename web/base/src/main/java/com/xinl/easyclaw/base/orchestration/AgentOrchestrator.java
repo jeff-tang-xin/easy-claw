@@ -101,4 +101,72 @@ public interface AgentOrchestrator {
     default boolean requiresExecutionAudit() {
         return false;
     }
+
+    /**
+     * 本模式的主智能体是否使用「最小工具集」。
+     * <p>
+     * 返回 true 时，api 层装配主智能体 toolkit 不走通用六类工具 + HTTP/MCP 的
+     * {@code createWorkspaceToolkit}，改用模式专属的最小工具集（如 ops 仅 remote_shell）。
+     * 这是「场景决定能力边界」的声明点：模式自己声明 LLM 能触达什么，
+     * api 层只负责按声明装配，不硬编码 {@code "ops".equals(mode)} 分支。
+     * <p>
+     * 默认 false：使用通用工具集（single / team / schedule）。
+     */
+    default boolean minimalToolkit() {
+        return false;
+    }
+
+    /**
+     * 本模式的主控智能体（SPI {@code EasyClawAgent} 的 agentId）。
+     * <p>
+     * 与 {@link #minimalToolkit()} 同构的「模式自声明」：主控人格由模式决定，
+     * api 层（SystemPromptComposer）按本声明解析人格，不硬编码模式分支。
+     * 场景 roleName 仍优先于本声明（场景绑定具体智能体时以绑定为准）。
+     * <p>
+     * 默认 {@code "main"}：single / team / schedule 沿用通用主控人格。
+     */
+    default String mainAgentId() {
+        return "main";
+    }
+
+    /**
+     * 本模式是否允许主控派遣子智能体。
+     * <p>
+     * 返回 false 时，主控的子 Agent 名册整体为空：不装配任何 SubagentDeclaration，
+     * 系统提示词不含子 Agent 派遣说明，模型无从发起派遣。适用于「单执行体串行动作、
+     * 无并行拆解需求」的模式（如 ops 的远程服务器操作）。
+     * <p>
+     * 默认 true：维持既有名册装配行为（single / team / schedule）。
+     */
+    default boolean subagentDispatchEnabled() {
+        return true;
+    }
+
+    /**
+     * 本模式是否启用「工具白名单（永久授权）」机制。
+     * <p>
+     * 返回 false 时：永久授权（allowPermanently）拒绝持久化、回合授权（allowTurn）
+     * 不生效、存量授权规则也不摘除 system ASK 规则 —— 工具每次调用都弹用户确认。
+     * 适用于「每次执行都必须人在环」的高危模式（如 ops 的 remote_shell）。
+     * <p>
+     * 默认 true：维持既有白名单行为（single / team / schedule）。
+     */
+    default boolean whitelistEnabled() {
+        return true;
+    }
+
+    /**
+     * 本模式是否要求场景配置工作流步骤（workflow）。
+     * <p>
+     * 判据是「执行计划是否可能多于一步、且步骤来自场景预配置的 workflow」：
+     * team / schedule 按场景 workflow 编排，缺失步骤即配置不完整，必须拒绝保存；
+     * 而 ops 这类<b>单执行体</b>模式（{@link #plan} 恒为单阶段单步、不消费 workflow）
+     * 不应被此校验误伤 —— 用户编辑 ops 场景的任意字段都会撞上「需要至少一个工作流步骤」。
+     * <p>
+     * 默认「非 single 即要求」：与 {@link OrchestrationModes#isOrchestrated} 的历史
+     * 行为等价（single / team / schedule 零变化）；单执行体模式覆写返回 false。
+     */
+    default boolean requiresWorkflowSteps() {
+        return !OrchestrationModes.DEFAULT_MODE.equals(modeId());
+    }
 }

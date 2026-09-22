@@ -1,5 +1,5 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
-import {Navigate, NavLink, Route, Routes, useLocation, useParams} from 'react-router-dom';
+import {Navigate, NavLink, Route, Routes, useLocation} from 'react-router-dom';
 import {fetchMe, logout} from './api';
 import {clearSession, getCurrentOrgId, loadSession, setCurrentOrgId} from './auth';
 import type {MeResponse} from './types';
@@ -8,16 +8,18 @@ import ChangePasswordCard from './components/ChangePasswordCard';
 import ChangePasswordModal from './components/ChangePasswordModal';
 import AppKeysPage from './pages/AppKeysPage';
 import AuditLogsPage from './pages/AuditLogsPage';
+import FeatureFlagsPage from './pages/FeatureFlagsPage';
 import GatewayPage from './pages/GatewayPage';
 import LoginPage from './pages/LoginPage';
+import MenuConfigPage from './pages/MenuConfigPage';
 import OrgDetailPage from './pages/OrgDetailPage';
 import OrgsPage from './pages/OrgsPage';
+import PlatformCatalogPage from './pages/PlatformCatalogPage';
 import ProjectsPage from './pages/ProjectsPage';
 import ProjectSpacePage from './pages/ProjectSpacePage';
 import ProvidersPage from './pages/ProvidersPage';
 import RolesPage from './pages/RolesPage';
 import UsersPage from './pages/UsersPage';
-import WorkspacesPage, {MenuConfigView} from './pages/WorkspacesPage';
 import {NAV_GROUPS, ROLE_LABELS, groupVisible, itemVisible} from './nav';
 
 const COLLAPSED_KEY = 'hub.sidebar.collapsed';
@@ -59,8 +61,12 @@ function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
     items.push({text: orgName}, {text: '审计'});
   } else if (path.startsWith('/gateway')) {
     items.push({text: orgName}, {text: 'LLM 网关'});
-  } else if (path.startsWith('/workspaces')) {
-    items.push({text: orgName}, {text: 'Spoke 工作区'});
+  } else if (path.startsWith('/menus')) {
+    items.push({text: orgName}, {text: '菜单可见性'});
+  } else if (path.startsWith('/feature-flags')) {
+    items.push({text: orgName}, {text: '开关与工具'});
+  } else if (path.startsWith('/platform-catalog')) {
+    items.push({text: '平台'}, {text: '平台目录'});
   } else if (path.startsWith('/providers')) {
     items.push({text: '平台'}, {text: '模型 Provider'});
   } else if (path.startsWith('/users')) {
@@ -68,14 +74,6 @@ function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
   }
 
   return <Breadcrumb items={items} />;
-}
-
-/** 菜单配置路由包装：从路径参数取工作区 id，非法则回工作区列表。 */
-function MenuConfigRoute() {
-  const {wid} = useParams();
-  const id = Number(wid);
-  if (!Number.isFinite(id) || id <= 0) return <Navigate to="/workspaces" replace />;
-  return <MenuConfigView workspaceId={id} />;
 }
 
 export default function App() {
@@ -277,8 +275,12 @@ export default function App() {
             <Route path="/audit" element={<AuditLogsPage orgId={orgId} role={currentRole} />} />
             <Route path="/appkeys" element={<AppKeysPage orgId={orgId} />} />
             <Route path="/gateway" element={<GatewayPage orgId={orgId} role={currentRole} />} />
-            <Route path="/workspaces" element={<WorkspacesPage orgId={orgId} />} />
-            <Route path="/workspaces/:wid/menus" element={<MenuConfigRoute />} />
+            <Route path="/menus" element={<MenuConfigPage orgId={orgId} />} />
+            <Route path="/feature-flags" element={<FeatureFlagsPage orgId={orgId} />} />
+            <Route
+              path="/platform-catalog"
+              element={<PlatformCatalogPage platformAdmin={me.user.platformAdmin} />}
+            />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/providers" element={<ProvidersPage />} />
             <Route path="*" element={<Navigate to="/projects" replace />} />

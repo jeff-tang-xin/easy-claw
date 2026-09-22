@@ -126,7 +126,9 @@ class StuckToolRecoveryTest {
                 sessions,
                 mock(ScenarioResolver.class),
                 new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
-                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry(),
+                new com.xinl.easyclaw.config.CloudFeatureGate(
+                        mock(com.xinl.easyclaw.config.CloudBootstrapService.class)));
 
         sessions.bindWorkspace(SESSION_ID, WORKSPACE_ID);
     }

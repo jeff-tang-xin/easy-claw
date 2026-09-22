@@ -19,6 +19,8 @@ import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.Agent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventEmitter;
+import io.agentscope.core.event.CustomEvent;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
 import io.agentscope.core.middleware.ReasoningInput;
@@ -31,6 +33,7 @@ import io.agentscope.harness.agent.memory.compaction.ConversationCompactor;
 import io.agentscope.harness.agent.workspace.WorkspaceManager;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.function.Function;
 import org.slf4j.Logger;
@@ -61,6 +64,25 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
 
     private static final Logger log = LoggerFactory.getLogger(CompactionMiddleware.class);
 
+    /**
+     * Name of the {@link CustomEvent} emitted on the compaction lifecycle, for consumers of the
+     * agent's event stream (UI channels). Emitted via {@link AgentEventEmitter} when present in
+     * the Reactor context; silently skipped on non-streaming paths. Payload shapes:
+     * <ul>
+     *   <li>{@code phase=start} — compaction is about to run (threshold and cutoff passed);</li>
+     *   <li>{@code phase=end, keeping=N} — compaction finished, N messages kept;</li>
+     *   <li>{@code phase=end, failed=true} — compaction failed, reasoning continues with the
+     *       original context.</li>
+     * </ul>
+     */
+    public static final String EVENT_NAME = "compaction";
+
+    /** Payload {@code phase} value marking the start of a compaction run. */
+    public static final String PHASE_START = "start";
+
+    /** Payload {@code phase} value marking the end of a compaction run. */
+    public static final String PHASE_END = "end";
+
     private final WorkspaceManager workspaceManager;
     private final Model model;
     private final CompactionConfig config;
@@ -83,8 +105,8 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
         }
         final RuntimeContext rc = ctx != null ? ctx : RuntimeContext.empty();
 
-        return Flux.defer(
-                () -> {
+        return Flux.deferContextual(
+                cv -> {
                     List<Msg> messages = input.messages();
                     Msg systemMsg = null;
                     List<Msg> conversation;
@@ -109,13 +131,42 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                             new ConversationCompactor(model, flushManager);
                     final Msg sys = systemMsg;
 
+                    // Compaction lifecycle events for UI channels: the emitter travels in the
+                    // Reactor context (same channel the application middlewares use). Absent
+                    // emitter (non-streaming paths) simply skips the notifications.
+                    AgentEventEmitter emitter = AgentEventEmitter.fromContext(cv).orElse(null);
+
                     // Only compaction may degrade; downstream reasoning errors must propagate.
                     return compactor
-                            .compactIfNeeded(rc, conversation, effectiveConfig, agentId, sessionId)
+                            .compactIfNeeded(
+                                    rc,
+                                    conversation,
+                                    effectiveConfig,
+                                    agentId,
+                                    sessionId,
+                                    () -> {
+                                        if (emitter != null) {
+                                            emitter.emit(
+                                                    new CustomEvent(
+                                                            EVENT_NAME,
+                                                            Map.of("phase", PHASE_START)));
+                                        }
+                                    })
                             .onErrorResume(
                                     error -> {
                                         if (ExceptionUtils.containsInterruptedException(error)) {
                                             return Mono.error(error);
+                                        }
+                                        if (emitter != null) {
+                                            // Compaction failed but reasoning continues with the
+                                            // original context — notify so the UI can clear its
+                                            // "compacting" state instead of waiting forever.
+                                            emitter.emit(
+                                                    new CustomEvent(
+                                                            EVENT_NAME,
+                                                            Map.of(
+                                                                    "phase", PHASE_END, "failed",
+                                                                    true)));
                                         }
                                         log.warn(
                                                 "Compaction failed, continuing without compaction:"
@@ -129,6 +180,16 @@ public class CompactionMiddleware implements HarnessRuntimeMiddleware {
                                             return next.apply(input);
                                         }
                                         List<Msg> compacted = optResult.get();
+                                        if (emitter != null) {
+                                            emitter.emit(
+                                                    new CustomEvent(
+                                                            EVENT_NAME,
+                                                            Map.of(
+                                                                    "phase",
+                                                                    PHASE_END,
+                                                                    "keeping",
+                                                                    compacted.size())));
+                                        }
                                         applyToContext(
                                                 RuntimeContext.resolveAgentState(rc, reActAgent),
                                                 compacted);

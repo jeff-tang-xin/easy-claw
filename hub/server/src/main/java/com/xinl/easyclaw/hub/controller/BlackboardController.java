@@ -40,6 +40,12 @@ public class BlackboardController {
         return blackboardService.listArchives(CurrentUserHolder.requireUserId(), projectId);
     }
 
+    /** 单条详情（active/archived 均可）。 */
+    @GetMapping("/{id}")
+    public BlackboardEntryDto get(@PathVariable Long id) {
+        return blackboardService.get(CurrentUserHolder.requireUserId(), id);
+    }
+
     @PostMapping
     public BlackboardEntryDto append(@Valid @RequestBody CreateBlackboardEntryRequest req) {
         return blackboardService.append(CurrentUserHolder.requireUserId(), req);
@@ -49,5 +55,11 @@ public class BlackboardController {
     @PostMapping("/{id}/archive")
     public BlackboardEntryDto archive(@PathVariable Long id) {
         return blackboardService.archive(CurrentUserHolder.requireUserId(), id);
+    }
+
+    /** 取消归档（幂等：本就活跃直接返回当前态）。 */
+    @PostMapping("/{id}/unarchive")
+    public BlackboardEntryDto unarchive(@PathVariable Long id) {
+        return blackboardService.unarchive(CurrentUserHolder.requireUserId(), id);
     }
 }

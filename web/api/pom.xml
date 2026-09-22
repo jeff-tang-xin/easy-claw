@@ -83,6 +83,12 @@
             <version>${project.version}</version>
             <scope>runtime</scope>
         </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-agent-ops</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
 
         <!-- ========================================= -->
         <!-- 编排模式：single / team / schedule         -->
@@ -105,6 +111,12 @@
         <dependency>
             <groupId>com.xinl</groupId>
             <artifactId>easy-claw-mode-schedule</artifactId>
+            <version>${project.version}</version>
+            <scope>runtime</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-mode-ops</artifactId>
             <version>${project.version}</version>
             <scope>runtime</scope>
         </dependency>
@@ -191,6 +203,18 @@
             <groupId>com.fasterxml.jackson.dataformat</groupId>
             <artifactId>jackson-dataformat-yaml</artifactId>
             <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Apache MINA SSHD：运维场景远程连接（exec / PTY 交互终端 / SFTP 上传） -->
+        <dependency>
+            <groupId>org.apache.sshd</groupId>
+            <artifactId>sshd-core</artifactId>
+            <version>2.12.1</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.sshd</groupId>
+            <artifactId>sshd-sftp</artifactId>
+            <version>2.12.1</version>
         </dependency>
 
         <dependency>

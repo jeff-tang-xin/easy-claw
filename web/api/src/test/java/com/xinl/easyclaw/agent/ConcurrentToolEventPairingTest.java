@@ -58,7 +58,9 @@ class ConcurrentToolEventPairingTest {
                 new SessionRegistry(),
                 mock(ScenarioResolver.class),
                 new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
-                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry());
+                new com.xinl.easyclaw.agent.spi.OrchestratorRegistry(),
+                new com.xinl.easyclaw.config.CloudFeatureGate(
+                        mock(com.xinl.easyclaw.config.CloudBootstrapService.class)));
 
         Class<?> traceClass = Class.forName("com.xinl.easyclaw.agent.AgentService$ToolTrace");
         Constructor<?> ctor = traceClass.getDeclaredConstructor();

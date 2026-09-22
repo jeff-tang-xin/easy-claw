@@ -36,7 +36,8 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       {to: '/gateway', label: 'LLM 网关', icon: '🌐', title: 'LLM 网关', anyOfPerms: ['audit.read']},
       {to: '/audit', label: '审计日志', icon: '🛡️', title: '审计日志', anyOfPerms: ['audit.read']},
-      {to: '/workspaces', label: 'Spoke 工作区', icon: '🧩', title: 'Spoke 工作区与公共菜单', anyOfPerms: ['project.read']},
+      {to: '/menus', label: '菜单可见性', icon: '📋', title: '组织菜单可见性', anyOfPerms: ['org.read']},
+      {to: '/feature-flags', label: '开关与工具', icon: '🎚️', title: '组织功能开关与工具启用', anyOfPerms: ['org.read']},
     ],
   },
   {
@@ -48,11 +49,12 @@ export const NAV_GROUPS: NavGroup[] = [
   },
   {
     title: '平台',
-    anyOfPerms: ['user.manage', 'provider.manage'],
+    anyOfPerms: ['user.manage', 'provider.manage', 'platform.catalog.manage'],
     platform: true,
     items: [
       {to: '/users', label: '用户管理', icon: '👥', title: '用户管理', anyOfPerms: ['user.manage'], platform: true},
       {to: '/providers', label: 'Provider', icon: '🧩', title: 'Provider', anyOfPerms: ['provider.manage'], platform: true},
+      {to: '/platform-catalog', label: '平台目录', icon: '🗂️', title: '平台目录（菜单/开关/工具）', anyOfPerms: ['platform.catalog.manage'], platform: true},
     ],
   },
 ];
@@ -79,6 +81,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'audit.read': '查看网关与审计日志',
   'provider.manage': '管理模型 Provider',
   'user.manage': '管理平台用户',
+  'platform.catalog.manage': '管理平台目录（菜单/开关/工具）',
 };
 
 type HasPerm = (perm: string) => boolean;

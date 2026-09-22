@@ -4,12 +4,16 @@ import java.util.List;
 
 /**
  * spoke 引导响应（GET /api/spoke/bootstrap）：spoke 持 appkey 换取自身完整配置快照——
- * 身份（appKey）、归属组织（org）、可用模型面（providers，按 appkey 绑定展开，绝不含真实 key）
- * 与服务权限（permissions）。spoke 据此框定自身配置信息与权限信息，无需逐端点摸索。
+ * 身份（appKey）、归属组织（org）、生效菜单树（menus）、生效功能开关（flags）、生效工具（tools）、
+ * 可用模型面（providers，按 appkey 绑定展开，绝不含真实 key）与服务权限（permissions）。
+ * 菜单/开关/工具的生效语义 = 平台 enabled AND 组织 enabled/visible（hub 唯一裁决口径）。
  */
 public record SpokeBootstrapResponse(
         SpokeAppKeyInfo appKey,
         SpokeOrgInfo org,
+        List<SpokeMenuNode> menus,
+        List<SpokeFlagInfo> flags,
+        List<SpokeToolInfo> tools,
         List<SpokeProviderInfo> providers,
         List<String> permissions) {
 

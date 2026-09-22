@@ -69,13 +69,56 @@ public class KnowledgeService {
 
     // ---------- 查询 ----------
 
-    public List<KnowledgeItemListItemDto> list(Long requesterId, Long projectId) {
+    public List<KnowledgeItemListItemDto> list(Long requesterId, Long projectId, String query) {
         ProjectEntity p = loadProject(projectId);
         requireCanRead(p, requesterId);
-        List<KnowledgeItemEntity> rows =
-                items.findByProjectIdAndStatusOrderByUpdatedAtDesc(projectId, STATUS_ACTIVE);
+        List<KnowledgeItemEntity> rows;
+        var terms = splitTerms(query);
+        if (terms.isEmpty()) {
+            rows = items.findByProjectIdAndStatusOrderByUpdatedAtDesc(projectId, STATUS_ACTIVE);
+        } else {
+            // 跨库（PG/SQLite）：LOWER + LIKE，多词 AND；通配符转义并显式 ESCAPE，避免用户输入 % _ 改变语义。
+            rows = searchByKeywords(projectId, terms);
+        }
         Map<Long, String> names = resolveUsernames(collectUserIds(rows));
         return rows.stream().map(d -> toListItem(d, names)).toList();
+    }
+
+    /** 按空白拆词并去空白项；null/空白返回空列表（= 不带检索）。 */
+    private static List<String> splitTerms(String query) {
+        if (query == null || query.isBlank()) {
+            return List.of();
+        }
+        return java.util.Arrays.stream(query.trim().split("\\s+"))
+                .filter(s -> !s.isBlank()).toList();
+    }
+
+    /** 转义 LIKE 的三个特殊字符（\ % _），配合查询里的 ESCAPE '\\'。 */
+    private static String escapeLike(String s) {
+        return s.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_");
+    }
+
+    /**
+     * 关键词检索（A3-S2）：在 topic/summary/content 拼接串上做大小写不敏感 LIKE，多个词 AND。
+     * 用 JPA Criteria 按词数动态生成条件（JPQL 无集合参数的 LIKE ALL），CONCAT/LOWER/LIKE...ESCAPE
+     * 在 PG 与 SQLite 上均可移植；按 updatedAt 倒序。pattern 已加 {@code %} 并转义通配符。
+     */
+    private List<KnowledgeItemEntity> searchByKeywords(Long projectId, List<String> terms) {
+        var cb = em.getCriteriaBuilder();
+        var cq = cb.createQuery(KnowledgeItemEntity.class);
+        var k = cq.from(KnowledgeItemEntity.class);
+        var haystack = cb.lower(cb.concat(cb.concat(cb.concat(k.get("topic"), " "),
+                cb.concat(k.get("summary"), " ")), k.get("content")));
+        var predicates = new java.util.ArrayList<jakarta.persistence.criteria.Predicate>();
+        predicates.add(cb.equal(k.get("projectId"), projectId));
+        predicates.add(cb.equal(k.get("status"), STATUS_ACTIVE));
+        for (String term : terms) {
+            String pattern = "%" + escapeLike(term.toLowerCase()) + "%";
+            predicates.add(cb.like(haystack, pattern, '\\'));
+        }
+        cq.select(k).where(predicates.toArray(new jakarta.persistence.criteria.Predicate[0]))
+                .orderBy(cb.desc(k.get("updatedAt")));
+        return em.createQuery(cq).getResultList();
     }
 
     public KnowledgeItemDto get(Long requesterId, Long itemId) {

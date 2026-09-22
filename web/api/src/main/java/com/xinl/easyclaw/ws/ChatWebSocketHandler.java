@@ -7,6 +7,7 @@ import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.agent.domain.UserAttachment;
 import com.xinl.easyclaw.agent.event.EventSerializer;
 import com.xinl.easyclaw.agent.event.LegacyEventSerializer;
+import com.xinl.easyclaw.ops.service.SshConnectionService;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +28,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li><b>心跳类</b>：{@code {"type":"ping"}} → 后端回 {@code {"type":"pong"}}（保活/探活，不进 LLM）</li>
  *   <li><b>业务类</b>：{@code {"type":"register"|"pending"|"stop", "sessionId":..}}
  *       —— 会话注册/挂起查询/停止（不进 LLM）</li>
+ *   <li><b>运维终端类</b>：{@code {"type":"term_open"|"term_data"|"term_resize"|"term_close", ...}}
+ *       —— 运维场景 SSH 交互终端（不进 LLM），输出以 term_data(base64) 推回</li>
  *   <li><b>对话类（仅这两类驱动 Agent/LLM）</b>：
  *       {@code {"type":"chat","sessionId":..,"message":..,"attachments":[...]}} 与
  *       {@code {"type":"confirm","sessionId":..,"toolNames":[...],"action":"once|turn|always|deny"}}</li>
@@ -85,16 +88,23 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard;
     private final com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator;
     private final com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties;
+    private final com.xinl.easyclaw.config.CloudFeatureGate featureGate;
+    /** 运维场景 SSH 连接运行时（终端消息 term_* 使用；无连接时这些消息直接报错返回） */
+    private final SshConnectionService ssh;
 
     public ChatWebSocketHandler(AgentService agentService, WorkspaceManager workspaceManager,
                                 com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard,
                                 com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator,
-                                com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties) {
+                                com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
+                                com.xinl.easyclaw.config.CloudFeatureGate featureGate,
+                                SshConnectionService ssh) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
         this.accessGuard = accessGuard;
         this.toolConfirmValidator = toolConfirmValidator;
         this.agentScopeProperties = agentScopeProperties;
+        this.featureGate = featureGate;
+        this.ssh = ssh;
     }
 
     /**
@@ -165,8 +175,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             String type = root.path("type").asText("");
             String sessionId = root.path("sessionId").asText("");
             if (sessionId.isBlank()) {
-                // ping 等连接级消息不带 sessionId：仍可继续处理
-                if (!"ping".equals(type)) {
+                // ping / term_* 等连接级消息不带 sessionId：仍可继续处理
+                // （term_open/data/resize/close 是裸终端通道，归属由 terminalOwners 管理，
+                //   与聊天会话无关；此前只放行 ping，导致运维终端消息被静默丢弃）
+                if (!"ping".equals(type) && !type.startsWith("term_")) {
                     log.warn("WS 消息缺少 sessionId: type={}", type);
                     return;
                 }
@@ -198,6 +210,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                     handlePending(root, sessionId);
                 }
                 case "register" -> handleRegister(root, sessionId, session.getId());
+                case "term_open" -> handleTermOpen(root, session.getId());
+                case "term_data" -> handleTermData(root);
+                case "term_resize" -> handleTermResize(root);
+                case "term_close" -> handleTermClose(root);
                 default -> log.warn("未知 WS 消息类型: {}", type);
             }
         } catch (Exception e) {
@@ -213,9 +229,110 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         sessionOwners.computeIfAbsent(sessionId, k -> ConcurrentHashMap.newKeySet()).add(connectionId);
     }
 
+    // ==================== 运维终端（term_* 消息，不进 LLM） ====================
+
+    /** terminalId → 持有该终端的 connectionId（WS 断连时据此关闭其全部终端） */
+    private final Map<String, String> terminalOwners = new ConcurrentHashMap<>();
+
+    /**
+     * 打开交互终端：{@code {"type":"term_open","workspaceId":..,"connId":..,"terminalId":..,"cols":..,"rows":..}}。
+     * 终端输出以 {@code {"type":"term_data","terminalId":..,"data":"<base64>"}} 推回
+     * （原始字节含 ANSI 序列，base64 规避 JSON 转义与非法 UTF-8 问题）。
+     */
+    private void handleTermOpen(JsonNode root, String connectionId) {
+        String workspaceId = root.path("workspaceId").asText("");
+        long connId = root.path("connId").asLong(0);
+        String terminalId = root.path("terminalId").asText("");
+        int cols = root.path("cols").asInt(80);
+        int rows = root.path("rows").asInt(24);
+        if (workspaceId.isBlank() || connId <= 0 || terminalId.isBlank()) {
+            sendTermError(connectionId, terminalId, "term_open 缺少 workspaceId/connId/terminalId");
+            return;
+        }
+        String err = ssh.openShell(workspaceId, connId, terminalId, cols, rows, bytes -> {
+            WebSocketSession conn = connections.get(connectionId);
+            if (conn == null) {
+                return; // 连接已断，输出丢弃；终端随 WS 关闭统一清理
+            }
+            try {
+                Map<String, Object> evt = new HashMap<>();
+                evt.put("type", "term_data");
+                evt.put("terminalId", terminalId);
+                evt.put("data", java.util.Base64.getEncoder().encodeToString(bytes));
+                conn.sendMessage(new TextMessage(mapper.writeValueAsString(evt)));
+            } catch (Exception e) {
+                log.debug("终端输出推送失败（连接可能已断）: terminalId={}, {}", terminalId, e.getMessage());
+            }
+        });
+        if (err != null) {
+            sendTermError(connectionId, terminalId, err);
+            return;
+        }
+        terminalOwners.put(terminalId, connectionId);
+    }
+
+    /** 键盘输入：{@code {"type":"term_data","workspaceId":..,"terminalId":..,"data":"<原文>"}} */
+    private void handleTermData(JsonNode root) {
+        String workspaceId = root.path("workspaceId").asText("");
+        String terminalId = root.path("terminalId").asText("");
+        String data = root.path("data").asText("");
+        if (terminalId.isBlank() || data.isEmpty()) {
+            return;
+        }
+        String err = ssh.writeShell(workspaceId, terminalId, data);
+        if (err != null) {
+            WebSocketSession conn = connections.get(terminalOwners.get(terminalId));
+            if (conn != null) {
+                sendTermError(conn.getId(), terminalId, err);
+            }
+        }
+    }
+
+    /** 窗口尺寸变化：{@code {"type":"term_resize","terminalId":..,"cols":..,"rows":..}} */
+    private void handleTermResize(JsonNode root) {
+        String workspaceId = root.path("workspaceId").asText("");
+        String terminalId = root.path("terminalId").asText("");
+        if (terminalId.isBlank()) {
+            return;
+        }
+        ssh.resizeShell(workspaceId, terminalId, root.path("cols").asInt(80), root.path("rows").asInt(24));
+    }
+
+    /** 主动关闭终端：{@code {"type":"term_close","terminalId":..}} */
+    private void handleTermClose(JsonNode root) {
+        String workspaceId = root.path("workspaceId").asText("");
+        String terminalId = root.path("terminalId").asText("");
+        if (terminalId.isBlank()) {
+            return;
+        }
+        ssh.closeShell(workspaceId, terminalId);
+        terminalOwners.remove(terminalId);
+    }
+
+    private void sendTermError(String connectionId, String terminalId, String message) {
+        WebSocketSession conn = connections.get(connectionId);
+        if (conn == null) {
+            return;
+        }
+        try {
+            Map<String, Object> evt = new HashMap<>();
+            evt.put("type", "term_error");
+            evt.put("terminalId", terminalId);
+            evt.put("message", message);
+            conn.sendMessage(new TextMessage(mapper.writeValueAsString(evt)));
+        } catch (Exception e) {
+            log.debug("终端错误推送失败: terminalId={}, {}", terminalId, e.getMessage());
+        }
+    }
+
     private void handleRegister(JsonNode root, String sessionId, String connectionId) {
         bindSession(sessionId, connectionId);
         String workspaceId = root.path("workspaceId").asText("");
+        long connId = root.path("connId").asLong(0);
+        if (connId > 0 && !workspaceId.isBlank()) {
+            // WS 重连后 register 恢复会话→连接绑定（断连时已解绑；多连接下缺绑定会回退 primary 连接）
+            ssh.bindSession(sessionId, workspaceId, connId);
+        }
         if (!workspaceId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
             log.info("WS 注册 sessionId→workspaceId: sessionId={}, workspaceId={}", sessionId, workspaceId);
@@ -307,8 +424,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
 
     private void handleChat(JsonNode root, String sessionId) {
         String workspaceId = root.path("workspaceId").asText("");
+        long connId = root.path("connId").asLong(0);
         if (!workspaceId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
+        }
+        if (connId > 0 && !workspaceId.isBlank()) {
+            // 运维多 tab：一个连接一个会话，该会话的 remote_shell 固定作用于这条连接
+            ssh.bindSession(sessionId, workspaceId, connId);
         }
         String msg = root.path("message").asText("");
         String skillName = root.path("skillName").asText("");
@@ -331,6 +453,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if (msg.isBlank() && atts.isEmpty()) {
             log.warn("WS chat 拒绝空消息: workspaceId={}, sessionId={}", workspaceId, sessionId);
             sendJson(sessionId, StreamEvent.error("消息内容为空：请输入文字或添加附件后再发送。"));
+            sendJson(sessionId, StreamEvent.end());
+            return;
+        }
+        // 附件门禁（spec §4.3）：组织经 hub 目录关闭 allow_attachments 后，拒绝带附件消息
+        if (!atts.isEmpty() && !featureGate.attachmentsAllowed()) {
+            log.warn("WS chat 拒绝附件: 组织已禁用附件与图片上传, sessionId={}", sessionId);
+            sendJson(sessionId, StreamEvent.error("该组织已禁用附件与图片上传"));
             sendJson(sessionId, StreamEvent.end());
             return;
         }
@@ -403,7 +532,10 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         if ("turn".equals(action)) {
             agentService.allowTurn(sessionId, toolNames);
         } else if ("always".equals(action)) {
-            agentService.allowPermanently(workspaceId, toolNames);
+            if (!agentService.allowPermanently(workspaceId, toolNames)) {
+                // 场景未启用白名单机制（ops）：本次调用照常放行，但明确告知规则未持久化
+                sendJson(sessionId, StreamEvent.error("该场景未启用工具白名单：每次调用都会请求确认"));
+            }
         }
         boolean allowed = !"deny".equals(action);
         agentService.resumeChat(workspaceId, sessionId, allowed,
@@ -513,6 +645,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String cid = session.getId();
         connections.remove(cid);
+        // 该连接持有的运维终端全部关闭（远端 PTY 一并释放）
+        terminalOwners.entrySet().removeIf(e -> {
+            if (cid.equals(e.getValue())) {
+                ssh.closeShellByTerminalId(e.getKey());
+                return true;
+            }
+            return false;
+        });
         // 解除该连接的所有会话订阅；会话若已无任何订阅者则移除空条目并登记待释放
         List<String> orphaned = new ArrayList<>();
         sessionOwners.entrySet().removeIf(e -> {
@@ -529,6 +669,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // 用 IfIdle 版本：浏览器刷新/切网也会触发断连，但后端回合可能仍在跑
         // （前端重连后靠 pendingEvents 缓冲续看），不能无条件 dispose 订阅
         for (String sid : orphaned) {
+            ssh.unbindSession(sid);
             agentService.releaseSessionIfIdle(sid);
         }
     }

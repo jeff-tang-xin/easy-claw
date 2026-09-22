@@ -35,9 +35,14 @@ public class KnowledgeController {
         this.knowledgeService = knowledgeService;
     }
 
+    /**
+     * 列表 / 关键词检索（A3-S2）：{@code q} 非空时按空白拆多个词，在 topic/summary/content 上
+     * 大小写不敏感 AND 匹配；{@code q} 为空返回项目内全部未删除条目。
+     */
     @GetMapping
-    public List<KnowledgeItemListItemDto> list(@RequestParam Long projectId) {
-        return knowledgeService.list(CurrentUserHolder.requireUserId(), projectId);
+    public List<KnowledgeItemListItemDto> list(@RequestParam Long projectId,
+                                               @RequestParam(required = false) String q) {
+        return knowledgeService.list(CurrentUserHolder.requireUserId(), projectId, q);
     }
 
     @GetMapping("/{id}")

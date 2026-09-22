@@ -68,8 +68,13 @@ export interface Segment {
   bbType?: string;
   /** 黑板登记者：main 或 sub-xxxxxx（由服务端从运行时上下文解析，不可伪造） */
   bbAuthor?: string;
-  /** note 段自定义图标（默认 ⚠️；上下文压缩提示用 📦） */
+  /** note 段自定义图标（默认 ⚠️；上下文压缩提示用 📦，压缩进行中用 ⏳） */
   icon?: string;
+  /**
+   * note 段子类型标记（type==='note'）。'compaction-start' 表示压缩进行中的瞬态提示，
+   * 压缩完成事件到达时被原位替换为结果提示；瞬态段不入转录，历史回放不含此段。
+   */
+  kind?: string;
 }
 
 export interface ChatMessage {

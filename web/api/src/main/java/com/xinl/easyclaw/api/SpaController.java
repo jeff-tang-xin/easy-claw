@@ -12,7 +12,8 @@ public class SpaController {
     @GetMapping(value = {
             "/", "/workspaces", "/workspaces/*", "/skills", "/tools", "/mcp", "/settings",
             "/scenarios", "/blackboard", "/knowledge",
-            "/chat", "/chat/", "/chat/**"
+            "/chat", "/chat/", "/chat/**",
+            "/ops", "/ops/**"
     })
     public String spa() {
         return "forward:/index.html";

@@ -12,6 +12,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -40,6 +41,14 @@ class CloudBootstrapServiceTest {
     private final AtomicInteger bootstrapCalls = new AtomicInteger();
     private final AtomicReference<Integer> stubStatus = new AtomicReference<>(200);
     private final AtomicReference<String> lastAuth = new AtomicReference<>();
+    // 目录扩展端点（spec §4.1）：默认空数组 = 全部缺省放行，不影响既有用例
+    private final AtomicInteger flagsCalls = new AtomicInteger();
+    private final AtomicInteger toolsCalls = new AtomicInteger();
+    private final AtomicReference<Integer> flagsStatus = new AtomicReference<>(200);
+    private final AtomicReference<Integer> toolsStatus = new AtomicReference<>(200);
+    private final AtomicReference<String> flagsBody = new AtomicReference<>("[]");
+    private final AtomicReference<String> toolsBody = new AtomicReference<>("[]");
+    private final AtomicReference<String> lastFlagsAuth = new AtomicReference<>();
 
     @BeforeEach
     void startHub() throws IOException {
@@ -52,6 +61,25 @@ class CloudBootstrapServiceTest {
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "application/json");
             ex.sendResponseHeaders(status, bytes.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        hub.createContext("/api/spoke/feature-flags", ex -> {
+            flagsCalls.incrementAndGet();
+            lastFlagsAuth.set(ex.getRequestHeaders().getFirst("Authorization"));
+            byte[] bytes = flagsBody.get().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(flagsStatus.get(), bytes.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        hub.createContext("/api/spoke/tools", ex -> {
+            toolsCalls.incrementAndGet();
+            byte[] bytes = toolsBody.get().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(toolsStatus.get(), bytes.length);
             try (OutputStream os = ex.getResponseBody()) {
                 os.write(bytes);
             }
@@ -136,6 +164,73 @@ class CloudBootstrapServiceTest {
 
         assertFalse(service.isAvailable());
         assertNotNull(service.status().lastError());
+    }
+
+    // ---------- 目录扩展：feature-flags / tools（spec §4.1） ----------
+
+    @Test
+    void refreshParsesFlagsAndDisabledTools() {
+        flagsBody.set("""
+                [{"flagKey":"allow_attachments","label":"attachments","enabled":false},
+                 {"flagKey":"chat","label":"chat","enabled":true}]""");
+        toolsBody.set("""
+                [{"toolKey":"web_search","enabled":false},
+                 {"toolKey":"read_file","enabled":true}]""");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        // 生效态 flags 原样进快照；enabled=false 的 toolKey 进 disabledTools
+        assertFalse(service.snapshot().flags().get("allow_attachments"));
+        assertTrue(service.snapshot().flags().get("chat"));
+        assertEquals(Set.of("web_search"), service.snapshot().disabledTools());
+        // 状态视图：allow_attachments=false → attachmentsAllowed=false
+        assertFalse(service.status().attachmentsAllowed());
+        // 目录端点与 bootstrap 同一 appkey 鉴权
+        assertEquals("Bearer eck-test-key", lastFlagsAuth.get());
+    }
+
+    @Test
+    void missingFlagDefaultsToAllowed() {
+        flagsBody.set("[{\"flagKey\":\"chat\",\"enabled\":true}]");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.status().attachmentsAllowed());
+    }
+
+    @Test
+    void flagsEndpointFailureDefaultsOpenButToolsStillParsed() {
+        flagsStatus.set(500);
+        toolsBody.set("[{\"toolKey\":\"web_search\",\"enabled\":false}]");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        // flags 拉取失败 → 缺省放行；tools 拉取独立成功 → 禁用集仍生效（互不阻塞）
+        assertTrue(service.status().attachmentsAllowed());
+        assertEquals(Set.of("web_search"), service.snapshot().disabledTools());
+    }
+
+    @Test
+    void toolsEndpointFailureKeepsEmptyDisabled() {
+        toolsStatus.set(500);
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        assertTrue(service.snapshot().disabledTools().isEmpty());
+    }
+
+    @Test
+    void refreshLocalModeSkipsCatalogEndpoints() {
+        CloudProperties cloud = cloudProps();
+        cloud.setAppKey(null);
+        CloudBootstrapService service = new CloudBootstrapService(cloud);
+        service.refresh();
+
+        assertEquals(0, flagsCalls.get());
+        assertEquals(0, toolsCalls.get());
     }
 
     // ---------- providers 表条目注册（复刻 cloud profile 供给形态，与快照解耦） ----------

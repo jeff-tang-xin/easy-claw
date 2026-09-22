@@ -25,6 +25,7 @@ import org.springframework.transaction.annotation.Transactional;
  * 新建/修改/归档记审计。
  */
 @Service
+@Deprecated
 public class WorkspaceService {
 
     private static final Set<String> VALID_STATUS = Set.of("active", "archived");
@@ -113,7 +114,7 @@ public class WorkspaceService {
         requireWorkspaceEditable(w, requesterId);
         w.setStatus("archived");
         workspaces.save(w);
-        menuItems.deleteByWorkspaceId(w.getId());
+        // 菜单已改为组织级（不再挂 workspace），归档工作区不再级联删菜单。
         auditService.record(AuditModule.WORKSPACE, "archive_workspace", requesterId, w.getOrgId(), "workspace",
                 String.valueOf(w.getId()), null, AuditModule.SUCCESS);
     }
@@ -162,9 +163,9 @@ public class WorkspaceService {
     }
 
     private WorkspaceDto toDto(WorkspaceEntity w) {
-        long menuCount = menuItems.findByWorkspaceIdOrderBySortOrderAscIdAsc(w.getId()).size();
+        // 菜单已改为组织级，workspace 不再持有菜单，计数恒为 0。
         return new WorkspaceDto(w.getId(), w.getProjectId(), w.getOrgId(), w.getName(), w.getStatus(),
-                menuCount, ldt(w.getCreatedAt()), ldt(w.getUpdatedAt()));
+                0, ldt(w.getCreatedAt()), ldt(w.getUpdatedAt()));
     }
 
     private static LocalDateTime ldt(Instant instant) {

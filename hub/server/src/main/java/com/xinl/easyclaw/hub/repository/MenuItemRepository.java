@@ -7,12 +7,10 @@ import org.springframework.data.jpa.repository.JpaRepository;
 
 public interface MenuItemRepository extends JpaRepository<MenuItemEntity, Long> {
 
-    /** 按 sort_order、id 稳定排序，供菜单树组装。 */
-    List<MenuItemEntity> findByWorkspaceIdOrderBySortOrderAscIdAsc(Long workspaceId);
+    /** 按 sort_order、id 稳定排序，供平台目录列表与树组装。 */
+    List<MenuItemEntity> findAllByOrderBySortOrderAscIdAsc();
 
-    Optional<MenuItemEntity> findByWorkspaceIdAndMenuKey(Long workspaceId, String menuKey);
+    Optional<MenuItemEntity> findByMenuKey(String menuKey);
 
-    boolean existsByWorkspaceIdAndMenuKey(Long workspaceId, String menuKey);
-
-    void deleteByWorkspaceId(Long workspaceId);
+    boolean existsByMenuKey(String menuKey);
 }

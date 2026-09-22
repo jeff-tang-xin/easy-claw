@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-agent-ops</artifactId>
+    <name>Easy Claw - Agent: Ops</name>
+    <description>
+        运维智能体 —— 通过 remote_shell 在远程 Linux 服务器上执行操作、排查问题。
+        能力边界：仅 remote_shell（声明层）；主链路工具集由模式 minimalToolkit
+        与工作区 type=ops 双保险硬约束锁死，本声明与之呼应并在子 Agent 装载路径生效。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-base</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</project>

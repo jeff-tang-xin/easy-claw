@@ -1,0 +1,274 @@
+/* 运维页（OpsPage）布局与样式：终端占主区，右侧连接面板，底部智能幕布 */
+
+.ops-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg, #0f1115);
+}
+
+.ops-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border, #2a2d35);
+  background: var(--panel, #16181d);
+}
+
+.ops-title { font-weight: 700; }
+
+.ops-status {
+  font-size: 0.85em;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #2a2d35);
+}
+.ops-status.on { color: #4ade80; border-color: #4ade8055; }
+.ops-status.off { color: #94a3b8; }
+
+.ops-topbar-actions { margin-left: auto; display: flex; gap: 8px; }
+
+.ops-error {
+  padding: 6px 18px;
+  color: #f87171;
+  font-size: 0.85em;
+  background: rgba(248, 113, 113, 0.08);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.25);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ops-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ops-terminal-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ops-terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 10px;
+}
+/* xterm 需要显式高度才能铺满容器 */
+.ops-terminal .xterm { height: 100%; }
+
+/* ---- 终端 tab 栏（多连接并存，一条连接一个 tab） ---- */
+
+.ops-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0;
+  background: var(--panel, #16181d);
+  border-bottom: 1px solid var(--border, #2a2d35);
+  overflow-x: auto;
+}
+.ops-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #12161c;
+  color: #8b98a5;
+  border: 1px solid var(--border, #2a2d35);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ops-tab:hover { color: #cdd9e5; }
+.ops-tab.active {
+  background: #101418;
+  color: #e6edf3;
+  border-color: #3a4450;
+}
+.ops-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2ea043;
+  flex: none;
+}
+/* tab 上的幕布模式徽标：AI=智能体（青）/ SH=直写 shell（橙），点击切换 */
+.ops-tab-mode {
+  flex: none;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.ops-tab-mode.agent { background: #103441; color: #39c5cf; border: 1px solid #1d5f6b; }
+.ops-tab-mode.agent:hover { background: #164a58; }
+.ops-tab-mode.shell { background: #3d2e10; color: #e3a327; border: 1px solid #6b521d; }
+.ops-tab-mode.shell:hover { background: #4d3a14; }
+.ops-terminal.hidden { display: none; }
+.ops-terminal-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4d5761;
+}
+
+/* ---- 智能幕布 ---- */
+
+.ops-curtain {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border, #2a2d35);
+  padding: 8px 12px;
+  background: var(--panel, #16181d);
+}
+
+/* 确认条悬浮在终端区底部之上（fixed 不受任何父级布局/滚动影响，必可见） */
+.ops-confirm {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 88px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 1px solid #facc1555;
+  border-radius: 8px;
+  background: #1c1e14;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  font-size: 0.9em;
+}
+.ops-confirm-allow { background: #16a34a; border-color: #16a34a; color: #fff; }
+.ops-confirm-deny { background: transparent; color: #f87171; }
+
+.ops-curtain-row {
+  display: flex;
+  gap: 8px;
+}
+.ops-curtain-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a2d35);
+  background: var(--bg, #0f1115);
+  color: inherit;
+}
+.ops-curtain-row button {
+  padding: 8px 18px;
+  border-radius: 8px;
+}
+
+/* ---- 右侧连接面板 ---- */
+
+.ops-side {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border, #2a2d35);
+  background: var(--panel, #16181d);
+  overflow: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ops-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+}
+
+.ops-conn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ops-conn-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+}
+.ops-conn-list li.active { border-color: #4ade8055; }
+
+.ops-conn-info { display: flex; flex-direction: column; min-width: 0; }
+.ops-conn-info b { font-size: 0.92em; }
+.ops-conn-info span {
+  font-size: 0.78em;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-conn-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.ops-conn-actions button {
+  padding: 3px 8px;
+  font-size: 0.82em;
+  border-radius: 6px;
+}
+
+.ops-badge {
+  font-size: 0.78em;
+  color: #4ade80;
+  border: 1px solid #4ade8055;
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.ops-empty {
+  color: #94a3b8;
+  font-size: 0.85em;
+  border: none !important;
+  justify-content: center !important;
+}
+
+.ops-conn-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+}
+.ops-conn-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82em;
+  color: #94a3b8;
+}
+.ops-conn-form input,
+.ops-conn-form textarea,
+.ops-conn-form select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2d35);
+  background: var(--bg, #0f1115);
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.95em;
+}
+.ops-conn-form textarea { resize: vertical; font-family: monospace; }
+
+.ops-form-actions { display: flex; gap: 8px; }

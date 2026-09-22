@@ -70,6 +70,15 @@ public class BlackboardService {
         return rows.stream().map(e -> toDto(e, names)).toList();
     }
 
+    /** 单条详情（active/archived 均可读，权限按所属项目可见性）。 */
+    public BlackboardEntryDto get(Long requesterId, Long entryId) {
+        BlackboardEntryEntity e = entries.findById(entryId)
+                .orElseThrow(() -> ApiException.notFound("黑板报条目不存在"));
+        ProjectEntity p = loadProject(e.getProjectId());
+        requireCanRead(p, requesterId);
+        return toDto(e, resolveUsernames(Set.of(e.getAuthorUserId())));
+    }
+
     // ---------- 写入 ----------
 
     @Transactional
@@ -93,7 +102,7 @@ public class BlackboardService {
         BlackboardEntryEntity e = entries.findById(entryId)
                 .orElseThrow(() -> ApiException.notFound("黑板报条目不存在"));
         ProjectEntity p = loadProject(e.getProjectId());
-        requireCanWrite(p, requesterId);
+        requireCanManage(e, p, requesterId);
         if (STATUS_ARCHIVED.equals(e.getStatus())) {
             // 幂等：已归档直接返回当前态。
             return toDto(e, resolveUsernames(Set.of(e.getAuthorUserId())));
@@ -101,6 +110,23 @@ public class BlackboardService {
         e.setStatus(STATUS_ARCHIVED);
         entries.save(e);
         auditService.record(AuditModule.BLACKBOARD, "archive_blackboard_entry", requesterId, p.getOrgId(),
+                "blackboard_entry", String.valueOf(entryId), "projectId=" + p.getId(), AuditModule.SUCCESS);
+        return toDto(e, resolveUsernames(Set.of(e.getAuthorUserId())));
+    }
+
+    /** 取消归档（archived→active，幂等：本就活跃直接返回当前态）。 */
+    @Transactional
+    public BlackboardEntryDto unarchive(Long requesterId, Long entryId) {
+        BlackboardEntryEntity e = entries.findById(entryId)
+                .orElseThrow(() -> ApiException.notFound("黑板报条目不存在"));
+        ProjectEntity p = loadProject(e.getProjectId());
+        requireCanManage(e, p, requesterId);
+        if (STATUS_ACTIVE.equals(e.getStatus())) {
+            return toDto(e, resolveUsernames(Set.of(e.getAuthorUserId())));
+        }
+        e.setStatus(STATUS_ACTIVE);
+        entries.save(e);
+        auditService.record(AuditModule.BLACKBOARD, "unarchive_blackboard_entry", requesterId, p.getOrgId(),
                 "blackboard_entry", String.valueOf(entryId), "projectId=" + p.getId(), AuditModule.SUCCESS);
         return toDto(e, resolveUsernames(Set.of(e.getAuthorUserId())));
     }
@@ -121,6 +147,19 @@ public class BlackboardService {
         String role = orgService.roleOf(p.getOrgId(), requesterId);
         if ("guest".equals(role)) {
             throw ApiException.forbidden("访客只读，不能写入黑板报");
+        }
+    }
+
+    /**
+     * 归档/取消归档的管理权限（对齐知识库删除口径）：组织 owner/admin 或条目作者本人。
+     * 收紧原先「任何非 guest 成员均可归档他人条目」的口子。
+     */
+    private void requireCanManage(BlackboardEntryEntity e, ProjectEntity p, Long requesterId) {
+        String role = orgService.roleOf(p.getOrgId(), requesterId);
+        boolean canManage = "owner".equals(role) || "admin".equals(role)
+                || e.getAuthorUserId().equals(requesterId);
+        if (!canManage) {
+            throw ApiException.forbidden("无权限归档或取消归档该条目");
         }
     }
 

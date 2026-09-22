@@ -6,7 +6,7 @@ export interface UserDto {
   email: string | null;
   displayName: string | null;
   status: string;
-  /** 平台管理员（可管理用户） */
+  /** 平台管理员（可管理用户与平台目录） */
   platformAdmin: boolean;
   /** 首次登录须先改密（改密前其余 API 不可用，mcp 门禁） */
   mustChangePassword: boolean;
@@ -164,7 +164,7 @@ export interface AppKeyCreatedResponse {
 }
 
 // ============ 知识库（项目内共享知识条目，乐观锁 + 软删 + 版本历史） ============
-/** 知识条目列表项：不含正文 */
+/** 知识条目列表项：不含正文（后端契约无 createdAt，仅 updatedAt） */
 export interface KnowledgeItemListItemDto {
   id: number;
   projectId: number;
@@ -176,8 +176,9 @@ export interface KnowledgeItemListItemDto {
   ownerUsername: string | null;
   updatedBy: number | null;
   updatedByUsername: string | null;
-  createdAt: string | null;
   updatedAt: string | null;
+  /** 向量化状态：pending|done|failed（向量本身不进契约，仅状态标量） */
+  embeddingStatus: string;
 }
 
 /** 知识条目详情：含当前版正文 */
@@ -195,6 +196,8 @@ export interface KnowledgeItemDto {
   updatedByUsername: string | null;
   createdAt: string | null;
   updatedAt: string | null;
+  /** 向量化状态：pending|done|failed（向量本身不进契约，仅状态标量） */
+  embeddingStatus: string;
 }
 
 /** 历史版本项（knowledge_item_events 一行快照，不可变） */
@@ -279,26 +282,12 @@ export interface GatewayUsageDto {
   byModel: GatewayModelUsage[];
 }
 
-// ============ Spoke 工作区（project 面向 spoke 的扩展面，1:1 绑定） ============
-/** 工作区视图：menuCount 为该工作区已配置的菜单项总数（含子项），不含菜单明细 */
-export interface WorkspaceDto {
-  id: number;
-  projectId: number;
-  orgId: number;
-  name: string;
-  /** active | archived */
-  status: string;
-  menuCount: number;
-  createdAt: string | null;
-  updatedAt: string | null;
-}
-
-/** 菜单项视图（管理面，扁平结构）：绑定工作区、与组织无关 */
+// ============ 平台目录（菜单/功能开关/工具，platformAdmin 维护）与组织开关 ============
+/** 平台菜单目录项（管理面，扁平结构）：平台级内置目录，对所有组织通用 */
 export interface MenuItemDto {
   id: number;
-  workspaceId: number;
   parentId: number | null;
-  /** spoke 侧稳定标识（同工作区内唯一） */
+  /** spoke 侧稳定标识（全局唯一） */
   menuKey: string;
   label: string;
   icon: string;
@@ -308,9 +297,58 @@ export interface MenuItemDto {
   /** 逗号分隔角色；空=全部角色可见 */
   visibleRoles: string;
   sortOrder: number;
+  /** 平台总开关 */
   enabled: boolean;
-  createdAt: string | null;
-  updatedAt: string | null;
+}
+
+/** 平台功能开关目录项：全部平台内置，组织只能决定是否启用 */
+export interface FeatureFlagDto {
+  id: number;
+  /** 全局唯一标识；创建后不可改 */
+  flagKey: string;
+  label: string;
+  description: string;
+  /** 平台总开关 */
+  enabled: boolean;
+  sortOrder: number;
+}
+
+/** 平台工具目录项（只读，不可增删；仅平台总开关可改） */
+export interface PlatformToolDto {
+  id: number;
+  /** 全局唯一，对齐 web/api ToolRegistry 的工具名 */
+  toolKey: string;
+  displayName: string;
+  description: string;
+  /** 分组：file/memory/session/agent/shell/web/code/knowledge/blackboard 等 */
+  toolGroup: string;
+  sortOrder: number;
+  /** 平台总开关 */
+  enabled: boolean;
+}
+
+/** 组织菜单可见性行：全量目录 × 该组织生效态（无行=默认可见） */
+export interface OrgMenuSettingDto {
+  menuId: number;
+  menuKey: string;
+  label: string;
+  visible: boolean;
+}
+
+/** 组织功能开关启用行：全量目录 × 该组织生效态（无行=默认启用） */
+export interface OrgFlagSettingDto {
+  flagId: number;
+  flagKey: string;
+  label: string;
+  enabled: boolean;
+}
+
+/** 组织工具启用行：全量目录 × 该组织生效态（无行=默认启用） */
+export interface OrgToolSettingDto {
+  toolId: number;
+  toolKey: string;
+  displayName: string;
+  enabled: boolean;
 }
 
 /** 单个组织角色及其权限码（后端 roles 顺序固定：owner/admin/member/guest） */

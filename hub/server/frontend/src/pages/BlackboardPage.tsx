@@ -4,6 +4,7 @@ import {
   archiveBlackboardEntry,
   listBlackboardActive,
   listBlackboardArchives,
+  unarchiveBlackboardEntry,
 } from '../api';
 import type {BlackboardEntryDto, ProjectDto} from '../types';
 
@@ -15,9 +16,10 @@ interface Props {
 
 /**
  * 项目共享黑板（A4）：追加型记录本，团队共享，按项目归类。
- * 活跃条目 + 追加 + 归档（状态标签，幂等）；归档列表单独查看。
+ * 活跃条目 + 追加 + 归档（状态标签，幂等）；归档列表单独查看，可取消归档。
+ * 归档 / 取消归档权限：作者本人或组织 owner/admin（服务端强制校验，按钮按同口径显隐）。
  */
-export default function BlackboardPage({project, role}: Props) {
+export default function BlackboardPage({project, role, meUserId}: Props) {
   const [active, setActive] = useState<BlackboardEntryDto[] | null>(null);
   const [archives, setArchives] = useState<BlackboardEntryDto[] | null>(null);
   const [showArchives, setShowArchives] = useState(false);
@@ -72,6 +74,20 @@ export default function BlackboardPage({project, role}: Props) {
     }
   };
 
+  const unarchive = async (entry: BlackboardEntryDto) => {
+    setError('');
+    try {
+      await unarchiveBlackboardEntry(entry.id);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '取消归档失败');
+    }
+  };
+
+  /** 归档 / 取消归档权限：作者本人或组织 owner/admin（与服务端口径一致）。 */
+  const canArchive = (entry: BlackboardEntryDto) =>
+    role === 'owner' || role === 'admin' || entry.authorUserId === meUserId;
+
   const list = showArchives ? archives : active;
 
   return (
@@ -122,13 +138,22 @@ export default function BlackboardPage({project, role}: Props) {
                   <span>{entry.authorUsername ?? `#${entry.authorUserId}`}</span>
                   <span className="doc-meta-dot">·</span>
                   <span>{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}</span>
-                  {!showArchives && canWrite && (
+                  {!showArchives && canArchive(entry) && (
                     <button
                       type="button"
                       className="btn btn-ghost btn-sm"
                       onClick={() => void archive(entry)}
                     >
                       归档
+                    </button>
+                  )}
+                  {showArchives && canArchive(entry) && (
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      onClick={() => void unarchive(entry)}
+                    >
+                      取消归档
                     </button>
                   )}
                 </div>

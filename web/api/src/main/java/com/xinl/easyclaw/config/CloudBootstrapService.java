@@ -14,8 +14,10 @@ import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 /**
@@ -43,6 +45,8 @@ public class CloudBootstrapService {
     private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(2);
     /** 读超时：bootstrap 是轻量 JSON，5s 足够 */
     private static final Duration READ_TIMEOUT = Duration.ofSeconds(5);
+    /** 附件/图片开关的 flag key（hub feature_flags 种子同名）；快照缺该 flag 时按放行处理 */
+    public static final String FLAG_ALLOW_ATTACHMENTS = "allow_attachments";
 
     private final CloudProperties cloud;
     private final HttpClient httpClient;
@@ -99,10 +103,15 @@ public class CloudBootstrapService {
                 log.warn("cloud bootstrap 失败：{}", lastError);
                 return;
             }
-            snapshot = parse(response.body());
+            // 目录扩展（spec §4.1）：flags 与 tools 各自独立 try/catch，失败不阻塞 bootstrap——
+            // 对应维度按缺省放行（flags 空表 → attachmentsAllowed=true；disabledTools 空集）
+            Map<String, Boolean> flags = fetchFlags(hubUrl, appKey.trim());
+            Set<String> disabledTools = fetchDisabledTools(hubUrl, appKey.trim());
+            snapshot = parse(response.body(), flags, disabledTools);
             lastError = null;
-            log.info("cloud bootstrap 成功：org={}，可用模型 {} 个，权限 {} 个",
-                    snapshot.orgName(), snapshot.models().size(), snapshot.permissions().size());
+            log.info("cloud bootstrap 成功：org={}，可用模型 {} 个，权限 {} 个，flags {} 个，禁用工具 {} 个",
+                    snapshot.orgName(), snapshot.models().size(), snapshot.permissions().size(),
+                    snapshot.flags().size(), snapshot.disabledTools().size());
         } catch (Exception e) {
             lastError = "hub 不可达：" + e.getClass().getSimpleName() + " " + e.getMessage();
             log.warn("cloud bootstrap 失败：{}", lastError);
@@ -112,6 +121,11 @@ public class CloudBootstrapService {
     /** 当前是否可用（启用且已有成功快照） */
     public boolean isAvailable() {
         return snapshot != null;
+    }
+
+    /** 最近一次成功快照；null 表示尚未成功过（本地模式或从未拉取成功）。门面 {@link CloudFeatureGate} 读用 */
+    public CloudSnapshot snapshot() {
+        return snapshot;
     }
 
     /** 可用模型清单（扁平去重，按 provider 顺序）；不可用时返回空表 */
@@ -135,11 +149,14 @@ public class CloudBootstrapService {
                 s == null ? null : s.orgSlug(),
                 s == null ? List.of() : s.models(),
                 s == null ? List.of() : s.permissions(),
+                // 附件开关（spec §4.5）：本地模式/无快照恒放行；快照缺该 flag 亦放行
+                s == null || s.flags().getOrDefault(FLAG_ALLOW_ATTACHMENTS, true),
                 lastError,
                 lastAttemptAt);
     }
 
-    private static CloudSnapshot parse(String body) throws Exception {
+    private static CloudSnapshot parse(String body, Map<String, Boolean> flags, Set<String> disabledTools)
+            throws Exception {
         JsonNode root = MAPPER.readTree(body);
         String orgName = root.path("org").path("name").asText("");
         String orgSlug = root.path("org").path("slug").asText("");
@@ -157,7 +174,71 @@ public class CloudBootstrapService {
                 permissions.add(perm.asText());
             }
         }
-        return new CloudSnapshot(orgName, orgSlug, List.copyOf(models), List.copyOf(permissions), Instant.now());
+        return new CloudSnapshot(orgName, orgSlug, List.copyOf(models), List.copyOf(permissions),
+                flags, disabledTools, Instant.now());
+    }
+
+    /** 拉取生效态 feature flags（flagKey → enabled）；任何失败返回空表（缺省放行语义） */
+    private Map<String, Boolean> fetchFlags(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/feature-flags");
+            if (body == null) {
+                return Map.of();
+            }
+            Map<String, Boolean> flags = new LinkedHashMap<>();
+            for (JsonNode n : MAPPER.readTree(body)) {
+                String key = n.path("flagKey").asText("");
+                if (!key.isBlank()) {
+                    flags.put(key, n.path("enabled").asBoolean(true));
+                }
+            }
+            return Map.copyOf(flags);
+        } catch (Exception e) {
+            log.warn("cloud feature-flags 拉取失败（按缺省放行）：{}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /** 拉取生效态为否的工具 key 集合；任何失败返回空集（不额外禁用工具） */
+    private Set<String> fetchDisabledTools(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/tools");
+            if (body == null) {
+                return Set.of();
+            }
+            Set<String> disabled = new LinkedHashSet<>();
+            for (JsonNode n : MAPPER.readTree(body)) {
+                String key = n.path("toolKey").asText("");
+                if (!key.isBlank() && !n.path("enabled").asBoolean(true)) {
+                    disabled.add(key);
+                }
+            }
+            return Set.copyOf(disabled);
+        } catch (Exception e) {
+            log.warn("cloud tools 拉取失败（不额外禁用工具）：{}", e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /** 单个 spoke 目录端点 GET；非 200 或网络失败返回 null（由调用方按缺省语义处理） */
+    private String fetchJson(String hubUrl, String appKey, String path) {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(hubUrl + path))
+                    .header("Authorization", "Bearer " + appKey)
+                    .timeout(READ_TIMEOUT)
+                    .GET()
+                    .build();
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() != 200) {
+                log.warn("cloud {} 拉取失败：HTTP {}", path, response.statusCode());
+                return null;
+            }
+            return response.body();
+        } catch (Exception e) {
+            log.warn("cloud {} 拉取失败：{} {}", path, e.getClass().getSimpleName(), e.getMessage());
+            return null;
+        }
     }
 
     private static String trimTailSlash(String url) {
@@ -180,14 +261,16 @@ public class CloudBootstrapService {
         return t.length() <= 12 ? t : t.substring(0, 12);
     }
 
-    /** bootstrap 快照（不可变；整体替换发布） */
+    /** bootstrap 快照（不可变；整体替换发布）。flags=生效态功能开关；disabledTools=生效态为否的工具 key */
     public record CloudSnapshot(String orgName, String orgSlug, List<String> models,
-                                List<String> permissions, Instant fetchedAt) {
+                                List<String> permissions, Map<String, Boolean> flags,
+                                Set<String> disabledTools, Instant fetchedAt) {
     }
 
-    /** 设置页状态视图 */
+    /** 设置页状态视图（attachmentsAllowed 供前端隐藏附件入口，spec §4.5） */
     public record CloudStatus(boolean configured, boolean available, String appKeyPrefix,
                               String orgName, String orgSlug, List<String> models,
-                              List<String> permissions, String lastError, Instant lastAttemptAt) {
+                              List<String> permissions, boolean attachmentsAllowed,
+                              String lastError, Instant lastAttemptAt) {
     }
 }

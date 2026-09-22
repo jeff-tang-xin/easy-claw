@@ -18,6 +18,7 @@ import lombok.Setter;
 @Setter
 @Entity
 @Table(name = "workspaces", uniqueConstraints = @UniqueConstraint(name = "uk_workspace_project", columnNames = "project_id"))
+@Deprecated
 public class WorkspaceEntity extends BaseEntity {
 
     @Column(name = "project_id", nullable = false, unique = true)

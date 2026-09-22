@@ -5,7 +5,6 @@ import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.SystemHomePaths;
-import com.xinl.easyclaw.middleware.CompactionNoticeMiddleware;
 import com.xinl.easyclaw.middleware.FileChangeMiddleware;
 import com.xinl.easyclaw.middleware.InterventionMiddleware;
 import com.xinl.easyclaw.middleware.ToolFailGuard;
@@ -160,9 +159,9 @@ public class WorkspaceAgentBuilder {
      * @param sysPromptAugment 额外注入的提示词片段（Skill / 模式），可为 null
      */
     public HarnessAgent build(String workspaceId, String name, Path workspacePath, Path easyClawDir,
-                              String sysPromptAugment) {
+                              String sysPromptAugment, String workspaceType) {
         return build(workspaceId, SubagentLoader.MAIN_AGENT_ID, name, workspacePath, easyClawDir,
-                sysPromptAugment);
+                sysPromptAugment, workspaceType);
     }
 
     /**
@@ -184,6 +183,20 @@ public class WorkspaceAgentBuilder {
      */
     public HarnessAgent build(String workspaceId, String agentId, String name, Path workspacePath,
                               Path easyClawDir, String sysPromptAugment) {
+        return build(workspaceId, agentId, name, workspacePath, easyClawDir, sysPromptAugment, null);
+    }
+
+    /**
+     * 完整装配入口。
+     *
+     * @param workspaceType 工作区形态（{@code WorkspaceEntity.type}，创建后不可变）；
+     *                      可为 null（历史调用方未传时按场景 mode 判定）。
+     *                      <b>安全边界</b>：type=ops 的工作区无论场景绑定如何，
+     *                      toolkit 一律收缩为最小集——运维工作区绝不装配本地文件/代码工具，
+     *                      不依赖「场景绑定 + SPI 发现」这条可能静默失效的链路。
+     */
+    public HarnessAgent build(String workspaceId, String agentId, String name, Path workspacePath,
+                              Path easyClawDir, String sysPromptAugment, String workspaceType) {
         // 方案 C 兼容：场景绑定了已下线（SPI 未注册）的智能体标识（如历史的 creative-writer）
         // 时，统一回退主控 main 并告警。否则会装配出模型走全局默认、人格错配、
         // 且凭空多出 state/agents/<id> 隔离目录的"野"智能体。
@@ -225,7 +238,32 @@ public class WorkspaceAgentBuilder {
         }
 
         // 场景能力绑定：一次解析，三处使用（toolkit 硬隔离 / 子 Agent skill 隔离 / 提示词推荐）
-        ScenarioBinding binding = scenarioResolver.activeBinding(workspaceId);
+        com.xinl.easyclaw.scenario.entity.ScenarioEntity activeScenario =
+                scenarioResolver.activeScenario(workspaceId);
+        ScenarioBinding binding = ScenarioBinding.from(activeScenario);
+        // 运维场景：能力边界由模式自声明（AgentOrchestrator.minimalToolkit，SPI 发现）——
+        // toolkit 收缩为仅 remote_shell（见 createOpsToolkit）。
+        // mode 依赖是 runtime scope，web/api 不静态耦合 mode 实现，经注册表查询。
+        // <b>双保险</b>：工作区 type=ops（创建后不可变的硬约束）直接判定为运维形态，
+        // 不依赖场景绑定与 SPI 发现——SPI 静默降级（如重启后 classpath 缺 mode 模块）时，
+        // 场景 mode 判定会失效，若只依赖它，运维工作区会被装配出完整 toolkit（含本地文件工具），
+        // 造成运维智能体触碰本地文件系统的事故。type 与场景判定任一命中即收缩 toolkit：
+        // 宁可少给工具，不可多给。
+        boolean scenarioOps = activeScenario != null
+                && com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(activeScenario.getMode())
+                        .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::minimalToolkit)
+                        .orElse(false);
+        boolean typeOps = "ops".equals(workspaceType);
+        boolean opsMode = typeOps || scenarioOps;
+        if (typeOps && !scenarioOps) {
+            log.warn("工作区 [{}] type=ops 但场景 mode 判定未命中最小 toolkit"
+                            + "（scenario={}, SPI 发现={}），已按工作区类型强制收缩 toolkit",
+                    workspaceId,
+                    activeScenario == null ? "无绑定" : activeScenario.getMode(),
+                    activeScenario == null ? "-"
+                            : com.xinl.easyclaw.base.orchestration.OrchestrationModes
+                                    .find(activeScenario.getMode()).isPresent());
+        }
         // 把绑定的 MCP 服务名展开成工具名，供子 Agent 工具白名单使用。
         // 必须在 loadMerged 之前完成：白名单一刀切，只有档位工具 ∪ MCP 工具并起来才完整。
         if (binding.hasToolBinding()) {
@@ -235,10 +273,24 @@ public class WorkspaceAgentBuilder {
             log.info("场景能力绑定已生效: workspace={}, {}", workspaceId, binding);
         }
 
-        // 多 Agent 编排：子 Agent 名单由 SPI 提供（.md 扫描已下线，SPI 是唯一来源）
-        List<SubagentDeclaration> subagents = subagentLoader.loadMerged(binding);
+        // 多 Agent 编排：子 Agent 名单由 SPI 提供（.md 扫描已下线，SPI 是唯一来源）。
+        // 模式自声明 subagentDispatchEnabled=false 时名册整体为空（如 ops：远程操作
+        // 是单执行体串行动作）——不装配任何 SubagentDeclaration，系统提示词不含
+        // 派遣说明，模型无从发起派遣。
+        List<SubagentDeclaration> subagents = binding.isSubagentDispatchEnabled()
+                ? subagentLoader.loadMerged(binding)
+                : List.of();
+        if (!binding.isSubagentDispatchEnabled()) {
+            log.info("模式已声明禁止派遣子智能体: workspace={}, mode={}, 名册置空",
+                    workspaceId,
+                    activeScenario == null ? "-" : activeScenario.getMode());
+        }
 
-        // 角色系统下线后（方案 C），主控人格走 SPI MainAgent、模型走 yml/SPI，不再解析 DB 角色。
+        // 角色系统下线后（方案 C），主控人格走 SPI、模型走 yml/SPI，不再解析 DB 角色。
+        // 主控实例的装配 agentId 恒为 main（state 目录/会话转录与存量兼容），
+        // 但「哪个智能体被选中」的实质语义——人格与模型——按绑定解析：
+        // 场景 roleName 优先，其次模式主控声明（ops → ops），最后 main。
+        String effectiveAgentId = resolveEffectiveAgentId(activeScenario);
 
         // 记忆账簿用户级设置（memory_settings 表，缺省按实体默认值落库一行）。
         // 读出的配置决定本 Agent 的压缩窗、记忆提取触发器与子 Agent 记忆 hooks 开关。
@@ -247,18 +299,20 @@ public class WorkspaceAgentBuilder {
 
         String sysPrompt = systemPromptComposer.compose(workspaceId, subagents, sysPromptAugment, binding);
 
-        Model agentModel = resolveAgentModel(agentId);
+        Model agentModel = resolveAgentModel(effectiveAgentId);
         HarnessAgent.Builder builder = HarnessAgent.builder()
                 .name(harnessName(workspaceId, agentId))
                 .description(name)
                 .sysPrompt(sysPrompt)
                 .model(agentModel)
-                .toolkit(agentFactory.createWorkspaceToolkit(
-                        binding.hasMcpBinding() ? binding.mcpServices() : null))
+                .toolkit(opsMode
+                        ? agentFactory.createOpsToolkit()
+                        : agentFactory.createWorkspaceToolkit(
+                                binding.hasMcpBinding() ? binding.mcpServices() : null))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
                 .workspace(agentRoot)
                 .filesystem(fsSpec)
-                .permissionContext(buildPermissionContext(workspaceId))
+                .permissionContext(buildPermissionContext(workspaceId, !opsMode))
                 .stateStore(new JsonFileAgentStateStore(stateDir(agentRoot, agentId)))
                 .projectGlobalSkillsDir(globalSkillsDir)
                 // 禁用 harness 自带的会话文件持久化（.easyClaw/agent/<userId>/agents/...jsonl），
@@ -305,11 +359,10 @@ public class WorkspaceAgentBuilder {
                 // vendored InboxMiddleware；drain 是消耗性的，本类取走后 vendored 版恒
                 // drain 空、no-op。以 USER 消息注入当前推理步，修复 vendored 版「当前步
                 // 不可见 + ASSISTANT 角色归因错误」两个缺陷。
-                .middleware(new InterventionMiddleware(messageBus))
-                // 压缩感知：vendored CompactionMiddleware 压缩时只写 DEBUG 日志，本类在摘要
-                // 消息进入推理输入时向 UI 推送可见提示（CustomEvent → context 事件 → 前端
-                // note 段 + 转录 SYSTEM 落盘）。只读推理输入，不改写，放链尾。
-                .middleware(new CompactionNoticeMiddleware());
+                .middleware(new InterventionMiddleware(messageBus));
+                // 压缩提示已由 vendored CompactionMiddleware 原生生命周期事件取代
+                // （phase=start/end 经 AgentEventEmitter 实时推送，CustomEventTranslator 翻译），
+                // 旧的 CompactionNoticeMiddleware（下一推理步才延迟到达）已删除。
 
         // ===== 记忆账簿策略（用户级配置生效点）=====
         // 子 Agent 默认关闭记忆 hooks（每回合提取 + 周期合并）：子的上下文防爆由
@@ -432,6 +485,40 @@ public class WorkspaceAgentBuilder {
     // ==================== 模型与权限 ====================
 
     /**
+     * 解析「哪个智能体被选中」的实质标识（人格与模型跟随它），优先级：
+     * 场景 roleName → 模式主控声明（{@code mainAgentId()}）→ main。
+     * <p>
+     * <b>注意</b>：返回值只用于人格/模型解析，<b>不</b>用于装配 agentId——
+     * 主控实例的装配 agentId 恒为 main（state 目录、会话转录与存量兼容）。
+     * roleName 未在 SPI 注册时告警并跳过（绑定失效，回退模式主控/main），
+     * 与 {@code SystemPromptComposer#resolveMainPersona} 的解析链保持一致。
+     */
+    private String resolveEffectiveAgentId(
+            com.xinl.easyclaw.base.profile.ScenarioProfile activeScenario) {
+        if (activeScenario != null) {
+            String roleName = activeScenario.getRoleName();
+            if (roleName != null && !roleName.isBlank()
+                    && !SubagentLoader.MAIN_AGENT_ID.equals(roleName)) {
+                if (agentRegistry.find(roleName).isPresent()) {
+                    return roleName;
+                }
+                log.warn("场景绑定的智能体 [{}] 未在 SPI 注册，模型回退模式主控/main"
+                                + "（检查 agent 模块是否在 classpath）",
+                        roleName);
+            }
+            var modeMain = com.xinl.easyclaw.base.orchestration.OrchestrationModes
+                    .find(activeScenario.getMode())
+                    .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::mainAgentId)
+                    .filter(id -> !SubagentLoader.MAIN_AGENT_ID.equals(id))
+                    .filter(id -> agentRegistry.find(id).isPresent());
+            if (modeMain.isPresent()) {
+                return modeMain.get();
+            }
+        }
+        return SubagentLoader.MAIN_AGENT_ID;
+    }
+
+    /**
      * 按 agentId 解析模型：SPI 优先，application.yml 的 {@code agents.&lt;id&gt;} 配置回退，
      * 全局默认兜底。
      * <p>
@@ -537,7 +624,7 @@ public class WorkspaceAgentBuilder {
      * 权限上下文：读工具直接放行；写/执行工具每次征求用户确认；
      * 并注入用户"永久允许"的规则（不再询问）。
      */
-    private PermissionContextState buildPermissionContext(String workspaceId) {
+    private PermissionContextState buildPermissionContext(String workspaceId, boolean whitelistEnabled) {
         PermissionContextState.Builder pb = PermissionContextState.builder()
                 .mode(PermissionMode.DEFAULT);
         // 只读工具：直接放行，不打断工作流。清单来自 ToolPermissionPolicy（唯一权威来源，
@@ -545,8 +632,12 @@ public class WorkspaceAgentBuilder {
         for (String tool : ToolPermissionPolicy.silentlyAllowed()) {
             pb.addAllowRule(tool, new PermissionRule(tool, null, PermissionBehavior.ALLOW, "system"));
         }
-        // 用户"永久允许"的工具：直接放行（按 workspace 隔离的持久化规则）
-        Set<String> alwaysAllowed = permissionRuleService.alwaysAllowedTools(workspaceId);
+        // 用户"永久允许"的工具：直接放行（按 workspace 隔离的持久化规则）。
+        // 场景未启用白名单机制（ops）时整体跳过：不注入 user ALLOW 规则、
+        // ASK 规则也不因授权而跳过 → 每次调用都弹确认
+        Set<String> alwaysAllowed = whitelistEnabled
+                ? permissionRuleService.alwaysAllowedTools(workspaceId)
+                : Set.of();
         // 注意：PermissionEngine.checkPermission 的判定顺序是 deny → ask → allow，
         // ASK 规则优先于 ALLOW 命中 —— 已授权工具必须【不加】system ASK 规则，
         // 否则 ALLOW 永远轮不到判断，出现"已授权仍反复弹窗"

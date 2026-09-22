@@ -32,5 +32,6 @@
         <module>mode-single</module>
         <module>mode-team</module>
         <module>mode-schedule</module>
+        <module>mode-ops</module>
     </modules>
 </project>

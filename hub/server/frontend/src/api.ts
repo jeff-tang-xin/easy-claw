@@ -7,6 +7,7 @@ import type {
   AuditLogPage,
   BlackboardEntryDto,
   CreatedUserDto,
+  FeatureFlagDto,
   GatewayLogDetailDto,
   GatewayLogPage,
   GatewayUsageDto,
@@ -18,13 +19,16 @@ import type {
   MemberDto,
   MenuItemDto,
   OrgDto,
+  OrgFlagSettingDto,
+  OrgMenuSettingDto,
   OrgOptionDto,
+  OrgToolSettingDto,
+  PlatformToolDto,
   ProjectDto,
   ProviderDto,
   RoleMatrixResponse,
   TokenResponse,
   UserDto,
-  WorkspaceDto,
 } from './types';
 
 /** 统一 API 错误：携带 HTTP 状态码、业务错误码 code（后端 ApiError.code）与可选 details（如 409 时最新文档快照）。 */
@@ -316,28 +320,9 @@ export const fetchGatewayUsage = (orgId: number, days?: number) => {
   return request<GatewayUsageDto>('GET', `/api/orgs/${orgId}/gateway-logs/usage${qs ? `?${qs}` : ''}`);
 };
 
-// ============ Spoke 工作区（project 面向 spoke 的扩展面，1:1 绑定） ============
-/** 组织下工作区列表：按绑定 project 的可见性过滤 */
-export const listWorkspaces = (orgId: number) =>
-  request<WorkspaceDto[]>('GET', `/api/workspaces?orgId=${orgId}`);
-
-/** 单工作区查询（读鉴权按绑定 project 可见性） */
-export const getWorkspace = (id: number) => request<WorkspaceDto>('GET', `/api/workspaces/${id}`);
-
-/** 创建工作区：projectId 指定要绑定的项目（1:1，重复绑定→409）；name 留空由服务端取项目名 */
-export const createWorkspace = (projectId: number, name: string) =>
-  request<WorkspaceDto>('POST', '/api/workspaces', {projectId, name: name.trim() || null});
-
-/** 改工作区：name 改展示名，status 归档/恢复（active|archived） */
-export const updateWorkspace = (id: number, body: {name?: string; status?: string}) =>
-  request<WorkspaceDto>('PATCH', `/api/workspaces/${id}`, body);
-
-/** 归档工作区（软删）并级联删除其菜单配置 */
-export const archiveWorkspace = (id: number) => request<void>('DELETE', `/api/workspaces/${id}`);
-
-// ============ Spoke 公共菜单（绑定工作区，与组织无关） ============
-export const listMenus = (workspaceId: number) =>
-  request<MenuItemDto[]>('GET', `/api/workspaces/${workspaceId}/menus`);
+// ============ 平台目录（platformAdmin 专属：菜单/功能开关/工具） ============
+/** 平台菜单目录（平铺含 parentId） */
+export const listPlatformMenus = () => request<MenuItemDto[]>('GET', '/api/platform/menus');
 
 export interface CreateMenuBody {
   menuKey?: string;
@@ -351,12 +336,11 @@ export interface CreateMenuBody {
   enabled?: boolean;
 }
 
-export const createMenu = (workspaceId: number, body: CreateMenuBody) =>
-  request<MenuItemDto>('POST', `/api/workspaces/${workspaceId}/menus`, body);
+export const createPlatformMenu = (body: CreateMenuBody) =>
+  request<MenuItemDto>('POST', '/api/platform/menus', body);
 
 export interface UpdateMenuBody {
-  menuKey?: string;
-  label?: string;
+  label: string;
   icon?: string;
   path?: string;
   requiredPerm?: string;
@@ -365,19 +349,83 @@ export interface UpdateMenuBody {
   enabled?: boolean;
 }
 
-export const updateMenu = (menuId: number, body: UpdateMenuBody) =>
-  request<MenuItemDto>('PATCH', `/api/menus/${menuId}`, body);
-
-/** 启用/停用菜单项（下发时仅含 enabled 项） */
-export const toggleMenu = (menuId: number, enabled: boolean) =>
-  request<MenuItemDto>('POST', `/api/menus/${menuId}/toggle?enabled=${enabled}`);
+/** 部分更新；menuKey 创建后不可改（服务端裁决），编辑时不提交 */
+export const updatePlatformMenu = (id: number, body: UpdateMenuBody) =>
+  request<MenuItemDto>('PUT', `/api/platform/menus/${id}`, body);
 
 /** 删除菜单项，级联删除其全部子孙 */
-export const deleteMenu = (menuId: number) => request<void>('DELETE', `/api/menus/${menuId}`);
+export const deletePlatformMenu = (id: number) =>
+  request<void>('DELETE', `/api/platform/menus/${id}`);
 
-// ============ 项目知识库（A3-S1：CRUD + 乐观锁 + 软删 + 版本历史） ============
-export const listKnowledgeItems = (projectId: number) =>
-  request<KnowledgeItemListItemDto[]>('GET', `/api/knowledge?projectId=${projectId}`);
+/** 平台功能开关目录 */
+export const listPlatformFlags = () => request<FeatureFlagDto[]>('GET', '/api/platform/flags');
+
+export interface CreateFeatureFlagBody {
+  /** 可选，留空由服务端从名称派生 */
+  flagKey?: string;
+  label: string;
+  description?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+}
+
+export const createPlatformFlag = (body: CreateFeatureFlagBody) =>
+  request<FeatureFlagDto>('POST', '/api/platform/flags', body);
+
+export interface UpdateFeatureFlagBody {
+  label: string;
+  description?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+}
+
+/** 部分更新；flagKey 创建后不可改（服务端裁决），编辑时不提交 */
+export const updatePlatformFlag = (id: number, body: UpdateFeatureFlagBody) =>
+  request<FeatureFlagDto>('PUT', `/api/platform/flags/${id}`, body);
+
+export const deletePlatformFlag = (id: number) =>
+  request<void>('DELETE', `/api/platform/flags/${id}`);
+
+/** 平台工具目录（只读清单，不可增删） */
+export const listPlatformTools = () => request<PlatformToolDto[]>('GET', '/api/platform/tools');
+
+/** 工具平台总开关（唯一可改项） */
+export const setPlatformToolEnabled = (id: number, enabled: boolean) =>
+  request<PlatformToolDto>('PUT', `/api/platform/tools/${id}/enabled`, {enabled});
+
+// ============ 组织开关（只读目录 + 显示/启用开关；owner/admin 写，服务端裁决） ============
+/** 组织菜单可见性：全量目录 × 该组织生效态 */
+export const listOrgMenuSettings = (orgId: number) =>
+  request<OrgMenuSettingDto[]>('GET', `/api/orgs/${orgId}/menu-settings`);
+
+/** 幂等 upsert；menuId 不存在 → 404 */
+export const setOrgMenuVisible = (orgId: number, menuId: number, visible: boolean) =>
+  request<void>('PUT', `/api/orgs/${orgId}/menu-settings/${menuId}`, {visible});
+
+/** 组织功能开关启用态：全量目录 × 该组织生效态 */
+export const listOrgFlagSettings = (orgId: number) =>
+  request<OrgFlagSettingDto[]>('GET', `/api/orgs/${orgId}/flag-settings`);
+
+/** 幂等 upsert；flagId 不存在 → 404 */
+export const setOrgFlagEnabled = (orgId: number, flagId: number, enabled: boolean) =>
+  request<void>('PUT', `/api/orgs/${orgId}/flag-settings/${flagId}`, {enabled});
+
+/** 组织工具启用态：全量目录 × 该组织生效态 */
+export const listOrgToolSettings = (orgId: number) =>
+  request<OrgToolSettingDto[]>('GET', `/api/orgs/${orgId}/tool-settings`);
+
+/** 幂等 upsert；toolId 不存在 → 404 */
+export const setOrgToolEnabled = (orgId: number, toolId: number, enabled: boolean) =>
+  request<void>('PUT', `/api/orgs/${orgId}/tool-settings/${toolId}`, {enabled});
+
+// ============ 项目知识库（A3-S1：CRUD + 乐观锁 + 软删 + 版本历史；A3-S2：关键词检索） ============
+/** 列表 / 关键词检索：q 非空时按空白拆多词，在 topic/summary/content 上大小写不敏感 AND 匹配 */
+export const listKnowledgeItems = (projectId: number, q?: string) => {
+  const params = new URLSearchParams();
+  params.set('projectId', String(projectId));
+  if (q && q.trim()) params.set('q', q.trim());
+  return request<KnowledgeItemListItemDto[]>('GET', `/api/knowledge?${params.toString()}`);
+};
 
 export const getKnowledgeItem = (id: number) =>
   request<KnowledgeItemDto>('GET', `/api/knowledge/${id}`);
@@ -423,6 +471,10 @@ export const listBlackboardArchives = (projectId: number) =>
 export const appendBlackboardEntry = (projectId: number, content: string) =>
   request<BlackboardEntryDto>('POST', '/api/blackboard', {projectId, content});
 
-/** 归档条目（幂等：已归档直接返回当前态） */
+/** 归档条目（幂等：已归档直接返回当前态）；仅作者本人或组织 owner/admin 可操作 */
 export const archiveBlackboardEntry = (id: number) =>
   request<BlackboardEntryDto>('POST', `/api/blackboard/${id}/archive`);
+
+/** 取消归档（恢复为活跃，幂等）；权限口径与归档一致：作者本人或组织 owner/admin */
+export const unarchiveBlackboardEntry = (id: number) =>
+  request<BlackboardEntryDto>('POST', `/api/blackboard/${id}/unarchive`);

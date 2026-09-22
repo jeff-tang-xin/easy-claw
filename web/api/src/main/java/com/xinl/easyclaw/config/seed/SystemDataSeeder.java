@@ -328,6 +328,16 @@ public class SystemDataSeeder {
                           {"subagent":"reviewer","instruction":"全面评审指定代码：正确性、可读性、缺陷、安全、性能，按严重程度输出问题清单","parallel":false},
                           {"subagent":"coder","instruction":"从可运行性角度复核：编译/依赖/调用链是否完整，指出无法落地的问题","parallel":true}
                         ]}""");
+        upsertScenario("ops", "运维助手", "🖥️",
+                "你通过 SSH 终端协助用户管理远程 Linux 服务器：执行命令、分析输出、排查问题。"
+                        + "你从不直接触碰服务器——每条命令都经用户确认后由 remote_shell 执行。",
+                "ops", """
+                        方法论：运维协助——你通过 remote_shell 在远程服务器上执行命令，输出实时回显在终端。
+                        1. 回复克制：给结论和下一步动作，不复述流程、不自我说明、不解释你将怎么做。
+                        2. 确认弹窗已展示命令本身，不必再解释用途；输出已回显，不要复述输出内容。
+                        3. 高危操作（删除、重启、改配置、杀进程）先用一句话提示风险并给可回滚方案；其余直接执行。
+                        4. 不确定服务器状态时先用只读命令确认（ps、df、free、systemctl status 等），再动手。
+                        5. 用户在终端直敲的命令不经过你；中文英文提问都正常处理。""", null);
     }
 
     private void upsertScenario(String name, String displayName, String icon, String description,

@@ -3,6 +3,7 @@ import {useNavigate, useParams} from 'react-router-dom';
 import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
 import Modal from '../components/Modal';
 import {useBranding} from '../branding';
+import {useCloudStatus} from '../cloudStatus';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
 import type {AttachmentPayload, ChatMessage, PendingConfirm, QueueItem, Segment, SubStep} from '../chatStore';
@@ -491,15 +492,44 @@ function reduceMessage(prev: ChatMessage[], evt: StreamEvent): ChatMessage[] {
       break;
     }
     case 'context': {
-      // 系统提示类事件（工具失败护栏/子Agent循环警告等 JSON）→ 渲染为 note 段
+      // 系统提示类事件（工具失败护栏/子Agent循环警告/压缩生命周期等 JSON）→ 渲染为 note 段
       try {
         const parsed = JSON.parse(evt.content);
         if (parsed && (parsed.type === 'loop_warning' || parsed.type === 'tool_fail_guard' || parsed.type === 'compaction')) {
+          if (parsed.type === 'compaction' && parsed.phase === 'start') {
+            // 压缩开始：瞬态提示段（kind 标记），压缩完成事件到达时原位替换为结果提示
+            const seg: Segment = {
+              type: 'note',
+              content: parsed.message || '上下文压缩中…',
+              icon: '⏳',
+              kind: 'compaction-start',
+            };
+            if (last && last.role === 'ai') {
+              next[lastIdx] = { ...last, segments: [...last.segments, seg] };
+            } else {
+              next.push({ role: 'ai', segments: [seg] });
+            }
+            break;
+          }
           const seg: Segment = {
             type: 'note',
             content: parsed.message || evt.content,
             icon: parsed.type === 'compaction' ? '📦' : undefined,
           };
+          if (parsed.type === 'compaction' && last && last.role === 'ai') {
+            // 压缩结束：原位替换最近的「压缩中」段；找不到（如中途刷新）则追加
+            let startIdx = -1;
+            for (let i = last.segments.length - 1; i >= 0; i--) {
+              const s = last.segments[i];
+              if (s.type === 'note' && s.kind === 'compaction-start') { startIdx = i; break; }
+            }
+            if (startIdx >= 0) {
+              const segments = [...last.segments];
+              segments[startIdx] = seg;
+              next[lastIdx] = { ...last, segments };
+              break;
+            }
+          }
           if (last && last.role === 'ai') {
             next[lastIdx] = { ...last, segments: [...last.segments, seg] };
           } else {
@@ -964,6 +994,9 @@ export default function ChatPage() {
   const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const branding = useBranding();
+  // 云端接入状态：attachmentsAllowed=false 时隐藏附件入口（spec §4.5；本地模式/拉取失败恒放行）
+  const cloudStatus = useCloudStatus();
+  const attachmentsAllowed = cloudStatus.attachmentsAllowed;
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   // 新会话弹窗（会话↔worktree 挂钩，2026-09-14）：分支隔离选项
   const [showNewSession, setShowNewSession] = useState(false);
@@ -1858,8 +1891,9 @@ export default function ChatPage() {
     e.target.value = '';
   };
 
-  // 附件：粘贴截图
+  // 附件：粘贴截图（组织禁用附件时静默忽略，与隐藏的 📎 入口保持一致）
   const onPaste = (e: React.ClipboardEvent) => {
+    if (!attachmentsAllowed) return;
     const items = e.clipboardData?.items;
     if (!items) return;
     for (const item of items) {
@@ -2308,10 +2342,12 @@ export default function ChatPage() {
               ))}
             </select>
           )}
-          <label className="btn small" style={{ alignSelf: 'flex-end', marginBottom: 6 }}>
-            📎 附件
-            <input type="file" multiple style={{ display: 'none' }} onChange={pickFiles} />
-          </label>
+          {attachmentsAllowed && (
+            <label className="btn small" style={{ alignSelf: 'flex-end', marginBottom: 6 }}>
+              📎 附件
+              <input type="file" multiple style={{ display: 'none' }} onChange={pickFiles} />
+            </label>
+          )}
           <textarea
             ref={textareaRef}
             value={input}

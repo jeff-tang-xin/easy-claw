@@ -80,17 +80,6 @@ class AppKeyIntegrationTest extends HubIntegrationTestSupport {
         return om.readTree(json).get("id").asLong();
     }
 
-    /** PUT 不在基座辅助内：本类私有实现（带不带 token 均可）。 */
-    private ResultActions putJson(String url, Object body, String accessToken) throws Exception {
-        var builder = MockMvcRequestBuilders.put(url);
-        if (accessToken != null) {
-            builder = builder.header("Authorization", "Bearer " + accessToken);
-        }
-        return mvc.perform(builder
-                .contentType(MediaType.APPLICATION_JSON)
-                .content(om.writeValueAsString(body)));
-    }
-
     private static String appkeysUrl(long orgId) {
         return "/api/orgs/" + orgId + "/appkeys";
     }

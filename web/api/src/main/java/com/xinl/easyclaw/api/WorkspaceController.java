@@ -276,7 +276,11 @@ public class WorkspaceController {
 
     @PostMapping("/{id}/permissions/{toolName}")
     public PermissionRuleEntity addPermission(@PathVariable String id, @PathVariable String toolName) {
-        agentService.allowPermanently(id, List.of(toolName));
+        if (!agentService.allowPermanently(id, List.of(toolName))) {
+            // 场景未启用白名单机制（ops）：明确 400，前端据此提示而不是静默无效
+            throw new ApiExceptions.BadRequestException(
+                    "当前工作区的场景未启用工具白名单机制（运维场景每次调用都会请求确认）");
+        }
         return permissionRuleService.findForWorkspace(id).stream()
                 .filter(r -> toolName.equals(r.getToolName()))
                 .findFirst()

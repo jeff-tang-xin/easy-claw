@@ -52,9 +52,13 @@ public class SystemPromptComposer {
                           String sysPromptAugment, ScenarioBinding binding) {
         String sysPrompt = agentFactory.defaultSystemPrompt();
 
-        // 主控人格：角色系统下线后（方案 C）由 SPI MainAgent 的内置 persona 提供，
-        // 不再读取 DB 角色，由 resolveMainPersona() 统一解析。
-        String personaPrompt = resolveMainPersona();
+        // 激活场景只查一次：人格解析与场景注入共用（避免重复查库）
+        com.xinl.easyclaw.base.profile.ScenarioProfile activeScenario =
+                scenarioResolver.activeScenario(workspaceId);
+
+        // 主控人格：角色系统下线后（方案 C）由 SPI 智能体的内置 persona 提供，
+        // 不再读取 DB 角色，由 resolveMainPersona(activeScenario) 统一解析。
+        String personaPrompt = resolveMainPersona(activeScenario);
         if (personaPrompt != null) {
             sysPrompt = sysPrompt + "\n\n" + personaPrompt;
             log.info("主控人格已注入 system prompt: workspace={}, {} chars",
@@ -79,7 +83,7 @@ public class SystemPromptComposer {
         // 场景（Scenario）：环境 + 能力边界 + 方法论，三段合成一块注入。
         // 激活关系持久化在 workspace_scenarios 表，重启后端后恢复工作区时依然生效
         String scenarioAugment = com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder
-                .build(scenarioResolver.activeScenario(workspaceId), subagents,
+                .build(activeScenario, subagents,
                         capabilityRecommendation(binding, subagents));
         if (scenarioAugment != null) {
             sysPrompt = sysPrompt + "\n\n" + scenarioAugment;
@@ -91,19 +95,69 @@ public class SystemPromptComposer {
     }
 
     /**
-     * 取主控（SPI {@code MainAgent}）内置人格片段。查不到时返回 null（退回纯基础提示词）。
+     * 解析主控人格，优先级：场景绑定 roleName → 模式主控声明 → main。
+     * <p>
+     * <b>为什么不能只看 main</b>：主控实例的装配 agentId 恒为 main（state 目录与
+     * 存量会话兼容），若人格也硬编码 main，场景绑定具体智能体（roleName）就只是
+     * 编排计划层的摆设——用户「给场景选智能体」永远不生效。人格是「智能体被选中」
+     * 的实质语义，必须跟随绑定。
+     * <p>
+     * 解析链任一环失效（roleName 未注册 / mode 未注册 / SPI 缺失）都告警并回退
+     * 下一环，最终兜底 main——与工具装配的「宁可少给，不可多给」取向一致：
+     * 人格回退只影响说话方式，不会放大能力。
+     *
+     * @param scenario 激活场景，可为 null（无绑定 → 回退 main 人格）
      */
-    private String resolveMainPersona() {
+    private String resolveMainPersona(com.xinl.easyclaw.base.profile.ScenarioProfile scenario) {
         try {
+            // 1. 场景绑定优先：用户给场景选了具体智能体
+            if (scenario != null) {
+                String roleName = scenario.getRoleName();
+                if (roleName != null && !roleName.isBlank()
+                        && !SubagentLoader.MAIN_AGENT_ID.equals(roleName)) {
+                    var bound = agentRegistry.find(roleName);
+                    if (bound.isPresent()) {
+                        String persona = personaOf(bound.get());
+                        if (persona != null) {
+                            return persona;
+                        }
+                    } else {
+                        log.warn("场景绑定的智能体 [{}] 未在 SPI 注册，人格回退模式主控/main"
+                                        + "（检查 agent 模块是否在 classpath）",
+                                roleName);
+                    }
+                }
+
+                // 2. 模式主控声明（如 ops → OpsAgent）；roleName 显式绑了 main 时跳过
+                var modeMain = com.xinl.easyclaw.base.orchestration.OrchestrationModes
+                        .find(scenario.getMode())
+                        .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::mainAgentId)
+                        .filter(id -> !SubagentLoader.MAIN_AGENT_ID.equals(id))
+                        .flatMap(agentRegistry::find);
+                if (modeMain.isPresent()) {
+                    String persona = personaOf(modeMain.get());
+                    if (persona != null) {
+                        return persona;
+                    }
+                }
+            }
+
+            // 3. 兜底：通用主控人格
             return agentRegistry.find(SubagentLoader.MAIN_AGENT_ID)
-                    .map(a -> a.prompt(new com.xinl.easyclaw.base.agent.AgentContext(
-                            null, null, false)).persona())
+                    .map(this::personaOf)
                     .filter(p -> p != null && !p.isBlank())
                     .orElse(null);
         } catch (Exception e) {
             log.warn("解析主控 SPI 人格失败，退回纯基础提示词: {}", e.getMessage());
             return null;
         }
+    }
+
+    /** 取智能体内置人格；空人格返回 null（调用方继续走回退链） */
+    private String personaOf(com.xinl.easyclaw.base.agent.EasyClawAgent agent) {
+        String persona = agent.prompt(new com.xinl.easyclaw.base.agent.AgentContext(
+                null, null, false)).persona();
+        return (persona != null && !persona.isBlank()) ? persona : null;
     }
 
     /**

@@ -21,6 +21,7 @@ interface ScenarioOption { id: number; name: string; displayName: string; icon?:
 /** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序 */
 const WS_TYPES = [
   { type: 'single', label: 'SOLO', icon: '👤', hint: '单个主智能体独立完成任务' },
+  { type: 'ops', label: '运维', icon: '🖥️', hint: 'SSH 远程终端 + 智能幕布，AI 辅助远程主机运维' },
 ] as const;
 
 type WsType = typeof WS_TYPES[number]['type'];
@@ -404,7 +405,12 @@ export default function WorkspacesPage() {
       ) : (
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14 }}>
           {visibleItems.map((ws) => (
-            <div key={ws.workspaceId} className="card" style={{ cursor: 'pointer' }} onClick={() => navigate(`/chat/${ws.workspaceId}`)}>
+            <div
+              key={ws.workspaceId}
+              className="card"
+              style={{ cursor: 'pointer' }}
+              onClick={() => navigate((ws.type || 'single') === 'ops' ? `/ops/${ws.workspaceId}` : `/chat/${ws.workspaceId}`)}
+            >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span style={{ fontSize: '1.6em' }}>{typeMeta.icon}</span>
                 <div style={{ flex: 1, minWidth: 0 }}>
@@ -420,13 +426,16 @@ export default function WorkspacesPage() {
                 >
                   ✏️
                 </button>
-                <button
-                  className="btn small"
-                  title="工具白名单"
-                  onClick={(e) => { e.stopPropagation(); openPerm(ws.workspaceId); }}
-                >
-                  🔐
-                </button>
+                {/* ops 工作区白名单机制关闭（AgentOrchestrator.whitelistEnabled=false），不渲染授权入口 */}
+                {(ws.type || 'single') !== 'ops' && (
+                  <button
+                    className="btn small"
+                    title="工具白名单"
+                    onClick={(e) => { e.stopPropagation(); openPerm(ws.workspaceId); }}
+                  >
+                    🔐
+                  </button>
+                )}
                 <button
                   className="btn danger small"
                   title="删除工作区"

@@ -1,8 +1,10 @@
 import {useEffect, useState} from 'react';
 import {Navigate, NavLink, Route, Routes} from 'react-router-dom';
 import {isIconUrl, loadBranding, useBranding} from './branding';
+import {loadCloudStatus} from './cloudStatus';
 import WorkspacesPage from './pages/WorkspacesPage';
 import ChatPage from './pages/ChatPage';
+import OpsPage from './pages/OpsPage';
 import SkillsPage from './pages/SkillsPage';
 import ScenariosPage from './pages/ScenariosPage';
 import ToolsPage from './pages/ToolsPage';
@@ -21,6 +23,7 @@ const menuGroups: MenuGroup[] = [
     title: '工作区',
     items: [
       { to: '/workspaces/single', icon: '👤', label: 'SOLO' },
+      { to: '/workspaces/ops', icon: '🖥️', label: '运维' },
     ],
   },
   {
@@ -51,6 +54,8 @@ export default function App() {
   // 启动时拉取品牌配置（name/subtitle/icon → logo、favicon、标签页标题）；失败静默用默认值
   useEffect(() => {
     void loadBranding();
+    // 云端接入状态（attachmentsAllowed → 聊天页附件入口显隐）；失败静默放行
+    void loadCloudStatus();
   }, []);
 
   const [collapsed, setCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1');
@@ -113,6 +118,7 @@ export default function App() {
           <Route path="/workspaces" element={<Navigate to="/workspaces/single" replace />} />
           <Route path="/workspaces/:wsType" element={<WorkspacesPage />} />
           <Route path="/chat/:workspaceId" element={<ChatPage />} />
+          <Route path="/ops/:workspaceId" element={<OpsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/tools" element={<ToolsPage />} />

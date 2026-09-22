@@ -3,6 +3,9 @@ server:
   error:
     # ResponseStatusException 的 reason 返回给前端（默认 never 会吞成裸 Bad Request，无法诊断）
     include-message: always
+  tomcat:
+    # 超限/出错时排干请求体再响应，否则 Tomcat 提前关连接，浏览器报 ERR_CONNECTION_ABORTED 且无错误信息
+    max-swallow-size: -1
 spring:
   profiles:
     active: dev-sqlite,local
@@ -10,8 +13,9 @@ spring:
     name: easy-claw
   servlet:
     multipart:
-      max-file-size: 10MB
-      max-request-size: 10MB
+      # 运维 SFTP 上传：包/日志/转储类文件普遍偏大；超限返回 413
+      max-file-size: 500MB
+      max-request-size: 500MB
 
 # ============================
 # 日志级别：AgentScope 内部噪音降为 WARN，业务日志保持 INFO

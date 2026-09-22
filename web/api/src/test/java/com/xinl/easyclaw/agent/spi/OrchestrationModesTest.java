@@ -33,11 +33,16 @@ class OrchestrationModesTest {
     }
 
     @Test
-    @DisplayName("isOrchestrated：single 为假，team/schedule 为真，未知与空为假")
+    @DisplayName("isOrchestrated：single/ops 为假，team/schedule 为真，未知与空为假")
     void isOrchestratedSemantics() {
         assertFalse(OrchestrationModes.isOrchestrated("single"));
         assertTrue(OrchestrationModes.isOrchestrated("team"));
         assertTrue(OrchestrationModes.isOrchestrated("schedule"));
+
+        // ops 是单执行体模式：计划恒为单阶段单步、不消费 workflow，
+        // 不得被「编排型才有的配置校验 / 直派 / 审计」误伤（回归保护：
+        // 曾因 isOrchestrated("ops")=true 导致 ops 场景保存被「需要至少一个工作流步骤」拒绝）。
+        assertFalse(OrchestrationModes.isOrchestrated("ops"));
 
         // 未知 mode 视为非编排：与 resolve() 的降级方向一致，
         // 脏数据只会少走编排，不会让场景直接报错。

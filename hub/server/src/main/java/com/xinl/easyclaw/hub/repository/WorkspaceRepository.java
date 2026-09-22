@@ -5,6 +5,7 @@ import java.util.Optional;
 import com.xinl.easyclaw.hub.entity.WorkspaceEntity;
 import org.springframework.data.jpa.repository.JpaRepository;
 
+@Deprecated
 public interface WorkspaceRepository extends JpaRepository<WorkspaceEntity, Long> {
 
     List<WorkspaceEntity> findByOrgId(Long orgId);

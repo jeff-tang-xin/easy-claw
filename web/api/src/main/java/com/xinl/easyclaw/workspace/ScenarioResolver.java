@@ -68,4 +68,23 @@ public class ScenarioResolver {
         }
         return scenario.getWorkflow();
     }
+
+    /**
+     * 当前工作区的场景是否启用「工具白名单（永久授权）」机制。
+     * <p>
+     * <b>场景决定机制开关</b>：运维（ops）场景不启用——remote_shell 每次调用都必须
+     * 弹用户确认，回合授权（allowTurn）与永久授权（allowPermanently）一律不生效，
+     * 存量授权规则也不会摘掉 system ASK 规则（见 WorkspaceAgentBuilder.buildPermissionContext
+     * 与 AgentService.syncPermissionRules 的对应分支）。其余场景维持原行为（启用）。
+     */
+    public boolean whitelistEnabled(String workspaceId) {
+        ScenarioEntity scenario = activeScenario(workspaceId);
+        if (scenario == null) {
+            return true;
+        }
+        // 模式自声明（AgentOrchestrator.whitelistEnabled，SPI 发现）；未注册 mode 维持默认行为
+        return com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(scenario.getMode())
+                .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::whitelistEnabled)
+                .orElse(true);
+    }
 }

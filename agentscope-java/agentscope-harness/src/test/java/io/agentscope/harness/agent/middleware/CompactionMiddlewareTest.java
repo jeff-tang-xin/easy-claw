@@ -24,6 +24,8 @@ import static org.mockito.Mockito.when;
 import io.agentscope.core.ReActAgent;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.event.AgentEvent;
+import io.agentscope.core.event.AgentEventEmitter;
+import io.agentscope.core.event.CustomEvent;
 import io.agentscope.core.message.GenerateReason;
 import io.agentscope.core.message.Msg;
 import io.agentscope.core.message.MsgRole;
@@ -35,6 +37,7 @@ import io.agentscope.core.model.GenerateOptions;
 import io.agentscope.core.model.ToolSchema;
 import io.agentscope.harness.agent.memory.compaction.CompactionConfig;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,6 +48,7 @@ import org.junit.jupiter.api.Test;
 import reactor.core.publisher.Flux;
 import reactor.core.scheduler.Schedulers;
 import reactor.test.StepVerifier;
+import reactor.util.context.Context;
 
 /** Verifies that compaction fallback does not swallow interrupts or rerun downstream reasoning. */
 class CompactionMiddlewareTest {
@@ -345,6 +349,102 @@ class CompactionMiddlewareTest {
                 activeReply.get(5, TimeUnit.SECONDS).getGenerateReason()
                         == GenerateReason.INTERRUPTED);
         assertEquals(2, model.callCount.get());
+    }
+
+    /** A successful compaction emits phase=start then phase=end with the kept message count. */
+    @Test
+    void successfulCompactionEmitsStartAndEndLifecycleEvents() {
+        List<AgentEvent> emitted = new ArrayList<>();
+        AgentEventEmitter emitter = emitted::add;
+        CompactionMiddleware middleware =
+                new CompactionMiddleware(null, new SuccessfulSummaryModel(), fixedConfig());
+
+        StepVerifier.create(
+                        middleware
+                                .onReasoning(
+                                        agent(),
+                                        context("user", "session"),
+                                        input(),
+                                        next -> Flux.empty())
+                                .contextWrite(Context.of(AgentEventEmitter.CONTEXT_KEY, emitter)))
+                .verifyComplete();
+
+        assertEquals(2, emitted.size(), "成功压缩应恰好发出 start 与 end 两个事件");
+        CustomEvent start = (CustomEvent) emitted.get(0);
+        assertEquals(CompactionMiddleware.EVENT_NAME, start.getName());
+        assertEquals(CompactionMiddleware.PHASE_START, start.getValue().get("phase"));
+        CustomEvent end = (CustomEvent) emitted.get(1);
+        assertEquals(CompactionMiddleware.PHASE_END, end.getValue().get("phase"));
+        assertEquals(2, end.getValue().get("keeping"), "keeping = 压缩后消息数（摘要+tail）");
+    }
+
+    /** No lifecycle events are emitted when compaction is not triggered. */
+    @Test
+    void noLifecycleEventsWhenCompactionNotTriggered() {
+        List<AgentEvent> emitted = new ArrayList<>();
+        AgentEventEmitter emitter = emitted::add;
+        CompactionMiddleware middleware =
+                new CompactionMiddleware(null, new SuccessfulSummaryModel(), noCompactionConfig());
+
+        StepVerifier.create(
+                        middleware
+                                .onReasoning(
+                                        agent(),
+                                        context("user", "session"),
+                                        input(),
+                                        next -> Flux.empty())
+                                .contextWrite(Context.of(AgentEventEmitter.CONTEXT_KEY, emitter)))
+                .verifyComplete();
+
+        assertTrue(emitted.isEmpty(), "未触发压缩不得发出任何生命周期事件");
+    }
+
+    /** A failed compaction emits phase=start then phase=end with failed=true (reasoning continues). */
+    @Test
+    void failedCompactionEmitsStartThenFailedEndEvent() {
+        List<AgentEvent> emitted = new ArrayList<>();
+        AgentEventEmitter emitter = emitted::add;
+        CompactionMiddleware middleware =
+                new CompactionMiddleware(
+                        null,
+                        new SynchronousFailingSummaryModel(
+                                new IllegalStateException("summary provider unavailable")),
+                        fixedConfig());
+
+        StepVerifier.create(
+                        middleware
+                                .onReasoning(
+                                        agent(),
+                                        context("user", "session"),
+                                        input(),
+                                        next -> Flux.empty())
+                                .contextWrite(Context.of(AgentEventEmitter.CONTEXT_KEY, emitter)))
+                .verifyComplete();
+
+        assertEquals(2, emitted.size(), "失败压缩应发出 start 与 failed end 两个事件");
+        CustomEvent start = (CustomEvent) emitted.get(0);
+        assertEquals(CompactionMiddleware.PHASE_START, start.getValue().get("phase"));
+        CustomEvent end = (CustomEvent) emitted.get(1);
+        assertEquals(CompactionMiddleware.PHASE_END, end.getValue().get("phase"));
+        assertEquals(Boolean.TRUE, end.getValue().get("failed"), "失败路径必须带 failed=true");
+    }
+
+    /** Absent emitter (non-streaming path) skips lifecycle events without affecting compaction. */
+    @Test
+    void absentEmitterSkipsLifecycleEventsButCompactionProceeds() {
+        CompactionMiddleware middleware =
+                new CompactionMiddleware(null, new SuccessfulSummaryModel(), fixedConfig());
+
+        StepVerifier.create(
+                        middleware.onReasoning(
+                                agent(),
+                                context("user", "session"),
+                                input(),
+                                next -> {
+                                    assertEquals(2, next.messages().size());
+                                    return Flux.empty();
+                                }))
+                .verifyComplete();
     }
 
     /** Creates stable configuration that enters the compaction branch. */

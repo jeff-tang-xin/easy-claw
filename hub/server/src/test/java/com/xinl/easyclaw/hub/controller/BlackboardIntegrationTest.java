@@ -147,7 +147,7 @@ class BlackboardIntegrationTest extends HubIntegrationTestSupport {
     }
 
     @Test
-    void archive_guestForbidden_outsiderForbidden() throws Exception {
+    void archive_guestOutsiderAndNonAuthorMemberForbidden() throws Exception {
         Fixture f = newFixture("ar2");
         long pid = createProject(f.member(), f.orgId(), "ar2-p", "team");
         long e = append(f.member(), pid, "记录");
@@ -155,6 +155,69 @@ class BlackboardIntegrationTest extends HubIntegrationTestSupport {
                 .andExpect(status().isForbidden());
         postJson("/api/blackboard/" + e + "/archive", null, f.outsider())
                 .andExpect(status().isForbidden());
+        // 收紧后的口径：非作者的普通成员（同项目可见、非 guest）也不能归档他人条目。
+        String member2 = createUserAndLogin("bb_ar2_member2", PW);
+        postJson("/api/orgs/" + f.orgId() + "/members", new AddMemberRequest("bb_ar2_member2", "member"), f.owner())
+                .andExpect(status().isCreated());
+        postJson("/api/blackboard/" + e + "/archive", null, member2)
+                .andExpect(status().isForbidden());
+        // 组织 owner/admin 可归档他人条目。
+        postJson("/api/blackboard/" + e + "/archive", null, f.admin())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("archived"));
+    }
+
+    @Test
+    void get_singleEntry_activeAndArchived() throws Exception {
+        Fixture f = newFixture("get1");
+        long pid = createProject(f.member(), f.orgId(), "get1-p", "team");
+        long e = append(f.member(), pid, "某条记录");
+        getJson("/api/blackboard/" + e, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(e))
+                .andExpect(jsonPath("$.content").value("某条记录"))
+                .andExpect(jsonPath("$.authorUsername").value("bb_get1_member"));
+        // 归档后详情仍可读。
+        postJson("/api/blackboard/" + e + "/archive", null, f.member()).andExpect(status().isOk());
+        getJson("/api/blackboard/" + e, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("archived"));
+        // 不存在 → 404；无权限 → 403。
+        getJson("/api/blackboard/999999", f.member())
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+        getJson("/api/blackboard/" + e, f.outsider()).andExpect(status().isForbidden());
+    }
+
+    @Test
+    void unarchive_movesBack_andIdempotent_andPermission() throws Exception {
+        Fixture f = newFixture("uar1");
+        long pid = createProject(f.member(), f.orgId(), "uar1-p", "team");
+        long e = append(f.member(), pid, "待恢复");
+        postJson("/api/blackboard/" + e + "/archive", null, f.member()).andExpect(status().isOk());
+
+        // 非作者普通成员不能取消归档。
+        String member2 = createUserAndLogin("bb_uar1_member2", PW);
+        postJson("/api/orgs/" + f.orgId() + "/members", new AddMemberRequest("bb_uar1_member2", "member"), f.owner())
+                .andExpect(status().isCreated());
+        postJson("/api/blackboard/" + e + "/unarchive", null, member2)
+                .andExpect(status().isForbidden());
+
+        // 作者取消归档 → active，回到活跃列表、离开归档列表。
+        postJson("/api/blackboard/" + e + "/unarchive", null, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("active"));
+        getJson("/api/blackboard?projectId=" + pid, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].id").value(e));
+        getJson("/api/blackboard/archives?projectId=" + pid, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(0)));
+        // 幂等：对活跃条目再取消归档仍 200 active。
+        postJson("/api/blackboard/" + e + "/unarchive", null, f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("active"));
     }
 
     @Test

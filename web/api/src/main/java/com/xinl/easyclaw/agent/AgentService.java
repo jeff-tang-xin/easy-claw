@@ -85,6 +85,7 @@ public class AgentService {
     private final com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout;
     /** 编排模式注册表（按场景 mode 决议执行计划） */
     private final OrchestratorRegistry orchestratorRegistry;
+    private final com.xinl.easyclaw.config.CloudFeatureGate featureGate;
 
     /** 空闲会话 TTL：超过此时长无活动且无挂起确认的会话，其内存状态被清扫 */
     private static final long IDLE_TTL_MS = 2 * 60 * 60 * 1000L;
@@ -120,7 +121,8 @@ public class AgentService {
                         SessionRegistry sessions,
                         com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver,
                         com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout,
-                        OrchestratorRegistry orchestratorRegistry) {
+                        OrchestratorRegistry orchestratorRegistry,
+                        com.xinl.easyclaw.config.CloudFeatureGate featureGate) {
         this.workspaceManager = workspaceManager;
         this.agentFactory = agentFactory;
         this.permissionRuleService = permissionRuleService;
@@ -129,6 +131,7 @@ public class AgentService {
         this.scenarioResolver = scenarioResolver;
         this.workspaceFileLayout = workspaceFileLayout;
         this.orchestratorRegistry = orchestratorRegistry;
+        this.featureGate = featureGate;
     }
 
     /** 应用停机时关闭宽限调度器，避免守护线程与未决任务泄漏 */
@@ -154,10 +157,17 @@ public class AgentService {
      * 注意：这里不能 rebuildAgent —— 会 close 掉可能正暂停等待确认（ASKING）的 Agent，
      * 丢失内存中的挂起确认状态，导致恢复消息走普通路径写入模型上下文，进而引发确认循环。
      * 新会话由构建时的 buildPermissionContext 从 DB 注入规则，存量会话靠这里同步。
+     *
+     * @return false 表示场景未启用白名单机制（如 ops），规则未写入；调用方据此向用户提示
      */
-    public void allowPermanently(String workspaceId, Collection<String> toolNames) {
+    public boolean allowPermanently(String workspaceId, Collection<String> toolNames) {
         if (toolNames == null || toolNames.isEmpty()) {
-            return;
+            return true;
+        }
+        // 场景决定白名单机制是否启用（ops 不启用）：拒绝持久化，本次确认不受影响
+        if (!scenarioResolver.whitelistEnabled(workspaceId)) {
+            log.warn("拒绝永久授权（场景未启用白名单机制）: workspaceId={}, tools={}", workspaceId, toolNames);
+            return false;
         }
         for (String name : toolNames) {
             try {
@@ -168,6 +178,7 @@ public class AgentService {
         }
         log.info("永久允许工具: workspaceId={}, tools={}", workspaceId, toolNames);
         syncRulesToLiveSessions(workspaceId);
+        return true;
     }
 
     /**
@@ -213,9 +224,15 @@ public class AgentService {
             AgentState state = core.getAgentState(userId, sessionId);
             PermissionContextState existing = state.getPermissionContext();
 
-            // 目标用户级 ALLOW 集合：DB 永久规则 ∪ 本回合授权
-            Set<String> allowed = new HashSet<>(permissionRuleService.alwaysAllowedTools(workspaceId));
-            allowed.addAll(sessions.turnAllowedTools(sessionId));
+            // 目标用户级 ALLOW 集合：DB 永久规则 ∪ 本回合授权。
+            // 场景未启用白名单机制（ops）时恒为空集：回合/永久授权都不生效，
+            // system ASK 规则原样保留 → remote_shell 每次调用都弹确认
+            boolean whitelistEnabled = scenarioResolver.whitelistEnabled(workspaceId);
+            Set<String> allowed = new HashSet<>();
+            if (whitelistEnabled) {
+                allowed.addAll(permissionRuleService.alwaysAllowedTools(workspaceId));
+                allowed.addAll(sessions.turnAllowedTools(sessionId));
+            }
 
             // 无变化则跳过（replacePermissionContext 会触发状态落盘）
             Set<String> existingUserTools = new HashSet<>();
@@ -671,6 +688,14 @@ public class AgentService {
         if (!hasText && !hasAttachment) {
             log.warn("拒绝空消息: workspaceId={}, sessionId={}", workspaceId, sessionId);
             onError.accept(new RuntimeException("消息内容为空：请输入文字或添加附件后再发送。"));
+            onFinish.run();
+            return;
+        }
+
+        // 附件门禁兜底（spec §4.3，WS 入口已拦，此处防绕过 WS 的其他调用方）
+        if (hasAttachment && !featureGate.attachmentsAllowed()) {
+            log.warn("拒绝附件: 组织已禁用附件与图片上传, workspaceId={}, sessionId={}", workspaceId, sessionId);
+            onError.accept(new RuntimeException("该组织已禁用附件与图片上传"));
             onFinish.run();
             return;
         }

@@ -5,8 +5,9 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 
 /**
- * 新增菜单项请求。menuKey 同工作区内唯一，仅允许小写字母/数字/连字符/下划线（spoke 侧稳定标识）。
- * parentId 可空（空=顶层）；requiredPerm/visibleRoles 可空（服务端归一化为空串=不限制）。
+ * 新增平台菜单项请求（仅 platformAdmin）。menuKey 全局唯一，仅允许小写字母/数字/连字符/下划线
+ * （spoke 侧稳定标识，创建后不可改）。parentId 可空（空=顶层）；requiredPerm/visibleRoles 可空
+ * （服务端归一化为空串=不限制）。
  */
 public record CreateMenuItemRequest(
         @Pattern(regexp = "[a-z0-9_-]+", message = "menuKey 只能包含小写字母/数字/连字符/下划线")

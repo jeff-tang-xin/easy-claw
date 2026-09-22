@@ -45,21 +45,34 @@ function KnowledgeList({project, role, meUserId}: Props) {
   const [newSummary, setNewSummary] = useState('');
   const [newContent, setNewContent] = useState('');
   const [creating, setCreating] = useState(false);
+  // 检索：queryInput 为输入框实时值，query 为已生效的检索词（回车/按钮提交后同步）
+  const [queryInput, setQueryInput] = useState('');
+  const [query, setQuery] = useState('');
 
   const canWrite = role !== 'guest' && role !== null;
 
   const load = useCallback(async () => {
     try {
-      setItems(await listKnowledgeItems(project.id));
+      setItems(await listKnowledgeItems(project.id, query));
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载知识库失败');
     }
-  }, [project.id]);
+  }, [project.id, query]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  /** 提交检索：把输入框值生效（load 由 query 变化驱动）；空白等同清除检索。 */
+  const submitSearch = () => {
+    setQuery(queryInput.trim());
+  };
+
+  const clearSearch = () => {
+    setQueryInput('');
+    setQuery('');
+  };
 
   const create = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -140,11 +153,39 @@ function KnowledgeList({project, role, meUserId}: Props) {
       )}
 
       <div className="card">
-        <h3 className="ps-card-title">知识条目（{items?.length ?? '…'}）</h3>
+        <div className="doc-editor-head">
+          <h3 className="ps-card-title">
+            知识条目（{items?.length ?? '…'}{query ? `，检索「${query}」` : ''}）
+          </h3>
+        </div>
+        <form
+          className="filter-bar"
+          onSubmit={(e) => {
+            e.preventDefault();
+            submitSearch();
+          }}
+        >
+          <input
+            value={queryInput}
+            onChange={(e) => setQueryInput(e.target.value)}
+            maxLength={200}
+            placeholder="搜索主题 / 摘要 / 正文，多词空格分隔（AND）"
+          />
+          <button type="submit" className="btn btn-primary btn-sm">
+            搜索
+          </button>
+          {query && (
+            <button type="button" className="btn btn-ghost btn-sm" onClick={clearSearch}>
+              清除
+            </button>
+          )}
+        </form>
         {items === null ? (
           <div className="empty-hint">加载中…</div>
         ) : items.length === 0 ? (
-          <div className="empty-hint">还没有知识条目，点击上方创建。</div>
+          <div className="empty-hint">
+            {query ? '没有匹配的知识条目，换个关键词或清除检索。' : '还没有知识条目，点击上方创建。'}
+          </div>
         ) : (
           <table className="data-table">
             <thead>

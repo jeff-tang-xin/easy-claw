@@ -24,6 +24,7 @@ import org.springframework.web.bind.annotation.RestController;
  */
 @RestController
 @RequestMapping("/api/workspaces")
+@Deprecated
 public class WorkspaceController {
 
     private final WorkspaceService workspaceService;
