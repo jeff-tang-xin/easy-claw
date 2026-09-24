@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.tools;
 
+import com.xinl.easyclaw.ops.service.OpsCommandLogReporter;
 import com.xinl.easyclaw.ops.service.SshConnectionService;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.agent.RuntimeContext;
@@ -25,9 +26,11 @@ public class OpsTools {
     private static final int MAX_OUTPUT_CHARS = 60_000;
 
     private final SshConnectionService ssh;
+    private final OpsCommandLogReporter commandLogReporter;
 
-    public OpsTools(SshConnectionService ssh) {
+    public OpsTools(SshConnectionService ssh, OpsCommandLogReporter commandLogReporter) {
         this.ssh = ssh;
+        this.commandLogReporter = commandLogReporter;
     }
 
     @Tool(name = "remote_shell", description = "在当前会话绑定的远程 Linux 服务器上执行一条 shell 命令，返回退出码与 stdout/stderr。\n"
@@ -48,6 +51,15 @@ public class OpsTools {
         // 运维多 tab：一个连接一个会话。会话绑定了连接 → 固定执行在该连接上；
         // 未绑定（如 REST 入口）→ 回退工作区最近建立的连接
         long boundConn = ssh.connIdForSession(rc == null ? null : rc.getSessionId(), workspaceId);
+        // 命令审计：执行前入队（无论执行成败都记——记录的是「执行了什么」）。
+        // 服务器信息取自目标连接的运行时元数据；info 为 null（本地模式/连接不存在）时不记
+        long targetConn = boundConn > 0 ? boundConn : ssh.primaryConnId(workspaceId);
+        SshConnectionService.OpsServerInfo serverInfo =
+                targetConn > 0 ? ssh.opsServerInfo(workspaceId, targetConn) : null;
+        if (serverInfo != null) {
+            commandLogReporter.enqueue(serverInfo.serverKey(), serverInfo.name(),
+                    serverInfo.host(), command, "ai");
+        }
         try {
             SshConnectionService.ExecResult r;
             if (boundConn > 0) {
@@ -62,6 +74,9 @@ public class OpsTools {
                 r = ssh.exec(workspaceId, command);
             }
             StringBuilder sb = new StringBuilder();
+            if (serverInfo != null) {
+                sb.append(serverBanner(serverInfo)).append('\n');
+            }
             sb.append("exit=").append(r.exitCode());
             if (r.timedOut()) {
                 sb.append("（超时被终止）");
@@ -83,5 +98,13 @@ public class OpsTools {
                     workspaceId, command, e.getMessage());
             return "❌ 执行失败: " + e.getMessage();
         }
+    }
+
+    /** 结果首行的服务器信息横幅：osType 为空时省略该段 */
+    private static String serverBanner(SshConnectionService.OpsServerInfo info) {
+        String os = info.osType() == null || info.osType().isBlank() ? null : info.osType().trim();
+        return os == null
+                ? "[服务器: " + info.name() + " | " + info.username() + "@" + info.host() + "]"
+                : "[服务器: " + info.name() + " | " + os + " | " + info.username() + "@" + info.host() + "]";
     }
 }

@@ -1,37 +1,46 @@
 package com.xinl.easyclaw.ops.api;
 
-import com.xinl.easyclaw.ops.entity.OpsConnectionEntity;
-import com.xinl.easyclaw.ops.repository.OpsConnectionRepository;
-import com.xinl.easyclaw.ops.service.LocalCryptoService;
+import com.xinl.easyclaw.config.CloudBootstrapService;
+import com.xinl.easyclaw.config.SpokeOpsServerView;
+import com.xinl.easyclaw.ops.service.OpsCommandLogReporter;
+import com.xinl.easyclaw.ops.service.OpsCryptoService;
 import com.xinl.easyclaw.ops.service.SshConnectionService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
-import org.springframework.web.bind.annotation.DeleteMapping;
-import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody;
 
 import java.io.IOException;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
- * 运维场景 REST 接口：连接配置 CRUD（凭证加密落库）+ 连接/断开 + 状态 + 文件上传。
+ * 运维场景 REST 接口。
  * <p>
- * <b>凭证红线</b>：password/privateKey/passphrase 只在请求体里进、加密后落库，
- * 任何响应都不回显明文或密文（只回 hasPassword / hasKey 布尔位）。
+ * 运维服务器<b>只来自 hub 下发</b>（{@code GET /api/spoke/ops-servers}，hub 已按组织 +
+ * 当前 appkey 用户有效授权过滤）。spoke 不再提供本地连接配置的获取/创建/编辑/删除，
+ * 也不持久化任何连接配置或凭证：
+ * <ul>
+ *   <li>{@code POST /api/ops/connect}：<b>只传 serverKey</b>（+ 可选的 RSA 加密密码），
+ *       host/port/username/password 全部由后端按 serverKey 从下发快照解析——前端不持有
+ *       服务器凭证，密码不明文过网（手输密码经 RSA-OAEP 加密，见 {@link OpsCryptoService}）；</li>
+ *   <li>{@code POST /api/ops/command-log}：上报用户在 Web 终端执行的命令（异步转报 hub 审计）；</li>
+ *   <li>{@code POST /api/ops/disconnect} / {@code GET /api/ops/status}：断开 / 活跃连接快照；</li>
+ *   <li>{@code POST /api/ops/upload}：SFTP 上传到指定活跃连接；</li>
+ *   <li>{@code GET /api/ops/download}：SFTP 流式下载远程文件。</li>
+ * </ul>
  */
 @RestController
 @RequestMapping("/api/ops")
@@ -39,117 +48,116 @@ public class OpsConnectionController {
 
     private static final Logger log = LoggerFactory.getLogger(OpsConnectionController.class);
 
-    private final OpsConnectionRepository repo;
-    private final LocalCryptoService crypto;
     private final SshConnectionService ssh;
+    private final CloudBootstrapService cloudBootstrap;
+    private final OpsCryptoService crypto;
+    private final OpsCommandLogReporter commandLogReporter;
 
-    public OpsConnectionController(OpsConnectionRepository repo,
-                                   LocalCryptoService crypto,
-                                   SshConnectionService ssh) {
-        this.repo = repo;
-        this.crypto = crypto;
+    public OpsConnectionController(SshConnectionService ssh, CloudBootstrapService cloudBootstrap,
+                                   OpsCryptoService crypto, OpsCommandLogReporter commandLogReporter) {
         this.ssh = ssh;
+        this.cloudBootstrap = cloudBootstrap;
+        this.crypto = crypto;
+        this.commandLogReporter = commandLogReporter;
     }
 
-    // ==================== 连接配置 CRUD ====================
-
-    /** 工作区的连接列表（脱敏：不含任何凭证字段） */
-    @GetMapping("/connections")
-    public List<Map<String, Object>> list(@RequestParam String workspaceId) {
-        List<Map<String, Object>> out = new ArrayList<>();
-        for (OpsConnectionEntity e : repo.findByWorkspaceIdOrderByIdAsc(workspaceId)) {
-            out.add(toSafeView(e));
-        }
-        return out;
+    /**
+     * 连接请求体：只带 serverKey 与可选的加密密码。
+     * <p>
+     * {@code encryptedPassword} = Base64(RSA-OAEP-SHA-256(utf8(密码)))，公钥取自
+     * {@code GET /api/ops/public-key}；缺省时使用 hub 随目录下发的密码（仅服务端内部使用，
+     * 不经过浏览器）。host/port/username 一律按 serverKey 从快照解析，前端传参不采信。
+     */
+    public record ConnectRequest(String workspaceId, String serverKey, String encryptedPassword) {
     }
 
-    /** 新建连接配置（凭证加密落库） */
-    @PostMapping("/connections")
-    public Map<String, Object> create(@RequestBody Map<String, Object> body) {
-        String workspaceId = str(body, "workspaceId");
-        String name = str(body, "name");
-        String host = str(body, "host");
-        String username = str(body, "username");
-        String authType = str(body, "authType");
-        if (workspaceId == null || name == null || host == null || username == null) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "workspaceId/name/host/username 不能为空");
-        }
-        if (repo.existsByWorkspaceIdAndName(workspaceId, name)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "连接名已存在: " + name);
-        }
-        OpsConnectionEntity e = OpsConnectionEntity.builder()
-                .workspaceId(workspaceId)
-                .name(name)
-                .host(host)
-                .port(intVal(body, "port", 22))
-                .username(username)
-                .authType("key".equals(authType) ? "key" : "password")
-                .build();
-        applySecrets(e, body, null);
-        e = repo.save(e);
-        log.info("新建运维连接: workspace={}, name={}, {}@{}", workspaceId, name, username, host);
-        return toSafeView(e);
+    /** 前端加密用公钥（X.509 SPKI，Base64）；spoke 重启即换钥，前端每次连接前现取 */
+    @GetMapping("/public-key")
+    public Map<String, Object> publicKey() {
+        return Map.of("publicKey", crypto.publicKeySpkiBase64());
     }
 
-    /** 更新连接配置；凭证字段传空/缺省 = 保持原值不变 */
-    @PutMapping("/connections/{id}")
-    public Map<String, Object> update(@PathVariable Long id, @RequestBody Map<String, Object> body) {
-        String workspaceId = str(body, "workspaceId");
-        OpsConnectionEntity e = repo.findByIdAndWorkspaceId(id, workspaceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "连接不存在"));
-        String name = str(body, "name");
-        if (name != null && !name.equals(e.getName()) && repo.existsByWorkspaceIdAndName(workspaceId, name)) {
-            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "连接名已存在: " + name);
+    /**
+     * 按 serverKey 建立活跃连接（同一服务器已活跃时直接复用，不重连）。
+     * 返回该工作区全部活跃连接快照。
+     */
+    @PostMapping("/connect")
+    public Map<String, Object> connect(@RequestBody ConnectRequest req) {
+        if (req == null || isBlank(req.workspaceId()) || isBlank(req.serverKey())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "workspaceId/serverKey 不能为空");
         }
-        if (name != null) {
-            e.setName(name);
-        }
-        if (str(body, "host") != null) {
-            e.setHost(str(body, "host"));
-        }
-        Integer port = intVal(body, "port", e.getPort());
-        if (port != null && port > 0) {
-            e.setPort(port);
-        }
-        if (str(body, "username") != null) {
-            e.setUsername(str(body, "username"));
-        }
-        if (str(body, "authType") != null) {
-            e.setAuthType("key".equals(str(body, "authType")) ? "key" : "password");
-        }
-        applySecrets(e, body, e);
-        e = repo.save(e);
-        log.info("更新运维连接: id={}, workspace={}", id, workspaceId);
-        return toSafeView(e);
-    }
-
-    @DeleteMapping("/connections/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id, @RequestParam String workspaceId) {
-        OpsConnectionEntity e = repo.findByIdAndWorkspaceId(id, workspaceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "连接不存在"));
-        repo.delete(e);
-        log.info("删除运维连接: id={}, workspace={}, name={}", id, workspaceId, e.getName());
-        return ResponseEntity.noContent().build();
-    }
-
-    // ==================== 连接 / 断开 / 状态 ====================
-
-    /** 用指定连接配置建立活跃连接（解密凭证 → SSH 连接+认证）；同工作区其他连接不受影响 */
-    @PostMapping("/connections/{id}/connect")
-    public Map<String, Object> connect(@PathVariable Long id, @RequestParam String workspaceId) {
-        OpsConnectionEntity e = repo.findByIdAndWorkspaceId(id, workspaceId)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "连接不存在"));
+        SpokeOpsServerView server = cloudBootstrap.findOpsServer(req.serverKey())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "serverKey 不存在或平台配置未就绪: " + req.serverKey()));
+        String password = resolvePassword(req, server);
         try {
-            ssh.connect(workspaceId, e.getId(), e.getName(), e.getHost(), e.getPort(), e.getUsername(),
-                    e.getAuthType(),
-                    "password".equals(e.getAuthType()) ? crypto.decrypt(e.getPasswordEnc()) : null,
-                    "key".equals(e.getAuthType()) ? crypto.decrypt(e.getPrivateKeyEnc()) : null,
-                    crypto.decrypt(e.getKeyPassphraseEnc()));
+            long connId = ssh.connectByServer(req.workspaceId(), req.serverKey(), server.name(),
+                    server.host(), server.port() > 0 ? server.port() : 22, server.username(), password,
+                    server.osType());
+            log.info("运维服务器连接: workspace={}, serverKey={}, connId={}",
+                    req.workspaceId(), req.serverKey(), connId);
         } catch (IOException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
-        return ssh.status(workspaceId);
+        return ssh.status(req.workspaceId());
     }
+
+    /** 密码解析优先级：前端加密密码 > hub 下发密码；两者皆无 → 400（前端弹窗让用户输入） */
+    private String resolvePassword(ConnectRequest req, SpokeOpsServerView server) {
+        if (!isBlank(req.encryptedPassword())) {
+            try {
+                String password = crypto.decrypt(req.encryptedPassword());
+                if (!isBlank(password)) {
+                    return password;
+                }
+            } catch (Exception ex) {
+                // 典型场景：spoke 重启换钥后前端仍持旧公钥密文——让前端重新取公钥加密
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "密码解密失败（请重新获取公钥后重试）: " + ex.getMessage());
+            }
+        }
+        if (server.password() != null && !server.password().isBlank()) {
+            return server.password();
+        }
+        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                "该服务器未配置密码，请输入密码后重试");
+    }
+
+    // ==================== 命令审计上报（用户 Web 终端） ====================
+
+    /** 用户命令长度上限（超长截断） */
+    private static final int MAX_COMMAND_LENGTH = 2000;
+
+    /** 用户命令上报请求体（前端行缓冲拼好整行后调用） */
+    public record CommandLogRequest(String workspaceId, long connId, String command) {
+    }
+
+    /**
+     * 上报一条用户在 Web 终端执行的命令（异步批量转报 hub 审计）。
+     * 服务器信息从连接运行时元数据解析——前端只传 workspaceId/connId/command，不采信其他字段。
+     */
+    @PostMapping("/command-log")
+    public Map<String, Object> commandLog(@RequestBody CommandLogRequest req) {
+        if (req == null || isBlank(req.workspaceId()) || req.connId() <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "workspaceId/connId 不能为空");
+        }
+        if (req.command() == null || req.command().isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "command 不能为空");
+        }
+        SshConnectionService.OpsServerInfo info = ssh.opsServerInfo(req.workspaceId(), req.connId());
+        if (info == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "连接不存在或已断开: connId=" + req.connId());
+        }
+        String command = req.command();
+        if (command.length() > MAX_COMMAND_LENGTH) {
+            command = command.substring(0, MAX_COMMAND_LENGTH);
+        }
+        commandLogReporter.enqueue(info.serverKey(), info.name(), info.host(), command, "user");
+        return Map.of("ok", true);
+    }
+
+    // ==================== 断开 / 状态 ====================
 
     /** 断开指定连接（connId 必填）；返回剩余活跃连接列表 */
     @PostMapping("/disconnect")
@@ -178,78 +186,52 @@ public class OpsConnectionController {
         if (err != null) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, err);
         }
-        Map<String, Object> out = new HashMap<>(ssh.status(workspaceId));
+        Map<String, Object> out = ssh.status(workspaceId);
         out.put("uploaded", file.getOriginalFilename());
         out.put("size", file.getSize());
         return out;
     }
 
-    // ==================== 内部 ====================
+    // ==================== 文件下载（SFTP） ====================
 
-    /** 把请求体里的凭证字段加密写入实体；update 模式下空值 = 保持原值 */
-    private void applySecrets(OpsConnectionEntity target, Map<String, Object> body, OpsConnectionEntity existing) {
-        String password = str(body, "password");
-        String privateKey = str(body, "privateKey");
-        String passphrase = str(body, "keyPassphrase");
-        if ("key".equals(target.getAuthType())) {
-            if (privateKey != null && !privateKey.isBlank()) {
-                target.setPrivateKeyEnc(crypto.encrypt(privateKey));
-            } else if (existing == null) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "私钥认证必须提供 privateKey");
-            }
-            target.setKeyPassphraseEnc(passphrase != null && !passphrase.isBlank()
-                    ? crypto.encrypt(passphrase) : null);
-            target.setPasswordEnc(existing != null ? existing.getPasswordEnc() : null);
-        } else {
-            if (password != null && !password.isBlank()) {
-                target.setPasswordEnc(crypto.encrypt(password));
-            } else if (existing == null) {
-                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "密码认证必须提供 password");
-            }
-            target.setPrivateKeyEnc(existing != null ? existing.getPrivateKeyEnc() : null);
-            target.setKeyPassphraseEnc(existing != null ? existing.getKeyPassphraseEnc() : null);
+    /**
+     * 流式下载远程文件（SFTP read）。path 为远程文件路径（绝对路径或相对家目录）。
+     * 流式返回：不整读进内存，支持大文件；流关闭时连带释放 SFTP 客户端。
+     */
+    @GetMapping("/download")
+    public ResponseEntity<StreamingResponseBody> download(@RequestParam String workspaceId,
+                                                          @RequestParam Long connId,
+                                                          @RequestParam String path) {
+        if (isBlank(path)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "path 不能为空");
         }
-    }
-
-    /** 脱敏视图：绝不包含凭证明文/密文 */
-    private static Map<String, Object> toSafeView(OpsConnectionEntity e) {
-        Map<String, Object> out = new HashMap<>();
-        out.put("id", e.getId());
-        out.put("workspaceId", e.getWorkspaceId());
-        out.put("name", e.getName());
-        out.put("host", e.getHost());
-        out.put("port", e.getPort());
-        out.put("username", e.getUsername());
-        out.put("authType", e.getAuthType());
-        out.put("hasPassword", e.getPasswordEnc() != null && !e.getPasswordEnc().isEmpty());
-        out.put("hasKey", e.getPrivateKeyEnc() != null && !e.getPrivateKeyEnc().isEmpty());
-        return out;
-    }
-
-    private static String str(Map<String, Object> body, String key) {
-        Object v = body.get(key);
-        if (v == null) {
-            return null;
-        }
-        String s = String.valueOf(v).trim();
-        return s.isEmpty() ? null : s;
-    }
-
-    private static Integer intVal(Map<String, Object> body, String key, Integer def) {
-        Object v = body.get(key);
-        if (v == null) {
-            return def;
-        }
+        SshConnectionService.RemoteFile remoteFile;
         try {
-            return Integer.parseInt(String.valueOf(v));
-        } catch (NumberFormatException e) {
-            return def;
+            remoteFile = ssh.openDownload(workspaceId, connId, path);
+        } catch (IOException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
+        StreamingResponseBody body = out -> {
+            try (InputStream in = remoteFile.content()) {
+                in.transferTo(out);
+            }
+        };
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, contentDisposition(remoteFile.fileName()))
+                .contentLength(remoteFile.size() >= 0 ? remoteFile.size() : -1)
+                .contentType(MediaType.APPLICATION_OCTET_STREAM)
+                .body(body);
     }
 
-    @ExceptionHandler(IllegalStateException.class)
-    public ResponseEntity<String> cryptoError(IllegalStateException e) {
-        // LocalCryptoService 的加解密失败（密钥文件缺失/不匹配）→ 502，消息可直接展示
-        return ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(e.getMessage());
+    /** RFC 5987 filename*（UTF-8 文件名兼容中文）；filename 兜底 ASCII 化 */
+    private static String contentDisposition(String fileName) {
+        String ascii = fileName.replaceAll("[^\\x20-\\x7e]", "_").replace("\"", "_");
+        return "attachment; filename=\"" + ascii + "\"; filename*=UTF-8''"
+                + java.net.URLEncoder.encode(fileName, StandardCharsets.UTF_8).replace("+", "%20");
+    }
+
+    private static boolean isBlank(String s) {
+        return s == null || s.isBlank();
     }
 }
+

@@ -163,7 +163,7 @@ export interface AppKeyCreatedResponse {
   plainKey: string;
 }
 
-// ============ 知识库（项目内共享知识条目，乐观锁 + 软删 + 版本历史） ============
+// ============ 知识库（项目内共享知识条目，乐观锁 + 软删 + 版本历史；V23 起含 spoke 同步条目） ============
 /** 知识条目列表项：不含正文（后端契约无 createdAt，仅 updatedAt） */
 export interface KnowledgeItemListItemDto {
   id: number;
@@ -172,6 +172,7 @@ export interface KnowledgeItemListItemDto {
   summary: string;
   version: number;
   status: string;
+  /** workspace 来源条目为 0（Agent 写入占位，无 hub 用户） */
   ownerUserId: number;
   ownerUsername: string | null;
   updatedBy: number | null;
@@ -179,6 +180,10 @@ export interface KnowledgeItemListItemDto {
   updatedAt: string | null;
   /** 向量化状态：pending|done|failed（向量本身不进契约，仅状态标量） */
   embeddingStatus: string;
+  /** 来源：platform=hub 平台创建 | workspace=spoke 工作区同步写入（Agent） */
+  source: string;
+  /** spoke 同步来源工作区标识（source=workspace 时非空） */
+  sourceWorkspaceId: string | null;
 }
 
 /** 知识条目详情：含当前版正文 */
@@ -190,6 +195,7 @@ export interface KnowledgeItemDto {
   content: string;
   version: number;
   status: string;
+  /** workspace 来源条目为 0（Agent 写入占位，无 hub 用户） */
   ownerUserId: number;
   ownerUsername: string | null;
   updatedBy: number | null;
@@ -198,6 +204,10 @@ export interface KnowledgeItemDto {
   updatedAt: string | null;
   /** 向量化状态：pending|done|failed（向量本身不进契约，仅状态标量） */
   embeddingStatus: string;
+  /** 来源：platform=hub 平台创建 | workspace=spoke 工作区同步写入（Agent） */
+  source: string;
+  /** spoke 同步来源工作区标识（source=workspace 时非空） */
+  sourceWorkspaceId: string | null;
 }
 
 /** 历史版本项（knowledge_item_events 一行快照，不可变） */
@@ -215,7 +225,7 @@ export interface KnowledgeHistoryVersionDto extends KnowledgeHistoryItemDto {
   content: string;
 }
 
-// ============ 黑板报（项目共享，追加型 + 归档状态标签） ============
+// ============ 黑板报（项目共享，追加型 + 归档状态标签；V24 起含 spoke Agent 同步条目） ============
 export interface BlackboardEntryDto {
   id: number;
   projectId: number;
@@ -226,6 +236,12 @@ export interface BlackboardEntryDto {
   status: string;
   createdAt: string | null;
   updatedAt: string | null;
+  /** platform = 平台用户写入 | workspace = spoke AI Agent 同步写入 */
+  source: string;
+  /** 来源工作区标识（source=workspace 时非空） */
+  sourceWorkspaceId: string | null;
+  /** 条目类型（Agent 写入：note|finding|risk|conclusion…；平台写入为 null） */
+  entryType: string | null;
 }
 
 // ============ LLM 网关（详单/用量，组织维度，仅 owner/admin 可见） ============
@@ -364,4 +380,70 @@ export interface RolePerms {
 export interface RoleMatrixResponse {
   roles: RolePerms[];
   platformAdminPerms: string[];
+}
+
+// ============ 运维服务器目录（platformAdmin 维护归属与授权；spoke 按归属只读下发） ============
+
+/** 运维服务器目录项；orgId 必填（组织必须），projectId 0=不限定项目（历史未归属行仅存量，新增必选组织） */
+export interface OpsServerDto {
+  id: number;
+  /** spoke 侧稳定标识（全局唯一，创建后不可改） */
+  serverKey: string;
+  name: string;
+  host: string;
+  port: number;
+  username: string;
+  description: string;
+  /** 分类/标签（创建必选；平台管理属性） */
+  category: string;
+  /** 系统类型（选填，空串=未填；随目录下发 spoke 供 AI 识别环境） */
+  osType: string;
+  sortOrder: number;
+  enabled: boolean;
+  /** 归属组织 id（组织必须，>0） */
+  orgId: number;
+  /** 归属项目 id；0=不限定项目 */
+  projectId: number;
+  /** 是否已设置登录密码（hub 加密保存、随目录下发 spoke；回显仅此布尔位，不含明文） */
+  passwordSet: boolean;
+}
+
+/** 运维服务器用户时效授权（一人一服务器一条，重复提交=续期；过期行保留作历史） */
+export interface OpsServerGrantDto {
+  id: number;
+  serverId: number;
+  userId: number;
+  /** 授权用户名（后端已解析，供展示） */
+  userName: string;
+  /** ISO-8601 时间字符串 */
+  validFrom: string;
+  validUntil: string;
+  /** 操作人（platformAdmin）用户 id */
+  grantedBy: number;
+  /** 服务端判定：validUntil 已过=true */
+  expired: boolean;
+}
+
+/** 运维服务器命令执行记录（spoke 上报 hub 落库；operator 由 hub 按 appkey 身份补全） */
+export interface OpsCommandLogDto {
+  id: number;
+  serverKey: string;
+  serverName: string;
+  host: string;
+  command: string;
+  /** ai | user */
+  source: string;
+  operator: string;
+  /** ISO-8601 时间字符串 */
+  executedAt: string;
+  createdAt: string;
+}
+
+/** 命令记录分页（后端 OpsCommandLogPageResponse：items/total/page/size，按 executed_at 倒序） */
+export interface OpsCommandLogPage {
+  items: OpsCommandLogDto[];
+  total: number;
+  /** 当前页码（0 起） */
+  page: number;
+  size: number;
 }

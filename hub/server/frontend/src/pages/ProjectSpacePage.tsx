@@ -139,7 +139,7 @@ export default function ProjectSpacePage({orgs, meUserId}: Props) {
       <Routes>
         <Route index element={<OverviewTab project={project} role={role} meUserId={meUserId} />} />
         <Route
-          path="knowledge"
+          path="knowledge/*"
           element={<KnowledgePage project={project} role={role} meUserId={meUserId} />}
         />
         <Route

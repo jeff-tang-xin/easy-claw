@@ -272,3 +272,29 @@
 .ops-conn-form textarea { resize: vertical; font-family: monospace; }
 
 .ops-form-actions { display: flex; gap: 8px; }
+
+/* cloud 模式：工作区 ↔ hub 项目绑定区 */
+.ops-bind-hint {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.ops-bind-hint button { margin-left: 8px; }
+
+.ops-bind-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+}
+.ops-bind-project {
+  font-size: 0.85em;
+  color: #4ade80;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

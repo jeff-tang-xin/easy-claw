@@ -610,6 +610,14 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 .bb-content { white-space: pre-wrap; word-break: break-word; line-height: 1.6; }
 .bb-meta { display: flex; align-items: center; gap: 8px; font-size: 0.82em; color: var(--text-tertiary); }
 
+/* 工作区同步数据（spoke 云同步只读聚合） */
+.ws-sync-content {
+  white-space: pre-wrap; word-break: break-word; line-height: 1.6;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 10px 12px; margin: 0; max-height: 420px; overflow: auto;
+  font-family: inherit; font-size: 0.9em;
+}
+
 /* 409 冲突并排对比 */
 .conflict-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .conflict-col { display: flex; flex-direction: column; gap: 8px; min-width: 0; }

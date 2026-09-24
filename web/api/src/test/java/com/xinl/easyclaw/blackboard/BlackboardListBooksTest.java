@@ -34,7 +34,7 @@ class BlackboardListBooksTest {
     @Test
     @DisplayName("目录不存在时返回空列表而不抛异常")
     void missingDirReturnsEmpty(@TempDir Path root) {
-        assertEquals(List.of(), new BlackboardStore().listBooks(ws(root)));
+        assertEquals(List.of(), new LocalBlackboardStore().listBooks(ws(root)));
     }
 
     @Test
@@ -48,7 +48,7 @@ class BlackboardListBooksTest {
                 StandardCharsets.UTF_8);
         Files.writeString(dir.resolve("notes.txt"), "ignored", StandardCharsets.UTF_8);
 
-        List<BlackboardStore.BlackboardBook> books = new BlackboardStore().listBooks(ws(root));
+        List<BlackboardStore.BlackboardBook> books = new LocalBlackboardStore().listBooks(ws(root));
 
         assertEquals(1, books.size(), "非 .jsonl 文件不应被收录");
         assertEquals("session-a", books.get(0).key(), "key 应为文件名去掉 .jsonl 后缀");
@@ -67,7 +67,7 @@ class BlackboardListBooksTest {
         Files.setLastModifiedTime(older, java.nio.file.attribute.FileTime.fromMillis(1_000_000L));
         Files.setLastModifiedTime(newer, java.nio.file.attribute.FileTime.fromMillis(9_000_000L));
 
-        List<BlackboardStore.BlackboardBook> books = new BlackboardStore().listBooks(ws(root));
+        List<BlackboardStore.BlackboardBook> books = new LocalBlackboardStore().listBooks(ws(root));
 
         assertEquals(2, books.size());
         assertEquals("new", books.get(0).key(), "最近修改的记录本应排在最前");

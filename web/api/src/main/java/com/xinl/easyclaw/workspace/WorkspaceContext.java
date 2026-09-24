@@ -27,4 +27,6 @@ public class WorkspaceContext {
     @Builder.Default
     private boolean restored = false;
     private Map<String, Object> metadata;
+    /** 归属的 hub 项目（cloud 模式）：同步知识库/黑板时携带；与 workspaces.project_id 一致，缓存冗余便于工具读取。 */
+    private Long projectId;
 }

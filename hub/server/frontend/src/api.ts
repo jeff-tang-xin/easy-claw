@@ -23,6 +23,9 @@ import type {
   OrgMenuSettingDto,
   OrgOptionDto,
   OrgToolSettingDto,
+  OpsCommandLogPage,
+  OpsServerDto,
+  OpsServerGrantDto,
   PlatformToolDto,
   ProjectDto,
   ProviderDto,
@@ -478,3 +481,74 @@ export const archiveBlackboardEntry = (id: number) =>
 /** 取消归档（恢复为活跃，幂等）；权限口径与归档一致：作者本人或组织 owner/admin */
 export const unarchiveBlackboardEntry = (id: number) =>
   request<BlackboardEntryDto>('POST', `/api/blackboard/${id}/unarchive`);
+
+// ============ 运维服务器目录（platformAdmin 专属：归属 + 用户时效授权） ============
+export const listOpsServers = () => request<OpsServerDto[]>('GET', '/api/platform/ops-servers');
+
+export interface CreateOpsServerBody {
+  /** 服务器标识；留空则后端按名称自动生成（仅小写字母/数字/_/-，创建后不可改） */
+  serverKey?: string;
+  name: string;
+  host: string;
+  port?: number;
+  username?: string;
+  description?: string;
+  /** 分类/标签：必填（组织必选外的必选属性） */
+  category: string;
+  /** 系统类型：选填，空串=未填（随目录下发 spoke 供 AI 识别环境） */
+  osType?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+  /** 归属组织 id：必填（组织必须，>0） */
+  orgId: number;
+  /** 归属项目 id：可选标记（0 = 不限定项目） */
+  projectId: number;
+  /** 登录密码（可空；非空则加密落库并随目录下发 spoke 供临时运维直连） */
+  password?: string;
+}
+
+export const createOpsServer = (body: CreateOpsServerBody) =>
+  request<OpsServerDto>('POST', '/api/platform/ops-servers', body);
+
+/** 部分更新：serverKey 创建后不可改（不提交）；orgId/projectId 不传不改（组织必须，orgId 传 0 会被服务端拒绝；projectId 传 0=清除项目归属/不限定）；password 不传=保持原密码 */
+export interface UpdateOpsServerBody {
+  name?: string;
+  host?: string;
+  port?: number;
+  username?: string;
+  description?: string;
+  /** 分类/标签：不传不改；传空串=清除标注 */
+  category?: string;
+  /** 系统类型：空串=未填（表单始终提交，传空串即清除） */
+  osType?: string;
+  sortOrder?: number;
+  enabled?: boolean;
+  orgId?: number;
+  projectId?: number;
+  /** 登录密码：不传 = 保持原密码；空串 = 清除（spoke 回退本地录入凭证） */
+  password?: string;
+}
+
+export const updateOpsServer = (id: number, body: UpdateOpsServerBody) =>
+  request<OpsServerDto>('PUT', `/api/platform/ops-servers/${id}`, body);
+
+export const deleteOpsServer = (id: number) => request<void>('DELETE', `/api/platform/ops-servers/${id}`);
+
+/** 服务器用户时效授权清单（含已过期历史行） */
+export const listOpsServerGrants = (serverId: number) =>
+  request<OpsServerGrantDto[]>('GET', `/api/platform/ops-servers/${serverId}/grants`);
+
+/** 新增/续期授权：同用户重复提交=续期（服务端按 serverId+userId upsert） */
+export const createOpsServerGrant = (serverId: number, userId: number, validUntil: string) =>
+  request<OpsServerGrantDto>('POST', `/api/platform/ops-servers/${serverId}/grants`, {userId, validUntil});
+
+/** 撤销授权 */
+export const deleteOpsGrant = (grantId: number) => request<void>('DELETE', `/api/platform/ops-grants/${grantId}`);
+
+/** 服务器命令执行记录分页查询（按 executedAt 倒序；items/total/page/size 形状） */
+export const listOpsServerCommandLogs = (serverId: number, page: number, size: number) => {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('size', String(size));
+  return request<OpsCommandLogPage>('GET', `/api/platform/ops-servers/${serverId}/command-logs?${params.toString()}`);
+};

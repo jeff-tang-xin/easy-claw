@@ -48,6 +48,13 @@ public class WorkspaceEntity {
     @Builder.Default
     private String type = "single";
 
+    /**
+     * 归属的 hub 项目（cloud 模式）：cloud 模式下创建工作区时必选并随同步请求携带，
+     * hub 端据此把知识库/黑板数据归属到项目；本地模式恒 null。ddl-auto:update 自动加列。
+     */
+    @Column(name = "project_id")
+    private Long projectId;
+
     @Column(name = "last_accessed_at")
     private Instant lastAccessedAt;
     

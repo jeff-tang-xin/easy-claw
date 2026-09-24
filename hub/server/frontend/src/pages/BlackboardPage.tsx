@@ -15,7 +15,9 @@ interface Props {
 }
 
 /**
- * 项目共享黑板（A4）：追加型记录本，团队共享，按项目归类。
+ * 项目共享黑板（A4，V24 统一）：追加型记录本，团队共享，按项目归类。
+ * 同一块板含两类来源：platform（平台用户手写）与 workspace（spoke AI Agent 云同步写入，
+ * authorUserId=0 占位、带来源工作区与条目类型）——人类记录 Agent 可见，Agent 记录人类可见。
  * 活跃条目 + 追加 + 归档（状态标签，幂等）；归档列表单独查看，可取消归档。
  * 归档 / 取消归档权限：作者本人或组织 owner/admin（服务端强制校验，按钮按同口径显隐）。
  */
@@ -84,7 +86,7 @@ export default function BlackboardPage({project, role, meUserId}: Props) {
     }
   };
 
-  /** 归档 / 取消归档权限：作者本人或组织 owner/admin（与服务端口径一致）。 */
+  /** 归档 / 取消归档权限：作者本人或组织 owner/admin（与服务端口径一致；Agent 条目仅 owner/admin）。 */
   const canArchive = (entry: BlackboardEntryDto) =>
     role === 'owner' || role === 'admin' || entry.authorUserId === meUserId;
 
@@ -135,7 +137,17 @@ export default function BlackboardPage({project, role, meUserId}: Props) {
               <li key={entry.id} className="bb-item">
                 <div className="bb-content">{entry.content}</div>
                 <div className="bb-meta">
-                  <span>{entry.authorUsername ?? `#${entry.authorUserId}`}</span>
+                  {entry.source === 'workspace' ? (
+                    <>
+                      <span className="doc-version-tag" title={`来源工作区：${entry.sourceWorkspaceId ?? '—'}`}>
+                        Agent
+                      </span>
+                      {entry.entryType && <span className="doc-version-tag">{entry.entryType}</span>}
+                      <span className="text-muted">{entry.sourceWorkspaceId ?? '—'}</span>
+                    </>
+                  ) : (
+                    <span>{entry.authorUsername ?? `#${entry.authorUserId}`}</span>
+                  )}
                   <span className="doc-meta-dot">·</span>
                   <span>{entry.createdAt ? new Date(entry.createdAt).toLocaleString() : '—'}</span>
                   {!showArchives && canArchive(entry) && (

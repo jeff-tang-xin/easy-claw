@@ -41,13 +41,13 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("记录本不存在时返回 null，不抛异常")
     void missingBookReturnsNull(@TempDir Path root) {
-        assertNull(new BlackboardStore().archiveBook(ws(root), "nope"));
+        assertNull(new LocalBlackboardStore().archiveBook(ws(root), "nope"));
     }
 
     @Test
     @DisplayName("归档后原文件消失、归档文件保留原内容")
     void archivePreservesContent(@TempDir Path root) throws IOException {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "保留我");
 
         Path original = bbDir(root).resolve("s1.jsonl");
@@ -68,7 +68,7 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("归档后 seq 从 1 重新开始")
     void seqRestartsAfterArchive(@TempDir Path root) {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "第一条");
         store.append(ws(root), "s1", "main", "note", "第二条");
 
@@ -86,7 +86,7 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("归档后归档本仍出现在清单，带 archived 标记与归档时间，且可只读回看")
     void archivedBookRemainsVisibleAndReadable(@TempDir Path root) throws IOException {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "历史内容");
         String archivedName = store.archiveBook(ws(root), "s1");
 
@@ -107,7 +107,7 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("活跃本与归档本同基础 key 时并存且各自可定位")
     void activeAndArchivedCoexist(@TempDir Path root) {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "旧");
         store.archiveBook(ws(root), "s1");
         store.append(ws(root), "s1", "main", "note", "新");
@@ -132,7 +132,7 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("归档本拒绝再追加（返回失败说明且内容不变）")
     void archivedBookRejectsAppend(@TempDir Path root) {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "旧");
         String archivedName = store.archiveBook(ws(root), "s1");
         String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
@@ -149,7 +149,7 @@ class BlackboardArchiveTest {
     @Test
     @DisplayName("归档本拒绝二次归档")
     void archivedBookRejectsReArchive(@TempDir Path root) {
-        BlackboardStore store = new BlackboardStore();
+        BlackboardStore store = new LocalBlackboardStore();
         store.append(ws(root), "s1", "main", "note", "旧");
         String archivedName = store.archiveBook(ws(root), "s1");
         String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());

@@ -17,6 +17,13 @@ public final class AppConstants {
     /** 历史版本使用的旧用户 ID，仅用于启动迁移与清理。 */
     public static final String LEGACY_USER_ID = "default-user";
 
+    /**
+     * 默认运维工作区固定 ID（前端写死使用，不允许用户创建/删除）。
+     * <p>对应唯一的运维 workspace：路径 {@code ~/.easyClaw/ops}、type=ops、
+     * 默认绑定内置运维场景（ops），由后端启动时自动初始化。
+     */
+    public static final String DEFAULT_OPS_WORKSPACE_ID = "default-ops";
+
     private AppConstants() {
     }
 }

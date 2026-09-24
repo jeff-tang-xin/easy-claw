@@ -356,14 +356,15 @@ public class KnowledgeService {
     private static KnowledgeItemListItemDto toListItem(KnowledgeItemEntity d, Map<Long, String> names) {
         return new KnowledgeItemListItemDto(d.getId(), d.getProjectId(), d.getTopic(), d.getSummary(),
                 d.getVersion(), d.getStatus(), d.getOwnerUserId(), names.get(d.getOwnerUserId()),
-                d.getUpdatedBy(), names.get(d.getUpdatedBy()), ldt(d.getUpdatedAt()), d.getEmbeddingStatus());
+                d.getUpdatedBy(), names.get(d.getUpdatedBy()), ldt(d.getUpdatedAt()), d.getEmbeddingStatus(),
+                d.getSource(), d.getSourceWorkspaceId());
     }
 
     private static KnowledgeItemDto toDto(KnowledgeItemEntity d, Map<Long, String> names) {
         return new KnowledgeItemDto(d.getId(), d.getProjectId(), d.getTopic(), d.getSummary(), d.getContent(),
                 d.getVersion(), d.getStatus(), d.getOwnerUserId(), names.get(d.getOwnerUserId()),
                 d.getUpdatedBy(), names.get(d.getUpdatedBy()), ldt(d.getCreatedAt()), ldt(d.getUpdatedAt()),
-                d.getEmbeddingStatus());
+                d.getEmbeddingStatus(), d.getSource(), d.getSourceWorkspaceId());
     }
 
     private static LocalDateTime ldt(Instant instant) {

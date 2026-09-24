@@ -35,7 +35,8 @@ public class MemorySettingsEntity {
     @Column(name = "user_id", unique = true, nullable = false, length = 64)
     private String userId;
 
-    /** 上下文压缩触发窗（tokens）。顶到即压缩前半截为摘要并 offload。默认 48000。 */
+    /** workspace 记忆注入预算（tokens）：MEMORY.md 内容超出此预算时按 token 裁剪注入系统提示。
+     *  默认 48000。⚠ 不触发对话压缩——压缩由 agentscope.agent.compaction-* 决定。 */
     @Column(name = "context_window_tokens")
     private Integer contextWindowTokens;
 

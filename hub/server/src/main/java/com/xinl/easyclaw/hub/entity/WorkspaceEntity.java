@@ -33,4 +33,11 @@ public class WorkspaceEntity extends BaseEntity {
     /** active|archived */
     @Column(nullable = false, length = 20)
     private String status = "active";
+
+    /**
+     * spoke 本地（solo）工作区绑定标识（V18）：同组织内唯一（部分索引 uk_workspace_spoke），
+     * null = 未绑定；绑定即建立 spoke 工作区 ↔ hub 项目的映射。
+     */
+    @Column(name = "spoke_workspace_id", length = 128)
+    private String spokeWorkspaceId;
 }

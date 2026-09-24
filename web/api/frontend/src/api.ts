@@ -64,3 +64,39 @@ async function safeText(res: Response): Promise<string> {
     return '';
   }
 }
+
+// ==================== 云端项目绑定（工作区 ↔ hub 项目，S6-S7） ====================
+
+/** hub 项目（GET /api/manage/cloud/projects 元素） */
+export interface CloudProject {
+  id: number;
+  name: string;
+  slug: string;
+}
+
+/** 工作区与 hub 项目的绑定状态（GET /api/manage/workspaces/{id}/cloud-binding） */
+export interface CloudBinding {
+  bound: boolean;
+  projectId: number | null;
+  projectName: string | null;
+}
+
+/** hub 项目清单（OpsPage 绑定/换绑下拉数据源） */
+export function getCloudProjects(): Promise<CloudProject[]> {
+  return getJson<CloudProject[]>('/api/manage/cloud/projects');
+}
+
+/** 查询工作区当前的云端项目绑定 */
+export function getCloudBinding(workspaceId: string): Promise<CloudBinding> {
+  return getJson<CloudBinding>(`/api/manage/workspaces/${encodeURIComponent(workspaceId)}/cloud-binding`);
+}
+
+/** 绑定/换绑：把工作区绑定到指定 hub 项目 */
+export function bindCloudWorkspace(workspaceId: string, projectId: number): Promise<void> {
+  return postJson<void>(`/api/manage/workspaces/${encodeURIComponent(workspaceId)}/cloud-binding`, {projectId});
+}
+
+/** 解绑：解除工作区与 hub 项目的绑定 */
+export function unbindCloudWorkspace(workspaceId: string): Promise<void> {
+  return del<void>(`/api/manage/workspaces/${encodeURIComponent(workspaceId)}/cloud-binding`);
+}

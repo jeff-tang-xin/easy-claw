@@ -11,6 +11,8 @@ public interface ProjectRepository extends JpaRepository<ProjectEntity, Long> {
 
     List<ProjectEntity> findByOrgIdAndStatus(Long orgId, String status);
 
+    List<ProjectEntity> findByOrgIdAndStatusOrderByIdAsc(Long orgId, String status);
+
     Optional<ProjectEntity> findByOrgIdAndSlug(Long orgId, String slug);
 
     boolean existsByOrgIdAndSlug(Long orgId, String slug);

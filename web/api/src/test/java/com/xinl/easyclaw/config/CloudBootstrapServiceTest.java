@@ -49,6 +49,9 @@ class CloudBootstrapServiceTest {
     private final AtomicReference<String> flagsBody = new AtomicReference<>("[]");
     private final AtomicReference<String> toolsBody = new AtomicReference<>("[]");
     private final AtomicReference<String> lastFlagsAuth = new AtomicReference<>();
+    // 运维服务器下发端点（V18）：默认空数组，不影响既有用例
+    private final AtomicReference<String> opsBody = new AtomicReference<>("[]");
+    private final AtomicReference<Integer> opsStatus = new AtomicReference<>(200);
 
     @BeforeEach
     void startHub() throws IOException {
@@ -80,6 +83,14 @@ class CloudBootstrapServiceTest {
             byte[] bytes = toolsBody.get().getBytes(StandardCharsets.UTF_8);
             ex.getResponseHeaders().set("Content-Type", "application/json");
             ex.sendResponseHeaders(toolsStatus.get(), bytes.length);
+            try (OutputStream os = ex.getResponseBody()) {
+                os.write(bytes);
+            }
+        });
+        hub.createContext("/api/spoke/ops-servers", ex -> {
+            byte[] bytes = opsBody.get().getBytes(StandardCharsets.UTF_8);
+            ex.getResponseHeaders().set("Content-Type", "application/json");
+            ex.sendResponseHeaders(opsStatus.get(), bytes.length);
             try (OutputStream os = ex.getResponseBody()) {
                 os.write(bytes);
             }
@@ -231,6 +242,105 @@ class CloudBootstrapServiceTest {
 
         assertEquals(0, flagsCalls.get());
         assertEquals(0, toolsCalls.get());
+    }
+
+    // ---------- 配置视图按需刷新（cloud-config 读取驱动 spoke 自愈，S5 菜单下发配套） ----------
+
+    /** 从未 refresh（lastAttemptAt=null）时，读取 cloudConfig 触发首次刷新并建立快照。 */
+    @Test
+    void cloudConfigTriggersRefreshWhenNeverAttempted() {
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        CloudBootstrapService.CloudConfigView view = service.cloudConfig();
+
+        assertTrue(view.cloudMode());
+        assertEquals(1, bootstrapCalls.get());
+        assertEquals("Acme", service.status().orgName());
+    }
+
+    /** 节流生效：默认 60s 节流间隔内重复读取 cloudConfig 不重复刷新。 */
+    @Test
+    void cloudConfigSkipsRefreshWithinInterval() {
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+        assertEquals(1, bootstrapCalls.get());
+
+        service.cloudConfig();
+
+        assertEquals(1, bootstrapCalls.get());
+    }
+
+    /** 节流关闭（refresh-interval-seconds=0）：每次读取 cloudConfig 都触发刷新。 */
+    @Test
+    void cloudConfigRefreshesWhenIntervalZero() {
+        CloudProperties cloud = cloudProps();
+        cloud.setRefreshIntervalSeconds(0);
+        CloudBootstrapService service = new CloudBootstrapService(cloud);
+        service.refresh();
+        assertEquals(1, bootstrapCalls.get());
+
+        service.cloudConfig();
+        service.cloudConfig();
+
+        assertEquals(3, bootstrapCalls.get());
+    }
+
+    /** 本地模式（app-key 未配置）：读取 cloudConfig 不触发刷新（不触网）。 */
+    @Test
+    void cloudConfigLocalModeSkipsRefresh() {
+        CloudProperties cloud = cloudProps();
+        cloud.setAppKey(null);
+        CloudBootstrapService service = new CloudBootstrapService(cloud);
+        service.cloudConfig();
+
+        assertEquals(0, bootstrapCalls.get());
+    }
+
+    // ---------- 运维服务器下发（V18：projectId 归属过滤） ----------
+
+    @Test
+    void refreshParsesOpsServersWithProjectId() {
+        opsBody.set("""
+                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectId":5},
+                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectId":7}]""");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        List<SpokeOpsServerView> servers = service.snapshot().opsServers();
+        assertEquals(2, servers.size());
+        assertEquals("web-1", servers.get(0).serverKey());
+        assertEquals(2222, servers.get(0).port());
+        assertEquals(Long.valueOf(5L), servers.get(0).projectId());
+        assertEquals(Long.valueOf(7L), servers.get(1).projectId());
+    }
+
+    /** 旧 hub 未下发 projectId 字段 → null（不造 0 哨兵，前端按 null=未归属处理）。 */
+    @Test
+    void opsServerMissingProjectIdParsesAsNull() {
+        opsBody.set("[{\"serverKey\":\"s\",\"name\":\"n\",\"host\":\"h\",\"port\":22,\"username\":\"u\",\"description\":\"\"}]");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        assertNull(service.snapshot().opsServers().get(0).projectId());
+    }
+
+    // ---------- 运维服务器下发（V19：hub 解密密码随目录下发） ----------
+
+    /** V19：hub 已设密码 → 下发明文 password；未设 → null（不造空串）。 */
+    @Test
+    void refreshParsesOpsServerPassword() {
+        opsBody.set("""
+                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectId":5,"password":"s3cret"},
+                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectId":7}]""");
+        CloudBootstrapService service = new CloudBootstrapService(cloudProps());
+        service.refresh();
+
+        assertTrue(service.isAvailable());
+        List<SpokeOpsServerView> servers = service.snapshot().opsServers();
+        assertEquals(2, servers.size());
+        assertEquals("s3cret", servers.get(0).password());
+        assertNull(servers.get(1).password());
     }
 
     // ---------- providers 表条目注册（复刻 cloud profile 供给形态，与快照解耦） ----------

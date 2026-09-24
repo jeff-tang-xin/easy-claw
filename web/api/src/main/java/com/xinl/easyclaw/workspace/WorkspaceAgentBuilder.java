@@ -16,6 +16,7 @@ import com.xinl.easyclaw.workspace.shell.SafeShellFilesystemSpec;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.model.ExecutionConfig;
 import io.agentscope.core.model.Model;
+import io.agentscope.core.model.ModelContextWindows;
 import io.agentscope.core.model.ModelRegistry;
 import io.agentscope.core.permission.PermissionBehavior;
 import io.agentscope.core.permission.PermissionContextState;
@@ -323,7 +324,7 @@ public class WorkspaceAgentBuilder {
                 //  ToolUseBlock，导致框架检测到 pending 并生成孤儿 ToolResultBlock。
                 //  该删除逻辑已移除——改为在 AgentService.purgePollutedContext 里为悬空
                 //  tool_call 就地补配对结果，不再删消息，孤儿的源头随之消失。）
-                .compaction(buildCompactionConfig(agentCfg))
+                .compaction(buildCompactionConfig(agentCfg, agentModel))
                 // 工具结果淘汰：单结果超 40K 字符时写入磁盘，上下文仅留 2K 预览
                 // Harness 默认 80K 才淘汰，这里收紧更早触发，省出更多上下文空间
                 .toolResultEviction(ToolResultEvictionConfig.builder()
@@ -344,11 +345,13 @@ public class WorkspaceAgentBuilder {
                 .transcriptStore(transcriptStore)
                 .enablePlanMode(false)
                 .enableAgentTracingLog(false)
-                // 上下文压缩绝对上限（CompactionMiddleware 第 4 参）：用户级配置，默认 48K。
-                // 历史硬编码 16K——yml triggerTokens 默认 100K 永远摸不到，实际触发全由此值
-                // 决定；16K 对长会话过小，每几轮压缩一次（每次压缩 = 摘要 + 提取两次额外
-                // 模型调用），且模型可见近期原文过短、长会话"变笨"。
-                 .maxContextTokens(memorySettings.getContextWindowTokens())
+                // workspace 记忆注入预算（WorkspaceContextMiddleware）：MEMORY.md 内容超出
+                // 此预算时按 token 裁剪注入，避免记忆段撑爆系统提示。用户级配置，默认 48K。
+                // ⚠ 注意：此值与对话压缩（compaction）触发无关——压缩触发由上方
+                //   buildCompactionConfig 的 triggerMessages/triggerTokens 决定。历史注释
+                //   曾误写为「CompactionMiddleware 第 4 参」，实为 WorkspaceContextMiddleware
+                //   构造参，已修正，避免后人误以为调它能改变压缩频率。
+                .maxContextTokens(memorySettings.getContextWindowTokens())
                 // 横切逻辑迁移：两个 middleware 均已正式接管对应职责，
                 // AgentService 中的旧实现已在同一提交内删除（file_changed 推送、
                 // 工具连续失败护栏），均经 AgentEventEmitter 发 CustomEvent。
@@ -418,23 +421,44 @@ public class WorkspaceAgentBuilder {
         return fsSpec;
     }
 
+    /** 窗口感知触发阈值下限：低于它一律按此值。128K 窗口模型的安全触发点（历史已验证）。 */
+    private static final int MIN_TRIGGER_TOKENS = 100_000;
+
+    /** 窗口感知触发阈值上限：防止 1M+ 窗口模型把对话撑到不健康的长度。 */
+    private static final int MAX_TRIGGER_TOKENS = 300_000;
+
+    /** 窗口感知触发预留：系统提示（AGENTS.md/MEMORY.md/skills/工具定义）+ 输出预算，
+     *  窗口减去它才是「对话部分的触发点」。估算本身偏高（TokenCounterUtil 2.5 字符/token），
+     *  预留不足会让 200K 模型在满窗边缘触发，故取 50K 留足余量。 */
+    private static final int WINDOW_RESERVED_TOKENS = 50_000;
+
     /**
      * 上下文自动压缩（参数可在 application.yml 的 agentscope.agent.* 调整）。
      * <p>
      * 触发条件（OR 关系，任一满足即压缩）：
      * <ul>
-     *   <li>消息数 ≥ triggerMessages（默认 120；工具调用一轮至少占 2 条消息，
-     *       阈值太低/保留太少会让 Agent 忘记任务目标，出现"不知道自己在做什么"）</li>
-     *   <li>token 数 ≥ triggerTokens（默认 100K，防长工具结果撑爆窗口）</li>
+     *   <li>消息数 ≥ triggerMessages（默认 300；工具调用一轮至少占 2 条消息，并行时更多，
+     *       阈值太低会让 Agent 忘记任务目标，出现"不知道自己在做什么"）</li>
+     *   <li>token 数 ≥ triggerTokens（默认 0 = 按模型窗口自动计算：窗口 - 50K 预留，
+     *       夹在 [100K, 300K]；查不到模型窗口（cloud 别名/未收录模型）回落 100K 兜底，
+     *       防长工具结果撑爆窗口）</li>
      * </ul>
-     * 压缩后保留最近 keepMessages 条消息 / keepTokens，reserved 预留给模型输出。
+     * 压缩后保留最近 keepMessages 条消息 / keepTokens（默认 40K），reserved 预留给模型输出。
      * 另外 PruneConfig 默认 protectTokens=40K / minimumTokens=20K，会在压缩前
      * 先把老工具结果输出裁剪到 2K 字符。
      */
-    private CompactionConfig buildCompactionConfig(AgentScopeProperties.Agent agentCfg) {
+    private CompactionConfig buildCompactionConfig(AgentScopeProperties.Agent agentCfg, Model agentModel) {
+        long configured = agentCfg.getCompactionTriggerTokens();
+        int triggerTokens = configured > 0
+                ? (int) configured
+                : resolveWindowAwareTriggerTokens(agentModel);
+        log.info("Compaction config: triggerMessages={}, triggerTokens={} (configured={}, model={}), keepTokens={}",
+                agentCfg.getCompactionTriggerMessages(), triggerTokens, configured,
+                agentModel != null ? agentModel.getModelName() : "?",
+                agentCfg.getCompactionKeepTokens());
         return CompactionConfig.builder()
                 .triggerMessages(agentCfg.getCompactionTriggerMessages())
-                .triggerTokens((int) agentCfg.getCompactionTriggerTokens())
+                .triggerTokens(triggerTokens)
                 .keepMessages(agentCfg.getCompactionKeepMessages())
                 .keepTokens((int) agentCfg.getCompactionKeepTokens())
                 .reserved((int) agentCfg.getCompactionReservedTokens())
@@ -446,6 +470,49 @@ public class WorkspaceAgentBuilder {
                 .flushBeforeCompact(false)
                 .offloadBeforeCompact(true)
                 .build();
+    }
+
+    /** 按模型 context window 计算压缩触发阈值（包私有可见性供单测）：{@code clamp(窗口 - 50K 预留, 100K, 300K)}。
+     * 模型名来自 {@link Model#getModelName()}（纯模型名，或带 {@code provider:} 前缀），
+     * 用 {@link ModelContextWindows} 内置窗口表匹配；查不到（cloud 别名、未收录模型）
+     * 返回 0，由调用方回落配置值（默认 0 → 100K 兜底）。
+     */
+    static int resolveWindowAwareTriggerTokens(Model model) {
+        if (model == null) {
+            return 0;
+        }
+        String modelName = model.getModelName();
+        if (modelName == null || modelName.isBlank()) {
+            return 0;
+        }
+        int window = lookupContextWindow(modelName);
+        if (window <= 0) {
+            log.debug("Compaction triggerTokens: 模型 {} 未收录窗口，回落配置值", modelName);
+            return 0;
+        }
+        int computed = window - WINDOW_RESERVED_TOKENS;
+        return Math.max(MIN_TRIGGER_TOKENS, Math.min(MAX_TRIGGER_TOKENS, computed));
+    }
+
+    /** 在 ModelContextWindows 各 provider 表中按模型名前缀匹配窗口（包私有可见性供单测；表间前缀互不重叠，取首个命中）。 */
+    static int lookupContextWindow(String modelName) {
+        int idx = modelName.indexOf(':');
+        String bare = (idx > 0 ? modelName.substring(idx + 1) : modelName).trim();
+        for (Map<String, Integer> table : List.of(
+                ModelContextWindows.DASHSCOPE,
+                ModelContextWindows.OPENAI,
+                ModelContextWindows.DEEPSEEK,
+                ModelContextWindows.GLM,
+                ModelContextWindows.MINIMAX,
+                ModelContextWindows.KIMI,
+                ModelContextWindows.ANTHROPIC,
+                ModelContextWindows.GEMINI)) {
+            int window = ModelContextWindows.lookup(bare, table);
+            if (window > 0) {
+                return window;
+            }
+        }
+        return 0;
     }
 
     /**

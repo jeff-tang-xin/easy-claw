@@ -110,6 +110,6 @@ class ChatWebSocketHandlerTest {
 
     private static CloudBootstrapService.CloudSnapshot snapshot(Map<String, Boolean> flags) {
         return new CloudBootstrapService.CloudSnapshot("Acme", "acme", List.of(), List.of(),
-                flags, Set.of(), Instant.now());
+                flags, Set.of(), List.of(), List.of(), List.of(), Instant.now());
     }
 }

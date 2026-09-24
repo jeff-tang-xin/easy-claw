@@ -145,10 +145,10 @@ class ScenarioServiceBindingTest {
     void allAgents应包含main并带展示名与主控标记() {
         List<java.util.Map<String, String>> agents = service.allAgents();
 
-        assertThat(agents).hasSize(7);
+        assertThat(agents).hasSize(8);
         List<String> ids = agents.stream().map(a -> a.get("agentId")).toList();
         assertThat(ids).contains("main", "coder", "reviewer", "planner",
-                "researcher", "code-expert", "file-expert");
+                "researcher", "code-expert", "file-expert", "ops");
 
         java.util.Map<String, String> main = agents.stream()
                 .filter(a -> "main".equals(a.get("agentId"))).findFirst().orElseThrow();

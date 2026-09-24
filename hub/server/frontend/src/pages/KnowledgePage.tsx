@@ -1,4 +1,4 @@
-import {useCallback, useEffect, useState} from 'react';
+import {Fragment, useCallback, useEffect, useState} from 'react';
 import {Route, Routes, useNavigate, useParams} from 'react-router-dom';
 import {
   ApiRequestError,
@@ -193,6 +193,7 @@ function KnowledgeList({project, role, meUserId}: Props) {
                 <th>主题</th>
                 <th>摘要</th>
                 <th>版本</th>
+                <th>来源</th>
                 <th>维护者</th>
                 <th>更新于</th>
                 <th />
@@ -210,7 +211,24 @@ function KnowledgeList({project, role, meUserId}: Props) {
                   <td>
                     <span className="doc-version-tag">v{item.version}</span>
                   </td>
-                  <td>{item.updatedByUsername ?? item.ownerUsername ?? `#${item.ownerUserId}`}</td>
+                  <td>
+                    {item.source === 'workspace' ? (
+                      <span
+                        className="badge badge-current"
+                        style={{whiteSpace: 'nowrap'}}
+                        title={`spoke 工作区 ${item.sourceWorkspaceId ?? ''} 同步写入`}
+                      >
+                        工作区
+                      </span>
+                    ) : (
+                      <span className="text-muted">平台</span>
+                    )}
+                  </td>
+                  <td>
+                    {item.source === 'workspace'
+                      ? 'Agent'
+                      : (item.updatedByUsername ?? item.ownerUsername ?? `#${item.ownerUserId}`)}
+                  </td>
                   <td className="text-muted">
                     {item.updatedAt ? new Date(item.updatedAt).toLocaleString() : '—'}
                   </td>

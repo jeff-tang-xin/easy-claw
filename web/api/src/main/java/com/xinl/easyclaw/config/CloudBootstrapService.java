@@ -19,6 +19,9 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 云端（hub）bootstrap 客户端：spoke 持 appkey 调 {@code GET /api/spoke/bootstrap}
@@ -107,11 +110,29 @@ public class CloudBootstrapService {
             // 对应维度按缺省放行（flags 空表 → attachmentsAllowed=true；disabledTools 空集）
             Map<String, Boolean> flags = fetchFlags(hubUrl, appKey.trim());
             Set<String> disabledTools = fetchDisabledTools(hubUrl, appKey.trim());
-            snapshot = parse(response.body(), flags, disabledTools);
+            // 配置下发（S5）：menus / ops-servers / shell-commands 三维度并行拉取，
+            // 各自独立 try/catch，失败 → 该维度空值，不阻塞 bootstrap（与 fetchFlags 同模式）
+            List<SpokeMenuNodeView> menus;
+            List<SpokeOpsServerView> opsServers;
+            List<SpokeShellCommandView> shellCommands;
+            try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+                CompletableFuture<List<SpokeMenuNodeView>> menusFuture =
+                        CompletableFuture.supplyAsync(() -> fetchMenus(hubUrl, appKey.trim()), executor);
+                CompletableFuture<List<SpokeOpsServerView>> opsFuture =
+                        CompletableFuture.supplyAsync(() -> fetchOpsServers(hubUrl, appKey.trim()), executor);
+                CompletableFuture<List<SpokeShellCommandView>> shellFuture =
+                        CompletableFuture.supplyAsync(() -> fetchShellCommands(hubUrl, appKey.trim()), executor);
+                menus = menusFuture.join();
+                opsServers = opsFuture.join();
+                shellCommands = shellFuture.join();
+            }
+            snapshot = parse(response.body(), flags, disabledTools, menus, opsServers, shellCommands);
             lastError = null;
-            log.info("cloud bootstrap 成功：org={}，可用模型 {} 个，权限 {} 个，flags {} 个，禁用工具 {} 个",
+            log.info("cloud bootstrap 成功：org={}，可用模型 {} 个，权限 {} 个，flags {} 个，禁用工具 {} 个，"
+                            + "菜单 {} 个，运维服务器 {} 个，shell 白名单 {} 条",
                     snapshot.orgName(), snapshot.models().size(), snapshot.permissions().size(),
-                    snapshot.flags().size(), snapshot.disabledTools().size());
+                    snapshot.flags().size(), snapshot.disabledTools().size(),
+                    snapshot.menus().size(), snapshot.opsServers().size(), snapshot.shellCommands().size());
         } catch (Exception e) {
             lastError = "hub 不可达：" + e.getClass().getSimpleName() + " " + e.getMessage();
             log.warn("cloud bootstrap 失败：{}", lastError);
@@ -155,7 +176,72 @@ public class CloudBootstrapService {
                 lastAttemptAt);
     }
 
-    private static CloudSnapshot parse(String body, Map<String, Boolean> flags, Set<String> disabledTools)
+    /**
+     * 前端配置下发视图（S5 配置上收）：cloud 模式返回 hub 下发的菜单树/运维服务器/shell 白名单；
+     * 本地模式（无快照）cloudMode=false 且三个数组恒为空，前端据此回退本地渲染。
+     * <p>
+     * 读取前先做按需刷新（{@link #refreshIfStale()}）：spoke 启动时 hub 未就绪（旧构建/网络抖动）
+     * 导致快照失败或三维度为空后，前端轮询本端点即可驱动 spoke 自动跟上 hub 配置，无需重启。
+     */
+    public CloudConfigView cloudConfig() {
+        refreshIfStale();
+        CloudSnapshot s = snapshot;
+        boolean available = s != null;
+        // 密码不再下发浏览器：快照仅服务端持有（connect 按 serverKey 取用），下发视图 password 置 null，
+        // 仅保留 hasPassword 布尔供前端预判「一键连接 vs 当次手输」。
+        // 此前明文随 30s 轮询反复传输并常驻浏览器内存，是凭证最大的暴露面
+        List<SpokeOpsServerView> servers = s == null ? List.of()
+                : s.opsServers().stream()
+                        .map(o -> new SpokeOpsServerView(o.serverKey(), o.name(), o.host(), o.port(),
+                                o.username(), o.description(), o.projectId(), null, o.hasPassword(), o.osType()))
+                        .toList();
+        return new CloudConfigView(
+                available,
+                available,
+                s == null ? List.of() : s.menus(),
+                servers,
+                s == null ? List.of() : s.shellCommands());
+    }
+
+    /**
+     * 按 serverKey 查 hub 下发的运维服务器（connect 用）。
+     * host/port/username/password 全部以快照为准——前端只传 serverKey，不采信其传参。
+     */
+    public java.util.Optional<SpokeOpsServerView> findOpsServer(String serverKey) {
+        CloudSnapshot s = snapshot;
+        if (s == null || serverKey == null || serverKey.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        return s.opsServers().stream()
+                .filter(o -> serverKey.equals(o.serverKey()))
+                .findFirst();
+    }
+
+    /**
+     * 按需刷新（惰性自愈）：cloud 已配置且距上次尝试超过节流间隔（{@code cloud.refresh-interval-seconds}，
+     * 默认 60s，0=每次读取都刷新）时同步 refresh。启动时 hub 不可达/配置未就绪的故障在 hub 恢复后
+     * 自动消失——前端轮询 cloud-config（30s）驱动本方法，节流保证不会高频打 hub。
+     * 本地模式 / hub-url 缺失直接跳过（无远端可刷）。
+     */
+    private void refreshIfStale() {
+        String appKey = cloud.getAppKey();
+        if (appKey == null || appKey.isBlank()) {
+            return;
+        }
+        if (cloud.getHubUrl() == null || cloud.getHubUrl().isBlank()) {
+            return;
+        }
+        long intervalSeconds = cloud.getRefreshIntervalSeconds();
+        Duration interval = intervalSeconds > 0 ? Duration.ofSeconds(intervalSeconds) : Duration.ZERO;
+        Instant last = lastAttemptAt;
+        if (last == null || Duration.between(last, Instant.now()).compareTo(interval) >= 0) {
+            refresh();
+        }
+    }
+
+    private static CloudSnapshot parse(String body, Map<String, Boolean> flags, Set<String> disabledTools,
+                                       List<SpokeMenuNodeView> menus, List<SpokeOpsServerView> opsServers,
+                                       List<SpokeShellCommandView> shellCommands)
             throws Exception {
         JsonNode root = MAPPER.readTree(body);
         String orgName = root.path("org").path("name").asText("");
@@ -175,7 +261,7 @@ public class CloudBootstrapService {
             }
         }
         return new CloudSnapshot(orgName, orgSlug, List.copyOf(models), List.copyOf(permissions),
-                flags, disabledTools, Instant.now());
+                flags, disabledTools, menus, opsServers, shellCommands, Instant.now());
     }
 
     /** 拉取生效态 feature flags（flagKey → enabled）；任何失败返回空表（缺省放行语义） */
@@ -220,6 +306,104 @@ public class CloudBootstrapService {
         }
     }
 
+    /** 拉取 hub 下发的菜单树（path 空 = 分组节点）；任何失败返回空表（前端回退本地渲染） */
+    private List<SpokeMenuNodeView> fetchMenus(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/menus");
+            if (body == null) {
+                return List.of();
+            }
+            return parseMenus(MAPPER.readTree(body));
+        } catch (Exception e) {
+            log.warn("cloud menus 拉取失败（菜单置空）：{}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 拉取 hub 下发的运维服务器清单；任何失败返回空表 */
+    private List<SpokeOpsServerView> fetchOpsServers(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/ops-servers");
+            if (body == null) {
+                return List.of();
+            }
+            List<SpokeOpsServerView> out = new ArrayList<>();
+            for (JsonNode n : MAPPER.readTree(body)) {
+                out.add(new SpokeOpsServerView(
+                        n.path("serverKey").asText(""),
+                        n.path("name").asText(""),
+                        n.path("host").asText(""),
+                        n.path("port").asInt(22),
+                        n.path("username").asText(""),
+                        n.path("description").asText(""),
+                        // V18：归属项目 id；旧 hub 未下发该字段时保持 null（不造 0 哨兵）
+                        n.hasNonNull("projectId") ? n.path("projectId").asLong() : null,
+                        // V19：hub 解密后随目录下发；未设置/旧 hub 下发时保持 null
+                        n.hasNonNull("password") ? n.path("password").asText() : null,
+                        // V24：是否配置了密码（供前端预判一键连接；明文本身不下发浏览器）
+                        n.hasNonNull("password") && !n.path("password").asText().isBlank(),
+                        // V24：操作系统类型；旧 hub 未下发该字段时保持 null（容错）
+                        n.hasNonNull("osType") ? n.path("osType").asText() : null));
+            }
+            return List.copyOf(out);
+        } catch (Exception e) {
+            log.warn("cloud ops-servers 拉取失败（运维服务器置空）：{}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 拉取 hub 下发的 shell 命令白名单（subcommands 空 = 整命令放行）；任何失败返回空表 */
+    private List<SpokeShellCommandView> fetchShellCommands(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/shell-commands");
+            if (body == null) {
+                return List.of();
+            }
+            List<SpokeShellCommandView> out = new ArrayList<>();
+            for (JsonNode n : MAPPER.readTree(body)) {
+                out.add(new SpokeShellCommandView(
+                        n.path("cmd").asText(""),
+                        stringList(n.path("subcommands"))));
+            }
+            return List.copyOf(out);
+        } catch (Exception e) {
+            log.warn("cloud shell-commands 拉取失败（白名单置空）：{}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 递归解析菜单树；字段缺失按空串/空表处理（分组节点 path 为空） */
+    private static List<SpokeMenuNodeView> parseMenus(JsonNode array) {
+        if (array == null || !array.isArray()) {
+            return List.of();
+        }
+        List<SpokeMenuNodeView> out = new ArrayList<>();
+        for (JsonNode n : array) {
+            out.add(new SpokeMenuNodeView(
+                    n.path("menuKey").asText(""),
+                    n.path("label").asText(""),
+                    n.path("icon").asText(""),
+                    n.path("path").asText(""),
+                    n.path("requiredPerm").asText(""),
+                    stringList(n.path("visibleRoles")),
+                    parseMenus(n.path("children"))));
+        }
+        return List.copyOf(out);
+    }
+
+    private static List<String> stringList(JsonNode array) {
+        if (array == null || !array.isArray()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (JsonNode n : array) {
+            if (n.isTextual()) {
+                out.add(n.asText());
+            }
+        }
+        return List.copyOf(out);
+    }
+
     /** 单个 spoke 目录端点 GET；非 200 或网络失败返回 null（由调用方按缺省语义处理） */
     private String fetchJson(String hubUrl, String appKey, String path) {
         try {
@@ -261,10 +445,23 @@ public class CloudBootstrapService {
         return t.length() <= 12 ? t : t.substring(0, 12);
     }
 
-    /** bootstrap 快照（不可变；整体替换发布）。flags=生效态功能开关；disabledTools=生效态为否的工具 key */
+    /**
+     * bootstrap 快照（不可变；整体替换发布）。
+     * flags=生效态功能开关；disabledTools=生效态为否的工具 key；
+     * menus/opsServers/shellCommands=hub 下发的配置面（S5 配置下发，失败维度为空表）。
+     */
     public record CloudSnapshot(String orgName, String orgSlug, List<String> models,
                                 List<String> permissions, Map<String, Boolean> flags,
-                                Set<String> disabledTools, Instant fetchedAt) {
+                                Set<String> disabledTools, List<SpokeMenuNodeView> menus,
+                                List<SpokeOpsServerView> opsServers,
+                                List<SpokeShellCommandView> shellCommands, Instant fetchedAt) {
+    }
+
+    /** cloud-config 端点响应（menu/opsServers/shellCommands 在本地模式下恒为空数组） */
+    public record CloudConfigView(boolean cloudMode, boolean available,
+                                  List<SpokeMenuNodeView> menu,
+                                  List<SpokeOpsServerView> opsServers,
+                                  List<SpokeShellCommandView> shellCommands) {
     }
 
     /** 设置页状态视图（attachmentsAllowed 供前端隐藏附件入口，spec §4.5） */

@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.api;
 
 import com.xinl.easyclaw.agent.AgentService;
+import com.xinl.easyclaw.config.CloudProperties;
 import com.xinl.easyclaw.permission.entity.PermissionRuleEntity;
 import com.xinl.easyclaw.tool.service.ToolPermissionPolicy;
 import com.xinl.easyclaw.workspace.*;
@@ -35,6 +36,8 @@ public class WorkspaceController {
     private final com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService;
     /** 会话↔worktree 挂钩：git worktree 的创建/挂载/移除（2026-09-14） */
     private final WorktreeService worktreeService;
+    /** cloud 模式判据（appKey 非空即 cloud）；归属 projectId 是 spoke 本地事实，不依赖 hub 绑定 */
+    private final CloudProperties cloudProperties;
 
     public WorkspaceController(WorkspaceManager workspaceManager,
                                SessionHistoryService sessionHistoryService,
@@ -43,7 +46,8 @@ public class WorkspaceController {
                                WorkspaceAgentBuilder agentBuilder,
                                com.xinl.easyclaw.scenario.service.ScenarioService scenarioService,
                                com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService,
-                               WorktreeService worktreeService) {
+                               WorktreeService worktreeService,
+                               CloudProperties cloudProperties) {
         this.workspaceManager = workspaceManager;
         this.sessionHistoryService = sessionHistoryService;
         this.agentService = agentService;
@@ -52,6 +56,7 @@ public class WorkspaceController {
         this.scenarioService = scenarioService;
         this.permissionRuleService = permissionRuleService;
         this.worktreeService = worktreeService;
+        this.cloudProperties = cloudProperties;
     }
 
     /**
@@ -59,9 +64,11 @@ public class WorkspaceController {
      *                     决定可绑定的场景类型（必须一致）。
      * @param scenarioName 场景标识名；前端为必填项，缺省时回退内置「通用编程」，
      *                     保证任何工作区创建后都处于明确的场景约束下
+     * @param projectId    归属的 hub 项目（cloud 模式必填，同步知识库/黑板时携带；
+     *                     本地模式忽略）
      */
     public record CreateWorkspaceRequest(String name, String description, String path,
-                                         String scenarioName, String type) {
+                                         String scenarioName, String type, Long projectId) {
     }
 
     public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
@@ -130,15 +137,35 @@ public class WorkspaceController {
     @PostMapping
     public WorkspaceContext create(@RequestBody CreateWorkspaceRequest req) {
         String type = WorkspaceManager.normalizeType(req.type());
+        // 运维工作区是系统内置唯一固定 workspace（自动初始化），不允许用户创建
+        if ("ops".equals(type)) {
+            throw new IllegalArgumentException("运维工作区由系统内置，不支持创建");
+        }
         String target = (req.scenarioName() == null || req.scenarioName().isBlank())
                 ? DEFAULT_SCENARIO_NAME : req.scenarioName().trim();
         // 建工作区前先校验「场景存在 + 类型匹配」：不满足直接 400，避免先落库一个
         // 半成品工作区再静默回退到错误类型的场景
         assertScenarioCompatible(target, type);
 
+        // cloud 模式（appKey 非空）：projectId 必选——知识库/黑板云同步需把数据归属到 hub 项目
+        boolean cloud = cloudProperties.getAppKey() != null && !cloudProperties.getAppKey().isBlank();
+        // 运维工作区只存在于 cloud 模式：服务器清单由 hub 下发，本地模式无运维服务器来源
+        if ("ops".equals(type) && !cloud) {
+            throw new IllegalArgumentException("运维工作区仅在 cloud（接入 hub）模式下可用，本地模式不支持创建");
+        }
+        if (cloud && req.projectId() == null) {
+            throw new IllegalArgumentException("cloud 模式创建 Workspace 必须关联一个 hub 项目（projectId 必填）");
+        }
+
         WorkspaceContext ctx = workspaceManager.createWorkspace(
                 com.xinl.easyclaw.config.AppConstants.DEFAULT_USER_ID,
                 req.name(), req.description(), req.path(), type);
+        if (cloud) {
+            // 归属 projectId 是 spoke 本地事实：本地落库即可，知识库/黑板云同步按调用时取用。
+            // 不向 hub 登记绑定——hub 端不维护 spoke workspace ↔ project 的反向映射，
+            // 同一 hub 项目可被多个 spoke 工作区绑定
+            workspaceManager.updateProjectId(ctx.getWorkspaceId(), req.projectId());
+        }
         scenarioService.activateByName(ctx.getWorkspaceId(), target);
         return ctx;
     }

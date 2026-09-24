@@ -28,6 +28,11 @@ public final class SystemHomePaths {
         return systemHome().resolve("subagents");
     }
 
+    /** 运维工作区根目录（type=ops 工作区的默认工作空间，按 workspaceId 分子目录） */
+    public static Path opsWorkspaceRoot() {
+        return systemHome().resolve("ops");
+    }
+
     /** 系统元数据库 */
     public static Path databaseFile() {
         return systemHome().resolve("ai-assistant.db");

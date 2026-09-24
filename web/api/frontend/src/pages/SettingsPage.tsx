@@ -91,10 +91,10 @@ function MemorySettingsCard() {
       {settings && (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 16 }}>
           <label style={fieldStyle}>
-            <span>上下文压缩窗（tokens）</span>
+            <span>工作区记忆注入预算（tokens）</span>
             <input type="number" min={1024} step={1024} value={settings.contextWindowTokens}
                    onChange={(e) => patch({ contextWindowTokens: num(e.target.value) })} />
-            <span className="hint">顶到即把前半截压缩为摘要，默认 48000</span>
+            <span className="hint">MEMORY.md 内容超出此预算时裁剪注入系统提示；不触发对话压缩，默认 48000</span>
           </label>
 
           <label style={fieldStyle}>

@@ -4,6 +4,7 @@ import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.agent.spi.AgentRegistry;
 import com.xinl.easyclaw.base.agent.EasyClawAgent;
 import com.xinl.easyclaw.config.CloudBootstrapService;
+import com.xinl.easyclaw.config.HubSpokeClient;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
@@ -16,6 +17,7 @@ import com.xinl.easyclaw.tools.SkillScriptTools;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.server.ResponseStatusException;
@@ -45,6 +47,7 @@ public class ManageController {
     private final MemorySettingsService memorySettingsService;
     private final WorkspaceManager workspaceManager;
     private final CloudBootstrapService cloudBootstrapService;
+    private final HubSpokeClient hubSpokeClient;
     private final SkillScriptTools skillScriptTools;
 
     public ManageController(AgentRegistry agentRegistry,
@@ -54,7 +57,8 @@ public class ManageController {
                             MemorySettingsService memorySettingsService,
                             WorkspaceManager workspaceManager,
                             CloudBootstrapService cloudBootstrapService,
-                            SkillScriptTools skillScriptTools) {
+                            SkillScriptTools skillScriptTools,
+                            HubSpokeClient hubSpokeClient) {
         this.agentRegistry = agentRegistry;
         this.toolService = toolService;
         this.toolRegistryService = toolRegistryService;
@@ -63,6 +67,7 @@ public class ManageController {
         this.workspaceManager = workspaceManager;
         this.cloudBootstrapService = cloudBootstrapService;
         this.skillScriptTools = skillScriptTools;
+        this.hubSpokeClient = hubSpokeClient;
     }
 
     // ================= Skills & 子 Agent =================
@@ -564,6 +569,105 @@ public class ManageController {
     @GetMapping("/settings/cloud-status")
     public CloudBootstrapService.CloudStatus cloudStatus() {
         return cloudBootstrapService.status();
+    }
+
+    /**
+     * 前端配置下发（S5 配置上收）：cloud 模式返回 hub 下发的菜单树/运维服务器/shell 白名单快照；
+     * 本地模式 cloudMode=false 且三个数组为空，前端据此回退本地渲染。
+     */
+    @GetMapping("/settings/cloud-config")
+    public CloudBootstrapService.CloudConfigView cloudConfig() {
+        return cloudBootstrapService.cloudConfig();
+    }
+
+    /**
+     * 手动刷新 bootstrap 快照并返回最新配置视图：hub 升级/配置变更后无需重启 spoke，
+     * 运维或前端主动触发一次即可（读取 cloud-config 本身也会按需自动刷新，本端点为显式手段）。
+     */
+    @PostMapping("/settings/cloud-config/refresh")
+    public CloudBootstrapService.CloudConfigView refreshCloudConfig() {
+        cloudBootstrapService.refresh();
+        return cloudBootstrapService.cloudConfig();
+    }
+
+    // ================= 云端项目与工作区绑定（S6-S7，hub spoke 端点代理） =================
+
+    /** 绑定请求体：把 spoke 工作区绑定到 hub 项目（projectId 是 spoke 本地事实） */
+    public record WorkspaceBindRequest(Long projectId) {}
+
+    /** spoke 本地绑定视图：与前端 CloudBinding 结构对齐（projectName 恒 null，前端回退显示 #id） */
+    public record CloudBindingView(boolean bound, Long projectId, String projectName) {}
+
+    /**
+     * hub 组织项目清单代理：透传 {@code GET /api/spoke/projects} 响应体（[{id,name,slug}]）。
+     * 原样透传而非转视图：hub 侧加字段时 spoke 无需同步改代码。
+     */
+    @GetMapping("/manage/cloud/projects")
+    public ResponseEntity<String> cloudProjects() {
+        return hubProxyGet("/api/spoke/projects");
+    }
+
+    /**
+     * 查询 spoke 工作区的 hub 项目绑定：读 spoke 本地 projectId（绑定是 spoke 端事实，hub 不维护）。
+     * projectName 恒为 null——前端按 {@code #projectId} 回退展示，避免为展示名再依赖 hub 可用性。
+     */
+    @GetMapping("/manage/workspaces/{workspaceId}/cloud-binding")
+    public CloudBindingView cloudBinding(@PathVariable String workspaceId) {
+        Long projectId = workspaceManager.getProjectId(workspaceId);
+        return new CloudBindingView(projectId != null, projectId, null);
+    }
+
+    /**
+     * 绑定/换绑 spoke 工作区到 hub 项目：仅更新 spoke 本地 projectId。
+     * 不向 hub 登记——同一 hub 项目可被多个 spoke 工作区绑定，hub 端不持有反向映射。
+     */
+    @PostMapping("/manage/workspaces/{workspaceId}/cloud-binding")
+    public CloudBindingView bindCloudWorkspace(@PathVariable String workspaceId,
+                                               @RequestBody WorkspaceBindRequest req) {
+        if (req == null || req.projectId() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "projectId 不能为空");
+        }
+        workspaceManager.updateProjectId(workspaceId, req.projectId());
+        return new CloudBindingView(true, req.projectId(), null);
+    }
+
+    /**
+     * 解除 spoke 工作区的 hub 项目绑定：仅清空 spoke 本地 projectId（hub 端无绑定可解）。
+     */
+    @DeleteMapping("/manage/workspaces/{workspaceId}/cloud-binding")
+    public CloudBindingView unbindCloudWorkspace(@PathVariable String workspaceId) {
+        workspaceManager.updateProjectId(workspaceId, null);
+        return new CloudBindingView(false, null, null);
+    }
+
+    /** hub GET 代理：2xx 透传响应体；失败按 {@link #callHub} 的规则映射为 HTTP 状态 */
+    private ResponseEntity<String> hubProxyGet(String pathWithQuery) {
+        String body = callHub(() -> hubSpokeClient.get(pathWithQuery));
+        return ResponseEntity.ok().contentType(MediaType.APPLICATION_JSON).body(body);
+    }
+
+    /**
+     * 执行 hub 调用，把 {@link HubSpokeClient.HubCallException} 映射为 HTTP 状态抛出：
+     * hub 返回了非 2xx → 透传其状态码（如 409 冲突原样给前端）；网络失败 / cloud 未配置
+     * （无状态码）→ 502 Bad Gateway。错误文案随 ResponseStatusException 进响应体
+     * （server.error.include-message=always）。
+     */
+    private <T> T callHub(HubCall<T> call) {
+        try {
+            return call.run();
+        } catch (HubSpokeClient.HubCallException e) {
+            HttpStatus status = e.statusCode() == null ? HttpStatus.BAD_GATEWAY
+                    : HttpStatus.resolve(e.statusCode());
+            if (status == null) {
+                status = HttpStatus.BAD_GATEWAY;
+            }
+            throw new ResponseStatusException(status, e.getMessage());
+        }
+    }
+
+    @FunctionalInterface
+    private interface HubCall<T> {
+        T run();
     }
 
     // ================= 记忆设置 =================

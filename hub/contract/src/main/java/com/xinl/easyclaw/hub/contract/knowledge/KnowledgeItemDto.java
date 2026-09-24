@@ -19,5 +19,7 @@ public record KnowledgeItemDto(
         String updatedByUsername,
         LocalDateTime createdAt,
         LocalDateTime updatedAt,
-        String embeddingStatus) {
+        String embeddingStatus,
+        String source,
+        String sourceWorkspaceId) {
 }

@@ -91,6 +91,8 @@ public class BlackboardService {
         e.setContent(req.content().trim());
         e.setAuthorUserId(requesterId);
         e.setStatus(STATUS_ACTIVE);
+        // V24 统一分本：平台条目固定 main 本（与 spoke 默认本一致，跨 source 共享同一块板）
+        e.setBookKey("main");
         entries.save(e);
         auditService.record(AuditModule.BLACKBOARD, "append_blackboard_entry", requesterId, p.getOrgId(),
                 "blackboard_entry", String.valueOf(e.getId()), "projectId=" + p.getId(), AuditModule.SUCCESS);
@@ -209,7 +211,8 @@ public class BlackboardService {
 
     private static BlackboardEntryDto toDto(BlackboardEntryEntity e, Map<Long, String> names) {
         return new BlackboardEntryDto(e.getId(), e.getProjectId(), e.getContent(), e.getAuthorUserId(),
-                names.get(e.getAuthorUserId()), e.getStatus(), ldt(e.getCreatedAt()), ldt(e.getUpdatedAt()));
+                names.get(e.getAuthorUserId()), e.getStatus(), ldt(e.getCreatedAt()), ldt(e.getUpdatedAt()),
+                e.getSource(), e.getSourceWorkspaceId(), e.getEntryType());
     }
 
     private static LocalDateTime ldt(Instant instant) {

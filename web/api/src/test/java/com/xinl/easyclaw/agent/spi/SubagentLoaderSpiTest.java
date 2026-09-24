@@ -26,7 +26,7 @@ class SubagentLoaderSpiTest {
     }
 
     @Test
-    @DisplayName("SPI 真的接进主链路：无 .md 目录时仍能装出 6 个内置子 Agent")
+    @DisplayName("SPI 真的接进主链路：无 .md 目录时仍能装出 7 个内置子 Agent")
     void spiDeclarationsReachMainPath() {
         List<SubagentDeclaration> decls =
                 loaderWithSpi().loadMerged(ScenarioBinding.EMPTY);
@@ -37,7 +37,7 @@ class SubagentLoaderSpiTest {
         assertThat(decls).extracting(SubagentDeclaration::getName)
                 .containsExactlyInAnyOrder(
                         "coder", "reviewer", "planner",
-                        "researcher", "code-expert", "file-expert");
+                        "researcher", "code-expert", "file-expert", "ops");
     }
 
     @Test

@@ -23,7 +23,7 @@ class CloudFeatureGateTest {
 
     private static CloudBootstrapService.CloudSnapshot snapshot(Map<String, Boolean> flags, Set<String> disabled) {
         return new CloudBootstrapService.CloudSnapshot("Acme", "acme", List.of(), List.of(),
-                flags, disabled, Instant.now());
+                flags, disabled, List.of(), List.of(), List.of(), Instant.now());
     }
 
     @Test

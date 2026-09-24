@@ -114,6 +114,13 @@ public class WorkspaceManager {
 
     public WorkspaceContext createWorkspace(String userId, String name, String description, String customPath,
                                             String type) {
+        String normalizedType = normalizeType(type);
+        // 运维工作区是后端唯一固定的默认 workspace（id=DEFAULT_OPS_WORKSPACE_ID，
+        // 启动时自动初始化），不允许用户创建——POST 入口已拦截，此处再兜底
+        if ("ops".equals(normalizedType)) {
+            throw new IllegalArgumentException("运维工作区由系统内置，不支持创建");
+        }
+
         if (workspaceRepository.existsByPath(customPath)) {
             throw new WorkspaceExceptions.WorkspacePathExistsException(
                     "目录已被占用: " + customPath + "，请选择其他目录");
@@ -139,7 +146,7 @@ public class WorkspaceManager {
         Path easyClawDir = workspacePath.resolve(".easyClaw");
         fileLayout.initialize(workspacePath, easyClawDir);
 
-        HarnessAgent agent = agentBuilder.build(workspaceId, name, workspacePath, easyClawDir, null, type);
+        HarnessAgent agent = agentBuilder.build(workspaceId, name, workspacePath, easyClawDir, null, normalizedType);
 
         WorkspaceContext context = WorkspaceContext.builder()
                 .workspaceId(workspaceId)
@@ -154,13 +161,13 @@ public class WorkspaceManager {
 
         workspaceCache.put(workspaceId, context);
 
-        saveWorkspaceMetadata(context, type);
+        saveWorkspaceMetadata(context, normalizedType);
 
         // 播种 AGENTS.md 模板与种子知识（幂等：已存在不覆盖；失败仅 warn，不影响创建结果）
         workspaceSeedService.seedWorkspace(workspacePath);
 
         log.info("Workspace 创建成功: id={}, path={}, model={}",
-                workspaceId, customPath, agentFactory.getModelId());
+                workspaceId, workspacePath, agentFactory.getModelId());
         return context;
     }
 
@@ -234,6 +241,7 @@ public class WorkspaceManager {
                 .createdAt(meta.getCreatedAt())
                 .lastAccessed(Instant.now())
                 .restored(true)
+                .projectId(meta.getProjectId())
                 .build();
     }
 
@@ -398,9 +406,39 @@ public class WorkspaceManager {
         return toSummary(saved);
     }
 
+    /**
+     * 读取工作区归属的 hub 项目 id（spoke 本地绑定事实）；工作区不存在抛 IllegalArgumentException。
+     */
+    public Long getProjectId(String workspaceId) {
+        return workspaceRepository.findById(workspaceId)
+                .map(WorkspaceEntity::getProjectId)
+                .orElseThrow(() -> new IllegalArgumentException("工作区不存在: " + workspaceId));
+    }
+
+    /**
+     * 更新工作区归属的 hub 项目（cloud 模式创建时落库；编辑弹窗可改绑）。
+     * 持久化实体并同步缓存中的 {@link WorkspaceContext}——知识库/黑板云同步按调用时取用，
+     * 无需重建 Agent。
+     */
+    @Transactional
+    public void updateProjectId(String workspaceId, Long projectId) {
+        WorkspaceEntity entity = workspaceRepository.findById(workspaceId)
+                .orElseThrow(() -> new IllegalArgumentException("工作区不存在: " + workspaceId));
+        entity.setProjectId(projectId);
+        entity.setUpdatedAt(Instant.now());
+        WorkspaceEntity saved = workspaceRepository.save(entity);
+        WorkspaceContext ctx = workspaceCache.get(workspaceId);
+        if (ctx != null) {
+            ctx.setProjectId(saved.getProjectId());
+        }
+        log.info("Workspace 项目归属已更新: id={}, projectId={}", workspaceId, saved.getProjectId());
+    }
+
     public List<WorkspaceSummary> getUserWorkspaces(String userId) {
         return workspaceRepository.findByUserIdOrderByCreatedAtDesc(userId)
                 .stream()
+                // 默认运维工作区不在工作区列表展示（前端运维入口用固定 id 直接访问）
+                .filter(e -> !AppConstants.DEFAULT_OPS_WORKSPACE_ID.equals(e.getId()))
                 .map(this::toSummary)
                 .collect(Collectors.toList());
     }
@@ -564,6 +602,7 @@ public class WorkspaceManager {
                 .status(entity.getStatus())
                 // 存量工作区在加列前已存在（理论上 ddl-default=single），这里再兜底一次
                 .type(entity.getType() == null ? "single" : entity.getType())
+                .projectId(entity.getProjectId())
                 .createdAt(entity.getCreatedAt())
                 .lastAccessed(entity.getLastAccessedAt())
                 .build();

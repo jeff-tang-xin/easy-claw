@@ -582,17 +582,22 @@ public class AgentScopeProperties {
         /** shell 输出截断上限（字节）。防止工具结果撑爆上下文 */
         private int maxShellOutputBytes = 200_000;
 
-        /** 上下文压缩触发：消息数阈值（压缩过狠会让 Agent 忘记任务目标，默认放宽到 120） */
-        private int compactionTriggerMessages = 120;
+        /** 上下文压缩触发：消息数阈值（0 = 禁用）。工具密集会话一轮可产生 3-10 条消息，
+         *  120 条（约 20-40 轮）对多回合长会话过紧、几乎每个长会话都触发；300 条约合
+         *  60-100 轮，让 token 线成为主触发线，压缩频率显著下降。 */
+        private int compactionTriggerMessages = 300;
 
-        /** 上下文压缩触发：token 数阈值 */
-        private long compactionTriggerTokens = 100_000;
+        /** 上下文压缩触发：token 数阈值。0 = 自动（按模型 context window 的窗口感知值，
+         *  见 WorkspaceAgentBuilder#buildCompactionConfig）；>0 = 显式固定值（yml 可覆盖）。
+         *  历史默认 100K 对 200K+ 窗口模型过保守——只用一半窗口就压缩，会话越长压缩越频繁。 */
+        private long compactionTriggerTokens = 0;
 
         /** 压缩后保留的最近消息数（工具调用一轮至少占 2 条，20 条太少会丢任务上下文） */
         private int compactionKeepMessages = 40;
 
-        /** 压缩后保留的 token 数 */
-        private long compactionKeepTokens = 24_000;
+        /** 压缩后保留的 token 数。24K 对工具密集会话仅够约 10-15 轮，压缩后模型可见近期原文
+         *  骤减易「变笨」，且恢复触发线快导致反复压缩；40K 在保留质量与回收空间间取平衡。 */
+        private long compactionKeepTokens = 40_000;
 
         /** 压缩时预留给模型输出的 token 数 */
         private long compactionReservedTokens = 20_000;

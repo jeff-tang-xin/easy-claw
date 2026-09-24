@@ -271,15 +271,40 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         terminalOwners.put(terminalId, connectionId);
     }
 
-    /** 键盘输入：{@code {"type":"term_data","workspaceId":..,"terminalId":..,"data":"<原文>"}} */
+    /**
+     * 键盘输入：{@code {"type":"term_data","workspaceId":..,"terminalId":..,"data":"<原文>"}}
+     * 或二进制变体 {@code {"type":"term_data",...,"data_b64":"<base64>"}}。
+     * <p>
+     * {@code data_b64} 供 ZMODEM（rz/sz）等二进制协议使用：帧内含任意字节（≥0x80），
+     * 经 {@code data} 文本字段的 UTF-8 编码会被改写，必须走 base64 原始字节路径。
+     * 两者同时存在时优先 {@code data_b64}。
+     */
     private void handleTermData(JsonNode root) {
         String workspaceId = root.path("workspaceId").asText("");
         String terminalId = root.path("terminalId").asText("");
-        String data = root.path("data").asText("");
-        if (terminalId.isBlank() || data.isEmpty()) {
+        if (terminalId.isBlank()) {
             return;
         }
-        String err = ssh.writeShell(workspaceId, terminalId, data);
+        String dataB64 = root.path("data_b64").asText("");
+        String err;
+        if (!dataB64.isEmpty()) {
+            byte[] bytes;
+            try {
+                bytes = java.util.Base64.getDecoder().decode(dataB64);
+            } catch (IllegalArgumentException e) {
+                return; // 坏 base64 静默丢弃
+            }
+            if (bytes.length == 0) {
+                return;
+            }
+            err = ssh.writeShellBytes(workspaceId, terminalId, bytes);
+        } else {
+            String data = root.path("data").asText("");
+            if (data.isEmpty()) {
+                return;
+            }
+            err = ssh.writeShell(workspaceId, terminalId, data);
+        }
         if (err != null) {
             WebSocketSession conn = connections.get(terminalOwners.get(terminalId));
             if (conn != null) {

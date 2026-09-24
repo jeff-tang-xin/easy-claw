@@ -28,6 +28,13 @@ public class CloudProperties {
     /** spoke 身份凭证（hub 控制台按组织颁发，形如 {@code eck-...}），仅创建时可见明文 */
     private String appKey;
 
+    /**
+     * cloud-config 读取触发的按需刷新节流（秒）：距上次尝试不足该值则跳过刷新，默认 5。
+     * 前端轮询（5s）驱动 spoke 自动跟上 hub 配置（含运维服务器授权撤销的快速生效），
+     * 节流保证不会高频打 hub；0 = 每次读取都刷新。
+     */
+    private long refreshIntervalSeconds = 5;
+
     public String getHubUrl() {
         return hubUrl;
     }
@@ -42,5 +49,13 @@ public class CloudProperties {
 
     public void setAppKey(String appKey) {
         this.appKey = appKey;
+    }
+
+    public long getRefreshIntervalSeconds() {
+        return refreshIntervalSeconds;
+    }
+
+    public void setRefreshIntervalSeconds(long refreshIntervalSeconds) {
+        this.refreshIntervalSeconds = refreshIntervalSeconds;
     }
 }

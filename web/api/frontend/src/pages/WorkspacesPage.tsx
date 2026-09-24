@@ -1,7 +1,11 @@
 import {useEffect, useState} from 'react';
 import {useParams, useNavigate} from 'react-router-dom';
-import {del, getJson, postJson, putJson} from '../api';
+import {
+  bindCloudWorkspace, del, getCloudProjects, getJson, postJson, putJson, unbindCloudWorkspace,
+  type CloudProject,
+} from '../api';
 import Modal from '../components/Modal';
+import {useCloudConfig} from '../cloudConfig';
 
 interface WorkspaceSummary {
   workspaceId: string;
@@ -11,6 +15,8 @@ interface WorkspaceSummary {
   status: string;
   /** 工作区形态分类：single / team / schedule（存量工作区后端兜底为 single） */
   type?: string;
+  /** 归属的 hub 项目（cloud 模式；本地模式恒 null） */
+  projectId?: number | null;
   createdAt: string;
 }
 
@@ -18,10 +24,11 @@ interface PermRule { id: number; toolName: string; createdAt: string; }
 interface ToolDef { name: string; displayName: string; requiresConfirm: boolean; }
 interface ScenarioOption { id: number; name: string; displayName: string; icon?: string; active: boolean; mode?: string; }
 
-/** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序 */
+/** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序。
+ * 运维（ops）是系统内置唯一固定 workspace，不在此列表（不展示、不可创建），
+ * 运维入口由 cloud 菜单下发（/ops，前端用固定 id 访问） */
 const WS_TYPES = [
   { type: 'single', label: 'SOLO', icon: '👤', hint: '单个主智能体独立完成任务' },
-  { type: 'ops', label: '运维', icon: '🖥️', hint: 'SSH 远程终端 + 智能幕布，AI 辅助远程主机运维' },
 ] as const;
 
 type WsType = typeof WS_TYPES[number]['type'];
@@ -45,6 +52,10 @@ export default function WorkspacesPage() {
   const [description, setDescription] = useState('');
   const [scenarioName, setScenarioName] = useState('');
   const [scenarios, setScenarios] = useState<ScenarioOption[]>([]);
+  // cloud 模式：项目归属（创建必选；编辑可改绑）。projects 在进入 cloud 模式后拉取一次
+  const cloudMode = useCloudConfig().cloudMode;
+  const [projects, setProjects] = useState<CloudProject[]>([]);
+  const [projectId, setProjectId] = useState<number | ''>('');
   const navigate = useNavigate();
 
   /** 当前类型可选的场景：仅取已启用且 mode 与工作区类型一致的场景 */
@@ -63,6 +74,8 @@ export default function WorkspacesPage() {
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editScenario, setEditScenario] = useState(DEFAULT_SCENARIO);
+  // 编辑弹窗的项目归属（'' = 未绑定；仅 cloud 模式展示）
+  const [editProjectId, setEditProjectId] = useState<number | ''>('');
   const [saving, setSaving] = useState(false);
 
   // 删除确认弹窗状态
@@ -100,6 +113,18 @@ export default function WorkspacesPage() {
     setScenarioName(defaultScenarioOf(scenarios, currentType));
   }, [currentType]);
 
+  // 进入 cloud 模式后拉取 hub 组织项目清单（创建/编辑弹窗的项目下拉数据源）
+  useEffect(() => {
+    if (!cloudMode) {
+      setProjects([]);
+      setProjectId('');
+      return;
+    }
+    getCloudProjects()
+      .then(setProjects)
+      .catch(() => setProjects([]));
+  }, [cloudMode]);
+
   /** 该类型的默认选中场景：优先内置「通用编程」（仅 single 类型内置），否则取同类型首个 */
   function defaultScenarioOf(list: ScenarioOption[], type: WsType): string {
     const sameType = list.filter((s) => (s.mode || 'single') === type);
@@ -107,6 +132,12 @@ export default function WorkspacesPage() {
       return DEFAULT_SCENARIO;
     }
     return sameType[0]?.name || '';
+  }
+
+  /** projectId → 项目名（拉取失败/未知时回退为 #id） */
+  function projectName(id: number | null | undefined): string {
+    if (id == null) return '';
+    return projects.find((p) => p.id === id)?.name ?? `#${id}`;
   }
 
   const create = async () => {
@@ -117,11 +148,14 @@ export default function WorkspacesPage() {
         path,
         scenarioName,
         type: currentType,
+        // cloud 模式必填（后端强制校验）；本地模式忽略
+        projectId: cloudMode ? projectId : undefined,
       });
       setName('');
       setPath('');
       setDescription('');
       setScenarioName(defaultScenarioOf(scenarios, currentType));
+      setProjectId('');
       setShowCreate(false);
       await load();
     } catch (e) {
@@ -133,6 +167,7 @@ export default function WorkspacesPage() {
     setEditing(ws);
     setEditName(ws.name);
     setEditDesc(ws.description || '');
+    setEditProjectId(ws.projectId ?? '');
     // 回显当前绑定：查不到（未绑定/接口异常）时落到该类型默认场景，不阻塞编辑
     setEditScenario(defaultScenarioOf(scenarios, currentType));
     getJson<ScenarioOption | null>(`/api/scenarios/active/${ws.workspaceId}`)
@@ -149,6 +184,17 @@ export default function WorkspacesPage() {
         description: editDesc,
         scenarioName: editScenario,
       });
+      // cloud 模式：项目归属变更时同步 hub 绑定（'' 表示解除绑定）
+      if (cloudMode) {
+        const newId = editProjectId === '' ? null : editProjectId;
+        if (newId !== (editing.projectId ?? null)) {
+          if (newId === null) {
+            await unbindCloudWorkspace(editing.workspaceId);
+          } else {
+            await bindCloudWorkspace(editing.workspaceId, newId);
+          }
+        }
+      }
       setEditing(null);
       await load();
     } catch (e) {
@@ -269,6 +315,25 @@ export default function WorkspacesPage() {
             </select>
             <div className="hint">工作区类型与场景类型强一致；创建后可随时在此页编辑切换为同类型的其他场景</div>
           </div>
+          {cloudMode && (
+            <div className="field">
+              <label>归属项目（cloud 模式必选：知识库/黑板数据归属该 hub 项目）</label>
+              <select
+                value={projectId}
+                onChange={(e) => setProjectId(e.target.value === '' ? '' : Number(e.target.value))}
+              >
+                <option value="">（请选择项目…）</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.slug ? ` (${p.slug})` : ''}
+                  </option>
+                ))}
+              </select>
+              {projects.length === 0 && (
+                <div className="hint">⚠️ 项目清单拉取失败或组织下暂无项目，cloud 模式下无法创建工作区</div>
+              )}
+            </div>
+          )}
           <div className="field">
             <label>描述（可选）</label>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
@@ -278,7 +343,7 @@ export default function WorkspacesPage() {
             <button
               className="btn primary"
               onClick={create}
-              disabled={scenariosForType.length === 0 || !scenarioName}
+              disabled={scenariosForType.length === 0 || !scenarioName || (cloudMode && projectId === '')}
             >
               创建并初始化
             </button>
@@ -355,6 +420,23 @@ export default function WorkspacesPage() {
             </select>
             <div className="hint">切换后立即重建该工作区的 AI，正在进行的对话建议先结束；工作区形态不支持在此变更</div>
           </div>
+          {cloudMode && (
+            <div className="field">
+              <label>归属项目（知识库/黑板数据归属的 hub 项目，可换绑）</label>
+              <select
+                value={editProjectId}
+                onChange={(e) => setEditProjectId(e.target.value === '' ? '' : Number(e.target.value))}
+              >
+                <option value="">（未绑定）</option>
+                {projects.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}{p.slug ? ` (${p.slug})` : ''}
+                  </option>
+                ))}
+              </select>
+              <div className="hint">换绑后该工作区后续写入云端的数据归属新项目；历史数据仍留在原项目</div>
+            </div>
+          )}
           <div className="field">
             <label>描述（可选）</label>
             <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={2} />
@@ -409,7 +491,7 @@ export default function WorkspacesPage() {
               key={ws.workspaceId}
               className="card"
               style={{ cursor: 'pointer' }}
-              onClick={() => navigate((ws.type || 'single') === 'ops' ? `/ops/${ws.workspaceId}` : `/chat/${ws.workspaceId}`)}
+              onClick={() => navigate(`/chat/${ws.workspaceId}`)}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                 <span style={{ fontSize: '1.6em' }}>{typeMeta.icon}</span>
@@ -445,6 +527,11 @@ export default function WorkspacesPage() {
                 </button>
               </div>
               {ws.description && <div className="hint" style={{ marginTop: 8 }}>{ws.description}</div>}
+              {cloudMode && (
+                <div className="hint" style={{ marginTop: 6 }}>
+                  {ws.projectId != null ? `📦 归属项目：${projectName(ws.projectId)}` : '📦 未绑定 hub 项目'}
+                </div>
+              )}
             </div>
           ))}
         </div>

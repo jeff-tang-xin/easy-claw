@@ -48,6 +48,14 @@ public class KnowledgeItemEntity extends BaseEntity {
     @Column(nullable = false, length = 20)
     private String status = "active";
 
+    /** 来源：platform=hub 平台创建 | workspace=spoke 工作区同步写入（Agent，V22）。 */
+    @Column(nullable = false, length = 20)
+    private String source = "platform";
+
+    /** spoke 同步来源工作区标识（source=workspace 时非空；平台条目为 null）。 */
+    @Column(name = "source_workspace_id", length = 64)
+    private String sourceWorkspaceId;
+
     /** 生成当前向量所用模型（provider/model），换模型据此识别陈旧向量；未生成时为 null。 */
     @Column(name = "embedding_model", length = 120)
     private String embeddingModel;

@@ -21,6 +21,7 @@ public final class AuditModule {
     public static final String MENU = "menu";
     public static final String FEATURE_FLAG = "feature_flag";
     public static final String TOOL = "tool";
+    public static final String OPS = "ops";
 
     public static final String SUCCESS = "success";
     public static final String FAILURE = "failure";
