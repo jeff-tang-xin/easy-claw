@@ -3,7 +3,12 @@ package com.xinl.easyclaw.workspace;
 import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
+import com.xinl.easyclaw.config.CloudProperties;
+import com.xinl.easyclaw.knowledge.KnowledgeEntry;
+import com.xinl.easyclaw.knowledge.KnowledgeService;
 import com.xinl.easyclaw.scenario.ScenarioBinding;
+import com.xinl.easyclaw.workspace.entity.WorkspaceEntity;
+import com.xinl.easyclaw.workspace.repository.WorkspaceRepository;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -16,7 +21,7 @@ import java.util.List;
  * <p>
  * 从 {@code WorkspaceAgentBuilder} 抽出的单一职责组件：**只负责「system prompt 怎么拼」**，
  * 与「Agent 怎么装配」解耦。拼装顺序：默认人格 + 主控 SPI 人格 + 子 Agent 名册/派发机制
- * + Skill/模式片段 + 场景编排（环境/能力边界/方法论）。
+ * + Skill/模式片段 + 场景编排（环境/能力边界/方法论）+ 云端知识库索引（仅 cloud 模式）。
  * <p>
  * 顺序有意义：越靠后的片段越具体，模型对靠后的指令更敏感。主控人格排在基础提示词之后、
  * 场景之前——人格定义“你是谁”（相对稳定），场景定义“当前在做什么”（更具体，应当能覆盖
@@ -24,6 +29,9 @@ import java.util.List;
  * <p>
  * 抽成独立组件的第二个目的：team/schedule 编排改由 cloud 供给后，提示词拼装是主要的
  * 模式定制点，独立成类便于在此分叉，而不必改动装配器。
+ * <p>
+ * <b>依赖约束</b>：本类处于 WorkspaceManager → WorkspaceAgentBuilder → 本类的装配链上，
+ * 禁止注入 WorkspaceManager（会循环）；projectId 经 WorkspaceRepository 直查 DB。
  */
 @Component
 public class SystemPromptComposer {
@@ -34,15 +42,24 @@ public class SystemPromptComposer {
     private final AgentScopeProperties agentScopeProperties;
     private final ScenarioResolver scenarioResolver;
     private final com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry;
+    private final CloudProperties cloudProperties;
+    private final KnowledgeService knowledgeService;
+    private final WorkspaceRepository workspaceRepository;
 
     public SystemPromptComposer(AgentFactory agentFactory,
                                 AgentScopeProperties agentScopeProperties,
                                 ScenarioResolver scenarioResolver,
-                                com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry) {
+                                com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry,
+                                CloudProperties cloudProperties,
+                                KnowledgeService knowledgeService,
+                                WorkspaceRepository workspaceRepository) {
         this.agentFactory = agentFactory;
         this.agentScopeProperties = agentScopeProperties;
         this.scenarioResolver = scenarioResolver;
         this.agentRegistry = agentRegistry;
+        this.cloudProperties = cloudProperties;
+        this.knowledgeService = knowledgeService;
+        this.workspaceRepository = workspaceRepository;
     }
 
     /**
@@ -91,7 +108,69 @@ public class SystemPromptComposer {
                     workspaceId, scenarioAugment.length());
         }
 
+        // 云端知识库索引（仅 cloud 模式）：框架的 WorkspaceContextMiddleware 只读本地
+        // knowledge/KNOWLEDGE.md，而 cloud 模式知识全存 hub、spoke 不落盘 → 本地注入为空，
+        // AI 开局对知识库毫无「目录感」。此处把 hub 条目清单（topic+summary）拼进系统提示，
+        // 与 local 模式的注入语义对齐。local 模式跳过（框架已注入，重复会双份）。
+        String knowledgeIndex = cloudKnowledgeIndex(workspaceId);
+        if (knowledgeIndex != null) {
+            sysPrompt = sysPrompt + "\n\n" + knowledgeIndex;
+            log.info("云端知识库索引已注入 system prompt: workspace={}, {} chars",
+                    workspaceId, knowledgeIndex.length());
+        }
+
         return sysPrompt;
+    }
+
+    /**
+     * 云端知识库索引段（仅 cloud 模式）：拉 hub 条目清单渲染为 Markdown。
+     * <p>
+     * 失败语义：hub 不可达 / projectId 缺失 / 清单为空清单异常时返回 {@code null} 跳过注入
+     * （记 warn）——知识索引是增强信息，绝不能让 Agent 构建失败。清单是装配时快照，
+     * 会话中途写入的新条目由 AI 用 {@code knowledge_list} 现查，与 local 模式
+     * 「KNOWLEDGE.md 也是会话开始时快照」的行为一致。
+     */
+    private String cloudKnowledgeIndex(String workspaceId) {
+        String appKey = cloudProperties.getAppKey();
+        if (appKey == null || appKey.isBlank()) {
+            return null; // local 模式：框架已注入本地 KNOWLEDGE.md
+        }
+        Long projectId = workspaceRepository.findById(workspaceId)
+                .map(WorkspaceEntity::getProjectId)
+                .orElse(null);
+        if (projectId == null) {
+            log.debug("云端知识库索引跳过：工作区未绑定项目 workspace={}", workspaceId);
+            return null;
+        }
+        List<KnowledgeEntry> entries;
+        try {
+            entries = knowledgeService.list(WorkspaceContext.builder()
+                    .workspaceId(workspaceId)
+                    .projectId(projectId)
+                    .build());
+        } catch (Exception e) {
+            log.warn("云端知识库索引拉取失败，跳过注入: workspace={}, {}", workspaceId, e.getMessage());
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("## 📚 云端知识库索引\n\n")
+                .append("本工作区的知识库存储在 hub（绑定项目下），本地 `knowledge/` 目录为空、")
+                .append("系统提示不含本地知识注入。以下是当前条目清单（Agent 装配时快照；")
+                .append("会话中途新写入的条目用 `knowledge_list` 现查）：\n\n");
+        if (entries.isEmpty()) {
+            sb.append("（当前为空——任务收尾时值得留存的结论请用 `knowledge_write` 沉淀。）\n");
+        } else {
+            for (KnowledgeEntry e : entries) {
+                sb.append("- **").append(e.topic()).append("**");
+                if (e.summary() != null && !e.summary().isBlank()) {
+                    sb.append(" — ").append(e.summary());
+                }
+                sb.append('\n');
+            }
+            sb.append("\n用 `knowledge_read(topic)` 展开正文、`knowledge_search(关键词)` 全文检索；")
+                    .append("`knowledge/` 在沙箱禁读路径内，不要尝试用 read_file 直读。\n");
+        }
+        return sb.toString().stripTrailing();
     }
 
     /**
