@@ -14,9 +14,11 @@ import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsCommandLogReport;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsServer;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsServerAuthorizeCheck;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeProjectInfo;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeCreditInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeShellCommand;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeToolInfo;
 import com.xinl.easyclaw.hub.security.AppKeyContextHolder;
+import com.xinl.easyclaw.hub.service.ProviderGrantService;
 import com.xinl.easyclaw.hub.service.SpokeService;
 import com.xinl.easyclaw.hub.service.ops.OpsCommandLogService;
 import com.xinl.easyclaw.hub.service.ops.OpsServerService;
@@ -39,12 +41,14 @@ public class SpokeController {
     private final SpokeService spokeService;
     private final OpsCommandLogService commandLogs;
     private final OpsServerService opsServers;
+    private final ProviderGrantService grantService;
 
     public SpokeController(SpokeService spokeService, OpsCommandLogService commandLogs,
-                           OpsServerService opsServers) {
+                           OpsServerService opsServers, ProviderGrantService grantService) {
         this.spokeService = spokeService;
         this.commandLogs = commandLogs;
         this.opsServers = opsServers;
+        this.grantService = grantService;
     }
 
     /** bootstrap：spoke 启动/刷新时拉取自身配置快照（身份、组织、可用模型面、服务权限）。 */
@@ -103,6 +107,17 @@ public class SpokeController {
     @GetMapping("/api/spoke/projects")
     public List<SpokeProjectInfo> projects() {
         return spokeService.orgProjects(AppKeyContextHolder.require());
+    }
+
+    // ---- 积分视图（V27）----
+
+    /**
+     * appkey 创建者的积分视图（按 provider 一行）：remaining = 积分池可用余额
+     * （未启用积分池为 null）；dailyLimit/usedToday 为每日次数限流口径。
+     */
+    @GetMapping("/api/spoke/credits")
+    public List<SpokeCreditInfo> credits() {
+        return grantService.myCredits(AppKeyContextHolder.require().userId());
     }
 
     // ---- 工作区知识库云同步（V23 起统一落项目知识库 knowledge_items，按 projectId 读写） ----

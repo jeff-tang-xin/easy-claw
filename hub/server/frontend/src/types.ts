@@ -132,6 +132,96 @@ export interface OrgOptionDto {
   slug: string;
 }
 
+// ============ Provider 授权（按用户授权 + 可选每日次数上限/有效期；无授权行 = 开放） ============
+export interface ProviderGrantDto {
+  id: number;
+  providerId: number;
+  userId: number;
+  /** 用户名（列表展示用） */
+  username: string | null;
+  /** null = 不限流 */
+  dailyLimit: number | null;
+  /** null = 永久 */
+  expiresAt: string | null;
+  /** 今日已用次数（仅配置了 dailyLimit 时返回） */
+  usedToday: number | null;
+  /** 周期积分发放计划：每日（当天有效次日重发）；null = 不发放 */
+  dailyCredits: number | null;
+  /** 周期积分发放计划：每月；null = 不发放 */
+  monthlyCredits: number | null;
+  /** 周期积分发放计划：每年；null = 不发放 */
+  yearlyCredits: number | null;
+  /** 积分池可用余额（Σ 未过期面额 − 已消耗）；null = 未启用积分池 */
+  remainingCredits: number | null;
+}
+
+/** 积分流水行（管理端）：periodKey 为当期标识（daily=2026-09-24 / monthly=2026-09 / yearly=2026），temp 为 null */
+export interface ProviderCreditDto {
+  id: number;
+  periodType: string;
+  periodKey: string | null;
+  credits: number;
+  consumed: number;
+  /** 面额 − 已消耗；已过期行的 remaining 不再计入可用余额 */
+  remaining: number;
+  expiresAt: string;
+  createdAt: string;
+}
+
+// ============ 模型目录（平台级模型清单与积分比例；provider.models 按名称引用） ============
+export interface ModelCatalogDto {
+  id: number;
+  modelName: string;
+  /** 每次请求消耗积分（1 位小数；未登记模型默认 1） */
+  creditCost: number;
+  remark: string | null;
+  createdAt: string;
+}
+
+// ============ 积分使用情况（我的余额/构成/使用记录 + 管理员组织总览） ============
+/** 我的积分余额（按 provider 一行）：remaining = 积分池总剩余；四项构成为各周期未过期剩余 */
+export interface CreditBalanceDto {
+  providerId: number;
+  providerName: string | null;
+  providerSlug: string | null;
+  /** null = 未启用积分池 */
+  remaining: number | null;
+  dailyRemaining: number | null;
+  monthlyRemaining: number | null;
+  yearlyRemaining: number | null;
+  tempRemaining: number | null;
+  dailyLimit: number | null;
+  usedToday: number | null;
+}
+
+/** 使用记录（每次请求一条）：modelName 为路由后实际生效模型，cost 为本次消耗积分 */
+export interface CreditUsageDto {
+  id: number;
+  providerId: number;
+  providerName: string | null;
+  providerSlug: string | null;
+  modelName: string;
+  cost: number;
+  createdAt: string;
+}
+
+/** 积分总览行（管理员视角，每条授权一行）：provider × 用户维度 */
+export interface CreditGrantSummaryDto {
+  grantId: number;
+  providerId: number;
+  providerName: string | null;
+  providerSlug: string | null;
+  userId: number;
+  username: string | null;
+  remaining: number | null;
+  dailyRemaining: number | null;
+  monthlyRemaining: number | null;
+  yearlyRemaining: number | null;
+  tempRemaining: number | null;
+  dailyLimit: number | null;
+  usedToday: number | null;
+}
+
 // ============ AppKey（组织级访问密钥，owner/admin 管理） ============
 /** modelName 为空串表示该 provider 的全部模型 */
 export interface AppKeyBindingDto {

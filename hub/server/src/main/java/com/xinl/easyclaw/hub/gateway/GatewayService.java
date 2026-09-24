@@ -13,6 +13,7 @@ import com.xinl.easyclaw.hub.repository.AppKeyRepository;
 import com.xinl.easyclaw.hub.repository.LlmProviderRepository;
 import com.xinl.easyclaw.hub.security.AppKeyContext;
 import com.xinl.easyclaw.hub.service.CryptoService;
+import com.xinl.easyclaw.hub.service.ProviderGrantService;
 import com.xinl.easyclaw.hub.service.ProviderService;
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -49,6 +50,7 @@ public class GatewayService {
     private final AppKeyProviderBindingRepository bindings;
     private final AppKeyRepository appKeys;
     private final LlmProviderRepository providers;
+    private final ProviderGrantService providerGrantService;
     private final CryptoService cryptoService;
     private final UpstreamClient upstream;
     private final AnthropicTranslator anthropicTranslator;
@@ -56,13 +58,14 @@ public class GatewayService {
     private final ObjectMapper om;
 
     public GatewayService(AppKeyProviderBindingRepository bindings, AppKeyRepository appKeys,
-                          LlmProviderRepository providers,
+                          LlmProviderRepository providers, ProviderGrantService providerGrantService,
                           CryptoService cryptoService, UpstreamClient upstream,
                           AnthropicTranslator anthropicTranslator, GatewayLogWriter logWriter,
                           ObjectMapper om) {
         this.bindings = bindings;
         this.appKeys = appKeys;
         this.providers = providers;
+        this.providerGrantService = providerGrantService;
         this.cryptoService = cryptoService;
         this.upstream = upstream;
         this.anthropicTranslator = anthropicTranslator;
@@ -97,6 +100,13 @@ public class GatewayService {
 
             RoutePlan plan = route(ctx, reqModel);
             String effectiveModel = plan.effectiveModel();
+            // provider 授权闸门：按 appkey 创建者校验授权/每日次数/积分余额（未配置授权的 provider 直接放行）；
+            // 积分按请求模型的目录比例扣减（未登记模型默认 1）
+            ProviderGrantService.GrantCheck denied =
+                    providerGrantService.checkAndConsume(plan.provider().getId(), ctx.userId(), effectiveModel);
+            if (denied != null) {
+                throw new GatewayException(denied.status(), denied.message(), denied.type(), denied.code());
+            }
             // hub_cloud 别名场景：成功路由的详单改记真实生效模型
             logEntity.setModel(effectiveModel);
             logEntity.setProviderId(plan.provider().getId());

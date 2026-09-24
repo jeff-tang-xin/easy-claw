@@ -342,7 +342,10 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
       <div className="page-head">
         <div>
           <h2>AppKey 管理</h2>
-          <p className="page-desc">组织级访问密钥；完整密钥仅在创建时显示一次，请立即保存。</p>
+          <p className="page-desc">
+            组织级访问密钥；owner/admin 管理本组织全部密钥，成员可创建并管理自己的密钥。
+            完整密钥仅在创建时显示一次，请立即保存。
+          </p>
         </div>
         <div className="page-head-right">
           <button type="button" className="btn btn-primary" onClick={openCreate}>

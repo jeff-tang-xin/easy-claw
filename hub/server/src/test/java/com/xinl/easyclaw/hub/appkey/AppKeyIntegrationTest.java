@@ -197,7 +197,7 @@ class AppKeyIntegrationTest extends HubIntegrationTestSupport {
     // ---------- 角色与跨 org 隔离 ----------
 
     @Test
-    void appkey_memberForbidden_andCrossOrgIsolation() throws Exception {
+    void appkey_selfService_memberCreatesAndManagesOwnKeys() throws Exception {
         String admin = newPlatformAdminToken("ak_adm4");
         long providerId = createProviderOk(admin, "ak-p4", "sk-ak4-0000prov", "m1");
         String ownerA = createUserAndLogin("ak_ownerA4", PW);
@@ -206,24 +206,76 @@ class AppKeyIntegrationTest extends HubIntegrationTestSupport {
         postJson("/api/orgs/" + orgA + "/members", new AddMemberRequest("ak_memA4", "member"), ownerA)
                 .andExpect(status().isCreated());
 
-        // member（非 owner/admin）：颁发与列表都 403。
-        postJson(appkeysUrl(orgA), new CreateAppKeyRequest("ak-keyA4", null), memberA)
+        // member（appkey.self）：可颁发自己的 key。
+        String memberCreated = postJson(appkeysUrl(orgA),
+                        new CreateAppKeyRequest("ak-mem-key", List.of(new BindingRequest(providerId, "m1"))), memberA)
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.appKey.name").value("ak-mem-key"))
+                .andReturn().getResponse().getContentAsString();
+        long memberKeyId = om.readTree(memberCreated).get("appKey").get("id").asLong();
+
+        // owner 也颁发一把。
+        String ownerCreated = postJson(appkeysUrl(orgA),
+                        new CreateAppKeyRequest("ak-owner-key", List.of(new BindingRequest(providerId, "m1"))), ownerA)
+                .andExpect(status().isCreated())
+                .andReturn().getResponse().getContentAsString();
+        long ownerKeyId = om.readTree(ownerCreated).get("appKey").get("id").asLong();
+
+        // member 列表 = 个人视图：只看到自己创建的（owner 的 key 不出现）。
+        getJson(appkeysUrl(orgA), memberA)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(1)))
+                .andExpect(jsonPath("$[0].id").value(memberKeyId));
+
+        // owner/admin 列表 = 组织全量（appkey.manage）：两把都在。
+        getJson(appkeysUrl(orgA), ownerA)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$", hasSize(2)));
+
+        // member 可管理自己的 key（改绑定/吊销）。
+        putJson(appkeysUrl(orgA) + "/" + memberKeyId + "/bindings",
+                        new UpdateBindingsRequest(List.of(new BindingRequest(providerId, ""))), memberA)
+                .andExpect(status().isOk());
+        postJson(appkeysUrl(orgA) + "/" + memberKeyId + "/revoke", null, memberA)
+                .andExpect(status().isNoContent());
+
+        // member 操作别人的 key → 403（owner/admin 才可治理全组织）。
+        putJson(appkeysUrl(orgA) + "/" + ownerKeyId + "/bindings",
+                        new UpdateBindingsRequest(List.of(new BindingRequest(providerId, "m1"))), memberA)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
-        getJson(appkeysUrl(orgA), memberA)
+        postJson(appkeysUrl(orgA) + "/" + ownerKeyId + "/revoke", null, memberA)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
 
-        // orgA owner 正常颁发一把 key。
+        // guest 无 appkey 权限：创建与列表都 403。
+        String guestA = createUserAndLogin("ak_guestA4", PW);
+        postJson("/api/orgs/" + orgA + "/members", new AddMemberRequest("ak_guestA4", "guest"), ownerA)
+                .andExpect(status().isCreated());
+        postJson(appkeysUrl(orgA), new CreateAppKeyRequest("ak-guest-key", null), guestA)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        getJson(appkeysUrl(orgA), guestA)
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    @Test
+    void appkey_crossOrgIsolation_kept() throws Exception {
+        String admin = newPlatformAdminToken("ak_adm4b");
+        long providerId = createProviderOk(admin, "ak-p4b", "sk-ak4b-0000prov", "m1");
+        String ownerA = createUserAndLogin("ak_ownerA4b", PW);
+        long orgA = createOrgOk(ownerA, "Ak OrgA4b", "ak-orga4b");
+
         String created = postJson(appkeysUrl(orgA),
-                        new CreateAppKeyRequest("ak-keyA4", List.of(new BindingRequest(providerId, "m1"))), ownerA)
+                        new CreateAppKeyRequest("ak-keyA4b", List.of(new BindingRequest(providerId, "m1"))), ownerA)
                 .andExpect(status().isCreated())
                 .andReturn().getResponse().getContentAsString();
         long keyId = om.readTree(created).get("appKey").get("id").asLong();
 
         // orgB owner 不是 orgA 成员：GET orgA 的列表 → 403。
-        String ownerB = createUserAndLogin("ak_ownerB4", PW);
-        long orgB = createOrgOk(ownerB, "Ak OrgB4", "ak-orgb4");
+        String ownerB = createUserAndLogin("ak_ownerB4b", PW);
+        long orgB = createOrgOk(ownerB, "Ak OrgB4b", "ak-orgb4b");
         getJson(appkeysUrl(orgA), ownerB)
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));

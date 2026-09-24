@@ -100,3 +100,24 @@ export function bindCloudWorkspace(workspaceId: string, projectId: number): Prom
 export function unbindCloudWorkspace(workspaceId: string): Promise<void> {
   return del<void>(`/api/manage/workspaces/${encodeURIComponent(workspaceId)}/cloud-binding`);
 }
+
+// ==================== 积分余额（V27，appkey 创建者维度，按 provider 一行） ====================
+
+/**
+ * 积分视图（GET /api/manage/cloud/credits 元素，hub 透传）。
+ * remaining = 积分池可用余额（null = 该 provider 未启用积分池）；
+ * dailyLimit/usedToday 为每日次数限流口径（null = 未限流）。
+ */
+export interface CloudCredit {
+  providerId: number;
+  providerName: string | null;
+  providerSlug: string | null;
+  remaining: number | null;
+  dailyLimit: number | null;
+  usedToday: number | null;
+}
+
+/** 当前用户（appkey 创建者）在各 provider 的积分/限流视图 */
+export function getCloudCredits(): Promise<CloudCredit[]> {
+  return getJson<CloudCredit[]>('/api/manage/cloud/credits');
+}

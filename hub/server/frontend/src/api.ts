@@ -28,7 +28,13 @@ import type {
   OpsServerGrantDto,
   PlatformToolDto,
   ProjectDto,
+  ProviderCreditDto,
   ProviderDto,
+  ProviderGrantDto,
+  ModelCatalogDto,
+  CreditBalanceDto,
+  CreditUsageDto,
+  CreditGrantSummaryDto,
   RoleMatrixResponse,
   TokenResponse,
   UserDto,
@@ -180,6 +186,10 @@ export const addMember = (orgId: number, usernameOrEmail: string, role: string) 
 export const updateMemberRole = (orgId: number, userId: number, role: string) =>
   request<void>('PATCH', `/api/orgs/${orgId}/members/${userId}`, {role});
 
+/** 组织成员列表（授权下拉等场景用；服务端按组织成员资格校验） */
+export const listOrgMembers = (orgId: number) =>
+  request<MemberDto[]>('GET', `/api/orgs/${orgId}/members`);
+
 export const removeMember = (orgId: number, userId: number) =>
   request<void>('DELETE', `/api/orgs/${orgId}/members/${userId}`);
 
@@ -261,7 +271,67 @@ export const updateProvider = (id: number, body: UpdateProviderBody) =>
 /** 被 AppKey 绑定时服务端返回 409，错误 message 直接展示给用户 */
 export const deleteProvider = (id: number) => request<void>('DELETE', `/api/providers/${id}`);
 
-// ============ AppKey（组织级访问密钥，owner/admin 管理） ============
+// ============ Provider 授权（按用户授权；配置任意授权后仅清单内用户可用，未配置 = 开放） ============
+export const listProviderGrants = (providerId: number) =>
+  request<ProviderGrantDto[]>('GET', `/api/providers/${providerId}/grants`);
+
+/** dailyLimit 省略/null = 不限流；expiresAt 省略/null = 永久 */
+export const createProviderGrant = (
+  providerId: number,
+  body: {userId: number; dailyLimit?: number | null; expiresAt?: string | null},
+) => request<ProviderGrantDto>('POST', `/api/providers/${providerId}/grants`, body);
+
+/** 取消授权（连带清理用量计数），幂等 */
+export const deleteProviderGrant = (providerId: number, id: number) =>
+  request<void>('DELETE', `/api/providers/${providerId}/grants/${id}`);
+
+// ============ 积分池（V27：周期发放计划 + 手动临时积分，FIFO 按过期时间消耗） ============
+/** 更新周期积分发放计划：三项各自独立，null = 不发放该周期；只影响后续周期，当期已发放不回溯 */
+export const updateGrantPlan = (
+  providerId: number,
+  grantId: number,
+  body: {dailyCredits: number | null; monthlyCredits: number | null; yearlyCredits: number | null},
+) => request<ProviderGrantDto>('PATCH', `/api/providers/${providerId}/grants/${grantId}/credit-plan`, body);
+
+/** 手动发放临时积分：面额 ≥1、有效期必填且须在未来；与周期积分同池 FIFO 消耗 */
+export const addProviderCredits = (
+  providerId: number,
+  grantId: number,
+  body: {credits: number; expiresAt: string},
+) => request<ProviderCreditDto>('POST', `/api/providers/${providerId}/grants/${grantId}/credits`, body);
+
+/** 积分流水（含已过期/已耗尽行，按发放时间倒序） */
+export const listProviderCredits = (providerId: number, grantId: number) =>
+  request<ProviderCreditDto[]>('GET', `/api/providers/${providerId}/grants/${grantId}/credits`);
+
+// ============ 模型目录（平台级模型清单与积分比例；读开放，写仅 platformAdmin） ============
+export const listModelCatalog = () => request<ModelCatalogDto[]>('GET', '/api/model-catalog');
+
+export const createModelCatalog = (body: {modelName: string; creditCost: number; remark?: string | null}) =>
+  request<ModelCatalogDto>('POST', '/api/model-catalog', body);
+
+export const updateModelCatalog = (id: number, body: {modelName: string; creditCost: number; remark?: string | null}) =>
+  request<ModelCatalogDto>('PATCH', `/api/model-catalog/${id}`, body);
+
+export const deleteModelCatalog = (id: number) => request<void>('DELETE', `/api/model-catalog/${id}`);
+
+// ============ 积分使用情况（我的余额/构成/使用记录 + 管理员组织/平台总览） ============
+/** 我的积分余额：按 provider 一行，含每日/每月/每年/临时构成；remaining null = 未启用积分池 */
+export const listMyCredits = () => request<CreditBalanceDto[]>('GET', '/api/me/credits');
+
+/** 我的使用记录（每次请求一条：模型、消耗分值），倒序分页 */
+export const listMyCreditUsages = (page = 0, size = 20) =>
+  request<CreditUsageDto[]>('GET', `/api/me/credit-usages?page=${page}&size=${size}`);
+
+/** 组织积分总览（owner/admin）：组织内全部 provider 的所有授权行 */
+export const listOrgCreditOverview = (orgId: number) =>
+  request<CreditGrantSummaryDto[]>('GET', `/api/orgs/${orgId}/credit-overview`);
+
+/** 平台共享池积分总览（platformAdmin） */
+export const listPlatformCreditOverview = () =>
+  request<CreditGrantSummaryDto[]>('GET', '/api/platform/credit-overview');
+
+// ============ AppKey（组织级访问密钥：owner/admin 管理全组织，member 可自助创建/管理自己的 key） ============
 /** 创建/改绑用的绑定入参；modelName 省略或空串 = 该 provider 全部模型 */
 export interface AppKeyBindingInput {
   providerId: number;

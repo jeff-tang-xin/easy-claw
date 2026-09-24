@@ -7,12 +7,15 @@ import com.xinl.easyclaw.hub.contract.provider.CreateProviderRequest;
 import com.xinl.easyclaw.hub.contract.provider.ProviderDto;
 import com.xinl.easyclaw.hub.contract.provider.UpdateProviderRequest;
 import com.xinl.easyclaw.hub.entity.LlmProviderEntity;
+import com.xinl.easyclaw.hub.entity.ProviderGrantEntity;
 import com.xinl.easyclaw.hub.entity.MembershipEntity;
 import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.repository.AppKeyProviderBindingRepository;
 import com.xinl.easyclaw.hub.repository.LlmProviderRepository;
 import com.xinl.easyclaw.hub.repository.MembershipRepository;
 import com.xinl.easyclaw.hub.repository.OrganizationRepository;
+import com.xinl.easyclaw.hub.repository.ProviderGrantRepository;
+import com.xinl.easyclaw.hub.repository.ProviderGrantUsageRepository;
 import com.xinl.easyclaw.hub.repository.UserRepository;
 import java.util.Arrays;
 import java.util.List;
@@ -36,6 +39,8 @@ public class ProviderService {
 
     private final LlmProviderRepository providers;
     private final AppKeyProviderBindingRepository bindings;
+    private final ProviderGrantRepository providerGrants;
+    private final ProviderGrantUsageRepository providerGrantUsages;
     private final UserRepository users;
     private final MembershipRepository memberships;
     private final OrganizationRepository orgs;
@@ -44,10 +49,13 @@ public class ProviderService {
     private final AuditService auditService;
 
     public ProviderService(LlmProviderRepository providers, AppKeyProviderBindingRepository bindings,
+                           ProviderGrantRepository providerGrants, ProviderGrantUsageRepository providerGrantUsages,
                            UserRepository users, MembershipRepository memberships, OrganizationRepository orgs,
                            OrgService orgService, CryptoService cryptoService, AuditService auditService) {
         this.providers = providers;
         this.bindings = bindings;
+        this.providerGrants = providerGrants;
+        this.providerGrantUsages = providerGrantUsages;
         this.users = users;
         this.memberships = memberships;
         this.orgs = orgs;
@@ -142,7 +150,7 @@ public class ProviderService {
         return toDto(p);
     }
 
-    /** 删除 provider：仍被 appkey 绑定时拒绝（409），先解绑再删；物理删除。 */
+    /** 删除 provider：仍被 appkey 绑定时拒绝（409），先解绑再删；物理删除，连带清理授权与用量计数。 */
     @Transactional
     public void delete(Long actorId, Long id) {
         LlmProviderEntity p = providers.findById(id)
@@ -151,6 +159,10 @@ public class ProviderService {
         if (bindings.existsByProviderId(id)) {
             throw ApiException.conflict("该 provider 仍被 appkey 绑定，请先解绑");
         }
+        List<Long> grantIds = providerGrants.findByProviderIdOrderByIdAsc(id).stream()
+                .map(ProviderGrantEntity::getId).toList();
+        providerGrants.deleteByProviderId(id);
+        grantIds.forEach(providerGrantUsages::deleteByGrantId);
         providers.delete(p);
         auditService.record(AuditModule.PROVIDER, "delete_provider", actorId, p.getOrgId(), "provider",
                 String.valueOf(id), "slug=" + p.getSlug(), AuditModule.SUCCESS);
@@ -159,8 +171,9 @@ public class ProviderService {
     /**
      * 管理范围门禁：platformAdmin 可管一切；orgId 非空时该组织 owner/admin 可管；
      * orgId 为 null（平台共享池）仅 platformAdmin。组织不存在/非成员由 roleOf 判 null 自然 403。
+     * 包级可见：ProviderGrantService（provider 授权管理）复用同一判定。
      */
-    private void requireManageScope(Long actorId, Long orgId) {
+    void requireManageScope(Long actorId, Long orgId) {
         if (isPlatformAdmin(actorId)) {
             return;
         }

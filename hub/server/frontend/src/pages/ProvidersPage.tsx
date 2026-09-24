@@ -1,8 +1,29 @@
 import {useCallback, useEffect, useState} from 'react';
-import {createProvider, deleteProvider, listOrgOptions, listProviders, updateProvider} from '../api';
+import {
+  addProviderCredits,
+  adminListUsers,
+  createProvider,
+  createProviderGrant,
+  deleteProvider,
+  deleteProviderGrant,
+  listOrgMembers,
+  listOrgOptions,
+  listProviderCredits,
+  listProviderGrants,
+  listProviders,
+  updateGrantPlan,
+  updateProvider,
+} from '../api';
 import {loadSession} from '../auth';
 import Modal from '../components/Modal';
-import type {OrgOptionDto, ProviderDto} from '../types';
+import type {
+  MemberDto,
+  OrgOptionDto,
+  ProviderCreditDto,
+  ProviderDto,
+  ProviderGrantDto,
+  UserDto,
+} from '../types';
 
 const STATUS_LABELS: Record<string, string> = {
   active: '正常',
@@ -223,6 +244,165 @@ export default function ProvidersPage() {
     }
   };
 
+  // ============ 授权管理：按用户授权 + 可选每日次数上限/有效期；配置任意授权后仅清单内用户可用 ============
+  const [grantProvider, setGrantProvider] = useState<ProviderDto | null>(null);
+  const [grants, setGrants] = useState<ProviderGrantDto[] | null>(null);
+  // 授权用户候选：组织 provider 用成员列表；平台池（仅 platformAdmin 可管理）用全量用户
+  const [candidates, setCandidates] = useState<{id: number; label: string}[]>([]);
+  const [grantUserId, setGrantUserId] = useState('');
+  const [grantLimit, setGrantLimit] = useState('');
+  const [grantExpires, setGrantExpires] = useState('');
+  const [grantError, setGrantError] = useState('');
+  const [grantBusy, setGrantBusy] = useState(false);
+
+  const openGrants = async (p: ProviderDto) => {
+    setGrantProvider(p);
+    setGrants(null);
+    setGrantUserId('');
+    setGrantLimit('');
+    setGrantExpires('');
+    setGrantError('');
+    try {
+      const [g, c] = await Promise.all([
+        listProviderGrants(p.id),
+        p.orgId !== null
+          ? listOrgMembers(p.orgId).then((ms: MemberDto[]) =>
+              ms.map((m) => ({id: m.userId, label: m.displayName ? `${m.displayName}（${m.username}）` : m.username})),
+            )
+          : adminListUsers().then((us: UserDto[]) =>
+              us.map((u) => ({id: u.id, label: u.displayName ? `${u.displayName}（${u.username}）` : u.username})),
+            ),
+      ]);
+      setGrants(g);
+      setCandidates(c);
+    } catch (err) {
+      setGrantError(err instanceof Error ? err.message : '加载授权失败');
+      setGrants([]);
+    }
+  };
+
+  const submitGrant = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!grantProvider) return;
+    setGrantError('');
+    setGrantBusy(true);
+    try {
+      await createProviderGrant(grantProvider.id, {
+        userId: Number(grantUserId),
+        // 留空 = 不限流；有效期留空 = 永久
+        ...(grantLimit.trim() ? {dailyLimit: Number(grantLimit)} : {}),
+        ...(grantExpires ? {expiresAt: new Date(grantExpires).toISOString()} : {}),
+      });
+      setGrants(await listProviderGrants(grantProvider.id));
+      setGrantUserId('');
+      setGrantLimit('');
+      setGrantExpires('');
+    } catch (err) {
+      setGrantError(err instanceof Error ? err.message : '添加授权失败');
+    } finally {
+      setGrantBusy(false);
+    }
+  };
+
+  const removeGrant = async (g: ProviderGrantDto) => {
+    if (!grantProvider) return;
+    setGrantError('');
+    try {
+      await deleteProviderGrant(grantProvider.id, g.id);
+      setGrants(await listProviderGrants(grantProvider.id));
+    } catch (err) {
+      setGrantError(err instanceof Error ? err.message : '取消授权失败');
+    }
+  };
+
+  // ============ 积分管理（V27）：周期发放计划 + 手动临时积分 + 流水；FIFO 按过期时间消耗 ============
+  const [creditGrant, setCreditGrant] = useState<ProviderGrantDto | null>(null);
+  const [creditRows, setCreditRows] = useState<ProviderCreditDto[] | null>(null);
+  // 发放计划表单（空串 = 不发放该周期）
+  const [planDaily, setPlanDaily] = useState('');
+  const [planMonthly, setPlanMonthly] = useState('');
+  const [planYearly, setPlanYearly] = useState('');
+  // 临时积分表单
+  const [tempCredits, setTempCredits] = useState('');
+  const [tempExpires, setTempExpires] = useState('');
+  const [creditError, setCreditError] = useState('');
+  const [creditBusy, setCreditBusy] = useState(false);
+
+  const openCredits = (g: ProviderGrantDto) => {
+    setCreditGrant(g);
+    setCreditRows(null);
+    setPlanDaily(g.dailyCredits === null ? '' : String(g.dailyCredits));
+    setPlanMonthly(g.monthlyCredits === null ? '' : String(g.monthlyCredits));
+    setPlanYearly(g.yearlyCredits === null ? '' : String(g.yearlyCredits));
+    setTempCredits('');
+    setTempExpires('');
+    setCreditError('');
+    if (grantProvider) {
+      listProviderCredits(grantProvider.id, g.id)
+        .then(setCreditRows)
+        .catch((err) => {
+          setCreditError(err instanceof Error ? err.message : '加载积分流水失败');
+          setCreditRows([]);
+        });
+    }
+  };
+
+  const reloadGrantsQuietly = async () => {
+    if (!grantProvider) return;
+    try {
+      const fresh = await listProviderGrants(grantProvider.id);
+      setGrants(fresh);
+      // 同步刷新积分弹窗里的授权行（余额列随消耗变化）
+      const current = creditGrant?.id;
+      if (current != null) {
+        const match = fresh.find((x) => x.id === current);
+        if (match) setCreditGrant(match);
+      }
+    } catch {
+      // 静默：主列表刷新失败不阻塞积分操作
+    }
+  };
+
+  const submitPlan = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!grantProvider || !creditGrant) return;
+    setCreditError('');
+    setCreditBusy(true);
+    try {
+      await updateGrantPlan(grantProvider.id, creditGrant.id, {
+        dailyCredits: planDaily.trim() ? Number(planDaily) : null,
+        monthlyCredits: planMonthly.trim() ? Number(planMonthly) : null,
+        yearlyCredits: planYearly.trim() ? Number(planYearly) : null,
+      });
+      await reloadGrantsQuietly();
+    } catch (err) {
+      setCreditError(err instanceof Error ? err.message : '保存发放计划失败');
+    } finally {
+      setCreditBusy(false);
+    }
+  };
+
+  const submitTempCredits = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!grantProvider || !creditGrant) return;
+    setCreditError('');
+    setCreditBusy(true);
+    try {
+      await addProviderCredits(grantProvider.id, creditGrant.id, {
+        credits: Number(tempCredits),
+        expiresAt: new Date(tempExpires).toISOString(),
+      });
+      setTempCredits('');
+      setTempExpires('');
+      setCreditRows(await listProviderCredits(grantProvider.id, creditGrant.id));
+      await reloadGrantsQuietly();
+    } catch (err) {
+      setCreditError(err instanceof Error ? err.message : '发放临时积分失败');
+    } finally {
+      setCreditBusy(false);
+    }
+  };
+
   return (
     <div className="page">
       <div className="page-head">
@@ -324,6 +504,9 @@ export default function ProvidersPage() {
                       <>
                         <button type="button" className="btn btn-ghost btn-sm" onClick={() => openEdit(p)}>
                           编辑
+                        </button>{' '}
+                        <button type="button" className="btn btn-ghost btn-sm" onClick={() => void openGrants(p)}>
+                          授权
                         </button>{' '}
                         <button type="button" className="btn btn-danger btn-sm" onClick={() => void remove(p)}>
                           删除
@@ -446,6 +629,259 @@ export default function ProvidersPage() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {grantProvider && (
+        <Modal
+          title={`授权管理：${grantProvider.slug}`}
+          subtitle="未配置任何授权 = 所有 AppKey 可用；配置后仅清单内用户可用，可另设每日次数上限与有效期"
+          onClose={() => setGrantProvider(null)}
+          width={640}
+        >
+          <div className="modal-form">
+            {grants === null ? (
+              <div className="empty-hint">加载中…</div>
+            ) : grants.length === 0 ? (
+              <div className="empty-hint">暂无授权记录（当前开放给所有 AppKey 使用）</div>
+            ) : (
+              <table className="data-table">
+                <thead>
+                  <tr>
+                    <th>用户</th>
+                    <th>每日上限</th>
+                    <th>今日已用</th>
+                    <th>积分余额</th>
+                    <th>有效期至</th>
+                    <th>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {grants.map((g) => (
+                    <tr key={g.id}>
+                      <td>{g.username ?? `用户 #${g.userId}`}</td>
+                      <td>{g.dailyLimit ?? '不限'}</td>
+                      <td>{g.usedToday ?? '—'}</td>
+                      <td>
+                        {g.remainingCredits === null ? (
+                          <span className="field-hint">未启用</span>
+                        ) : (
+                          <span
+                            className="badge role-member"
+                            title="Σ 未过期面额 − 已消耗；按过期时间先后 FIFO 消耗"
+                          >
+                            ⚡ {g.remainingCredits}
+                          </span>
+                        )}
+                      </td>
+                      <td>
+                        {g.expiresAt
+                          ? new Date(g.expiresAt).toLocaleString('zh-CN', {hour12: false})
+                          : '永久'}
+                      </td>
+                      <td style={{whiteSpace: 'nowrap'}}>
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => openCredits(g)}
+                        >
+                          积分
+                        </button>{' '}
+                        <button
+                          type="button"
+                          className="btn btn-danger btn-sm"
+                          onClick={() => void removeGrant(g)}
+                        >
+                          取消授权
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            <form onSubmit={(e) => void submitGrant(e)}>
+              <label>
+                授权用户
+                <select value={grantUserId} onChange={(e) => setGrantUserId(e.target.value)} required>
+                  <option value="" disabled>
+                    选择用户…
+                  </option>
+                  {candidates.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                每日调用上限<span className="field-hint">留空 = 不限流；按请求次数计，成功也计数</span>
+                <input
+                  type="number"
+                  min={1}
+                  value={grantLimit}
+                  onChange={(e) => setGrantLimit(e.target.value)}
+                  placeholder="如 100"
+                />
+              </label>
+              <label>
+                有效期至<span className="field-hint">留空 = 永久；须为未来时间</span>
+                <input
+                  type="datetime-local"
+                  value={grantExpires}
+                  onChange={(e) => setGrantExpires(e.target.value)}
+                />
+              </label>
+              {grantError && <div className="form-error">{grantError}</div>}
+              <div className="modal-actions">
+                <button type="button" className="btn btn-ghost" onClick={() => setGrantProvider(null)}>
+                  关闭
+                </button>
+                <button type="submit" className="btn btn-primary" disabled={grantBusy || !grantUserId}>
+                  {grantBusy ? '提交中…' : '添加授权'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </Modal>
+      )}
+
+      {creditGrant && grantProvider && (
+        <Modal
+          title={`积分管理：${creditGrant.username ?? `用户 #${creditGrant.userId}`}`}
+          subtitle="按请求模型的目录比例扣积分（未登记模型 1 分/次）；按过期时间先后 FIFO 消耗，过期未耗尽部分作废"
+          onClose={() => setCreditGrant(null)}
+          width={640}
+        >
+          <div className="modal-form">
+            <form onSubmit={(e) => void submitPlan(e)}>
+              <label>
+                每日发放<span className="field-hint">当天有效次日重发；留空 = 不发放（推荐 500）</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1000000}
+                  value={planDaily}
+                  onChange={(e) => setPlanDaily(e.target.value)}
+                  placeholder="如 500"
+                />
+              </label>
+              <label>
+                每月发放<span className="field-hint">当月有效；留空 = 不发放</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1000000}
+                  value={planMonthly}
+                  onChange={(e) => setPlanMonthly(e.target.value)}
+                  placeholder="如 10000"
+                />
+              </label>
+              <label>
+                每年发放<span className="field-hint">当年有效；留空 = 不发放</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={1000000}
+                  value={planYearly}
+                  onChange={(e) => setPlanYearly(e.target.value)}
+                  placeholder="如 100000"
+                />
+              </label>
+              <div className="modal-actions">
+                <button type="submit" className="btn btn-primary" disabled={creditBusy}>
+                  {creditBusy ? '提交中…' : '保存发放计划'}
+                </button>
+              </div>
+            </form>
+
+            <hr style={{border: 'none', borderTop: '1px solid var(--border, #e0e0e0)', margin: '8px 0'}} />
+
+            <form onSubmit={(e) => void submitTempCredits(e)}>
+              <label>
+                手动发放临时积分<span className="field-hint">与周期积分同池消耗；有效期必填</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={1000000}
+                  value={tempCredits}
+                  onChange={(e) => setTempCredits(e.target.value)}
+                  placeholder="面额，如 200"
+                  required
+                />
+              </label>
+              <label>
+                有效期至<span className="field-hint">须为未来时间；典型 1 天 / 1 个月</span>
+                <input
+                  type="datetime-local"
+                  value={tempExpires}
+                  onChange={(e) => setTempExpires(e.target.value)}
+                  required
+                />
+              </label>
+              <div className="modal-actions">
+                <button type="submit" className="btn btn-primary" disabled={creditBusy || !tempCredits}>
+                  {creditBusy ? '提交中…' : '发放'}
+                </button>
+              </div>
+            </form>
+
+            <hr style={{border: 'none', borderTop: '1px solid var(--border, #e0e0e0)', margin: '8px 0'}} />
+
+            <div>
+              <div style={{fontWeight: 600, marginBottom: 6}}>积分流水</div>
+              {creditRows === null ? (
+                <div className="empty-hint">加载中…</div>
+              ) : creditRows.length === 0 ? (
+                <div className="empty-hint">暂无积分记录（当期首笔请求时自动发放周期积分）</div>
+              ) : (
+                <table className="data-table">
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>面额</th>
+                      <th>已耗</th>
+                      <th>剩余</th>
+                      <th>过期时间</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {creditRows.map((c) => {
+                      const expired = new Date(c.expiresAt).getTime() < Date.now();
+                      return (
+                        <tr key={c.id}>
+                          <td>
+                            {c.periodType === 'temp'
+                              ? '临时'
+                              : c.periodType === 'daily'
+                                ? '每日'
+                                : c.periodType === 'monthly'
+                                  ? '每月'
+                                  : '每年'}
+                            {c.periodKey && (
+                              <span className="field-hint" style={{marginLeft: 4}}>
+                                {c.periodKey}
+                              </span>
+                            )}
+                          </td>
+                          <td>{c.credits}</td>
+                          <td>{c.consumed}</td>
+                          <td style={expired ? {textDecoration: 'line-through', opacity: 0.6} : undefined}>
+                            {c.remaining}
+                            {expired && <span className="field-hint">（已过期）</span>}
+                          </td>
+                          <td>{new Date(c.expiresAt).toLocaleString('zh-CN', {hour12: false})}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+
+            {creditError && <div className="form-error">{creditError}</div>}
+          </div>
         </Modal>
       )}
     </div>

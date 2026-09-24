@@ -34,7 +34,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 /**
- * 组织级 appkey：owner/admin 颁发/吊销/配置 provider 绑定。
+ * 组织级 appkey：每个人都有自己的 appkey（appkey.self）——owner/admin/member 均可颁发，
+ * 创建者本人恒可管理自己的 key；owner/admin 另可治理组织内全部（appkey.manage）。
  * 明文 key 形如 eck-&lt;32 位 hex&gt;，仅创建时返回一次；库中只存 SHA-256 hash + 展示前缀（前 12 字符）。
  * 绑定可精确到模型（modelName 空串 = 该 provider 全部模型），全量替换式更新。
  * 审计 detail 只放 name/keyPrefix，绝不落明文 key 与 hash。
@@ -59,11 +60,22 @@ public class AppKeyService {
         this.auditService = auditService;
     }
 
-    /** appkey 列表（owner/admin）：附 provider 绑定；provider 被删时 slug/name 置 null，不炸列表。 */
+    /**
+     * appkey 列表：owner/admin 看组织全量（appkey.manage）；member 仅看自己创建的（appkey.self 个人视图）；
+     * guest 无 appkey 权限。非组织成员 403。
+     */
     @Transactional(readOnly = true)
     public List<AppKeyDto> list(Long actorId, Long orgId) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
-        List<AppKeyEntity> keys = appKeys.findByOrgIdOrderByIdDesc(orgId);
+        String role = orgService.roleOf(orgId, actorId);
+        if (role == null) {
+            throw ApiException.forbidden("非组织成员");
+        }
+        if ("guest".equals(role)) {
+            throw ApiException.forbidden("权限不足（需 owner/admin/member）");
+        }
+        List<AppKeyEntity> keys = "owner".equals(role) || "admin".equals(role)
+                ? appKeys.findByOrgIdOrderByIdDesc(orgId)
+                : appKeys.findByOrgIdAndCreatedByOrderByIdDesc(orgId, actorId);
         if (keys.isEmpty()) {
             return List.of();
         }
@@ -76,10 +88,10 @@ public class AppKeyService {
                 .toList();
     }
 
-    /** 颁发 appkey（owner/admin）：明文仅此一次随响应返回。 */
+    /** 颁发 appkey（owner/admin/member——每个人都有自己的 appkey）：明文仅此一次随响应返回。 */
     @Transactional
     public AppKeyCreatedResponse create(Long actorId, Long orgId, CreateAppKeyRequest req) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin", "member");
         AppKeyEntity k = new AppKeyEntity();
         k.setOrgId(orgId);
         k.setName(req.name().trim());
@@ -105,8 +117,9 @@ public class AppKeyService {
      */
     @Transactional
     public void revoke(Long actorId, Long orgId, Long keyId) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin", "member");
         AppKeyEntity k = requireOrgKey(orgId, keyId);
+        requireCanManageKey(orgId, actorId, k);
         if ("revoked".equals(k.getStatus())) {
             return;
         }
@@ -119,11 +132,12 @@ public class AppKeyService {
                 String.valueOf(k.getId()), "keyPrefix=" + k.getKeyPrefix(), AuditModule.SUCCESS);
     }
 
-    /** 全量替换 provider 绑定（owner/admin）：先删后建；null/空 = 清空；已吊销的 key 不可改绑定。 */
+    /** 全量替换 provider 绑定（owner/admin 或 key 创建者本人）：先删后建；null/空 = 清空；已吊销的 key 不可改绑定。 */
     @Transactional
     public AppKeyDto updateBindings(Long actorId, Long orgId, Long keyId, UpdateBindingsRequest req) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin", "member");
         AppKeyEntity k = requireOrgKey(orgId, keyId);
+        requireCanManageKey(orgId, actorId, k);
         if (!"active".equals(k.getStatus())) {
             throw ApiException.validation("appkey 已吊销，不能修改绑定");
         }
@@ -142,8 +156,9 @@ public class AppKeyService {
      */
     @Transactional
     public AppKeyDto updateCloudRoute(Long actorId, Long orgId, Long keyId, CloudRouteRequest req) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin", "member");
         AppKeyEntity k = requireOrgKey(orgId, keyId);
+        requireCanManageKey(orgId, actorId, k);
         if (!"active".equals(k.getStatus())) {
             throw ApiException.validation("appkey 已吊销，不能修改 hub_cloud 路由");
         }
@@ -159,8 +174,9 @@ public class AppKeyService {
     /** 清除逻辑模型别名 {@code hub_cloud} 的默认路由（显式停用该 key 的云端别名），幂等。 */
     @Transactional
     public AppKeyDto clearCloudRouteConfig(Long actorId, Long orgId, Long keyId) {
-        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin", "member");
         AppKeyEntity k = requireOrgKey(orgId, keyId);
+        requireCanManageKey(orgId, actorId, k);
         List<AppKeyProviderBindingEntity> current = bindings.findByAppKeyId(keyId);
         if (k.getCloudProviderId() != null) {
             clearCloudRoute(k);
@@ -179,6 +195,17 @@ public class AppKeyService {
             throw ApiException.notFound("appkey 不存在");
         }
         return k;
+    }
+
+    /**
+     * key 级操作权限（appkey.self 语义）：创建者本人恒可管理自己的 key；
+     * 非本人再要求 owner/admin（治理组织内全部，appkey.manage），否则 403。
+     */
+    private void requireCanManageKey(Long orgId, Long actorId, AppKeyEntity k) {
+        if (actorId.equals(k.getCreatedBy())) {
+            return;
+        }
+        orgService.requireOrgRole(orgId, actorId, "owner", "admin");
     }
 
     /**

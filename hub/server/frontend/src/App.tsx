@@ -8,10 +8,12 @@ import ChangePasswordCard from './components/ChangePasswordCard';
 import ChangePasswordModal from './components/ChangePasswordModal';
 import AppKeysPage from './pages/AppKeysPage';
 import AuditLogsPage from './pages/AuditLogsPage';
+import CreditsPage from './pages/CreditsPage';
 import FeatureFlagsPage from './pages/FeatureFlagsPage';
 import GatewayPage from './pages/GatewayPage';
 import LoginPage from './pages/LoginPage';
 import MenuConfigPage from './pages/MenuConfigPage';
+import ModelCatalogPage from './pages/ModelCatalogPage';
 import OrgDetailPage from './pages/OrgDetailPage';
 import OrgsPage from './pages/OrgsPage';
 import PlatformCatalogPage from './pages/PlatformCatalogPage';
@@ -69,6 +71,10 @@ function TopBreadcrumb({me, orgId}: {me: MeResponse; orgId: number | null}) {
     items.push({text: '平台'}, {text: '平台目录'});
   } else if (path.startsWith('/providers')) {
     items.push({text: '平台'}, {text: '模型 Provider'});
+  } else if (path.startsWith('/credits')) {
+    items.push({text: orgName}, {text: '积分使用情况'});
+  } else if (path.startsWith('/model-catalog')) {
+    items.push({text: '平台'}, {text: '模型目录'});
   } else if (path.startsWith('/users')) {
     items.push({text: '平台'}, {text: '用户管理'});
   }
@@ -283,6 +289,8 @@ export default function App() {
             />
             <Route path="/users" element={<UsersPage />} />
             <Route path="/providers" element={<ProvidersPage />} />
+            <Route path="/credits" element={<CreditsPage me={me} />} />
+            <Route path="/model-catalog" element={<ModelCatalogPage me={me} />} />
             <Route path="*" element={<Navigate to="/projects" replace />} />
           </Routes>
         </main>

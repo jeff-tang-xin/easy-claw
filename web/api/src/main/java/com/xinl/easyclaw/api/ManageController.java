@@ -608,6 +608,16 @@ public class ManageController {
     }
 
     /**
+     * 积分余额代理：透传 {@code GET /api/spoke/credits} 响应体
+     * （[{providerId,providerName,providerSlug,remaining,dailyLimit,usedToday}]，appkey 创建者维度）。
+     * remaining 为 null = 该 provider 未启用积分池；原样透传，hub 侧加字段时 spoke 无需同步改代码。
+     */
+    @GetMapping("/manage/cloud/credits")
+    public ResponseEntity<String> cloudCredits() {
+        return hubProxyGet("/api/spoke/credits");
+    }
+
+    /**
      * 查询 spoke 工作区的 hub 项目绑定：读 spoke 本地 projectId（绑定是 spoke 端事实，hub 不维护）。
      * projectName 恒为 null——前端按 {@code #projectId} 回退展示，避免为展示名再依赖 hub 可用性。
      */

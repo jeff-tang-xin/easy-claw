@@ -20,6 +20,7 @@ import com.xinl.easyclaw.hub.repository.AppKeyRepository;
 import com.xinl.easyclaw.hub.repository.LlmProviderRepository;
 import com.xinl.easyclaw.hub.security.AppKeyContext;
 import com.xinl.easyclaw.hub.service.CryptoService;
+import com.xinl.easyclaw.hub.service.ProviderGrantService;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
@@ -38,6 +39,7 @@ class GatewayServiceCloudRouteTest {
     private final AppKeyProviderBindingRepository bindings = mock(AppKeyProviderBindingRepository.class);
     private final AppKeyRepository appKeys = mock(AppKeyRepository.class);
     private final LlmProviderRepository providers = mock(LlmProviderRepository.class);
+    private final ProviderGrantService providerGrantService = mock(ProviderGrantService.class);
     private final CryptoService cryptoService = mock(CryptoService.class);
     private final UpstreamClient upstream = mock(UpstreamClient.class);
     private final GatewayLogWriter logWriter = mock(GatewayLogWriter.class);
@@ -49,7 +51,7 @@ class GatewayServiceCloudRouteTest {
 
     @BeforeEach
     void setUp() {
-        gateway = new GatewayService(bindings, appKeys, providers, cryptoService, upstream,
+        gateway = new GatewayService(bindings, appKeys, providers, providerGrantService, cryptoService, upstream,
                 translator, logWriter, om);
         context = new AppKeyContext(APP_KEY_ID, "cloud-key", "eck-test", 3L, 5L);
 

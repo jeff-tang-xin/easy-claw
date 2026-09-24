@@ -1,6 +1,19 @@
 import {memo, useCallback, useEffect, useMemo, useRef, useState} from 'react';
 import {useNavigate, useParams} from 'react-router-dom';
-import {del, getJson, postJson, putJson, type StreamEvent} from '../api';
+import {
+    bindCloudWorkspace,
+    del,
+    getCloudBinding,
+    getCloudCredits,
+    getCloudProjects,
+    getJson,
+    postJson,
+    putJson,
+    type CloudBinding,
+    type CloudCredit,
+    type CloudProject,
+    type StreamEvent,
+} from '../api';
 import Modal from '../components/Modal';
 import {useBranding} from '../branding';
 import {useCloudStatus} from '../cloudStatus';
@@ -997,6 +1010,16 @@ export default function ChatPage() {
   // 云端接入状态：attachmentsAllowed=false 时隐藏附件入口（spec §4.5；本地模式/拉取失败恒放行）
   const cloudStatus = useCloudStatus();
   const attachmentsAllowed = cloudStatus.attachmentsAllowed;
+  // 云端项目绑定（V27）：cloud 模式下未绑定 hub 项目的 workspace 禁止对话，引导先绑定。
+  // cloudBinding=null 表示绑定状态未知（拉取失败/老后端）——静默放行，与 cloudStatus 回退原则一致。
+  const [cloudBinding, setCloudBinding] = useState<CloudBinding | null>(null);
+  const [showBindGuide, setShowBindGuide] = useState(false);
+  const [cloudProjects, setCloudProjects] = useState<CloudProject[]>([]);
+  const [bindTarget, setBindTarget] = useState<number | ''>('');
+  const [bindingBusy, setBindingBusy] = useState(false);
+  // 积分视图（V27）：cloud 模式侧栏展示各 provider 剩余积分（appkey 创建者维度）
+  const [cloudCredits, setCloudCredits] = useState<CloudCredit[]>([]);
+  const cloudMode = cloudStatus.configured && cloudStatus.available;
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   // 新会话弹窗（会话↔worktree 挂钩，2026-09-14）：分支隔离选项
   const [showNewSession, setShowNewSession] = useState(false);
@@ -1420,6 +1443,44 @@ export default function ChatPage() {
       }
     })();
   }, [workspaceId]);
+
+  // 云端绑定与积分（V27）：cloud 模式下随工作区切换拉取；失败静默（本地模式/老后端不阻塞 UI）
+  useEffect(() => {
+    if (!workspaceId || !cloudMode) {
+      setCloudBinding(null);
+      setCloudCredits([]);
+      return;
+    }
+    getCloudBinding(workspaceId).then(setCloudBinding).catch(() => setCloudBinding(null));
+    getCloudCredits().then(setCloudCredits).catch(() => setCloudCredits([]));
+  }, [workspaceId, cloudMode]);
+
+  // 绑定引导弹窗打开时拉取 hub 项目清单（失败静默，下拉为空时提示去运维页绑定）
+  const openBindGuide = useCallback(() => {
+    setShowBindGuide(true);
+    getCloudProjects().then((ps) => {
+      setCloudProjects(ps);
+      setBindTarget(ps.length > 0 ? ps[0].id : '');
+    }).catch(() => setCloudProjects([]));
+  }, []);
+
+  // 引导弹窗内执行绑定：成功后刷新绑定状态并关闭
+  const doBind = useCallback(async () => {
+    if (!workspaceId || !bindTarget) return;
+    setBindingBusy(true);
+    try {
+      await bindCloudWorkspace(workspaceId, Number(bindTarget));
+      setCloudBinding({ bound: true, projectId: Number(bindTarget), projectName: null });
+      setShowBindGuide(false);
+    } catch {
+      // 绑定失败保持弹窗打开，用户可重试或去运维页处理
+    } finally {
+      setBindingBusy(false);
+    }
+  }, [workspaceId, bindTarget]);
+
+  // cloud 模式且已知未绑定 → 拦截发送（绑定状态未知/本地模式不拦）
+  const bindingBlocked = cloudMode && cloudBinding !== null && !cloudBinding.bound;
 
   const loadHistory = async (wid: string, sid: string) => {
     try {
@@ -2002,6 +2063,11 @@ export default function ChatPage() {
   // 发送（非 running → 直接发送；running → 入队；Ctrl/Cmd 运行中可加引导）
   const submit = async () => {
     if (!workspaceId || !sessionId) return;
+    // cloud 模式未绑定 hub 项目：禁止对话，弹引导（V27）
+    if (bindingBlocked) {
+      openBindGuide();
+      return;
+    }
     const text = input.trim();
     if (!text && attachments.length === 0) return;
     if (running) {
@@ -2508,6 +2574,24 @@ export default function ChatPage() {
       case 'sessions':
         return (
           <>
+            {cloudMode && cloudCredits.length > 0 && (
+              <div style={{ marginBottom: 8, fontSize: 12 }}>
+                {cloudCredits.map((c) => (
+                  <div key={c.providerId}
+                       style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px',
+                                background: 'var(--bg-secondary, #f5f5f5)', borderRadius: 6, marginBottom: 4 }}
+                       title={c.remaining === null ? '该 provider 未启用积分池' : '积分池剩余（按过期时间先后消耗）'}>
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {c.providerName || c.providerSlug || `provider #${c.providerId}`}
+                    </span>
+                    <span style={{ flexShrink: 0, marginLeft: 8 }}>
+                      {c.remaining !== null ? `⚡${c.remaining}` : '⚡—'}
+                      {c.dailyLimit !== null ? ` · ${c.usedToday ?? 0}/${c.dailyLimit}` : ''}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
             <button className="btn primary" style={{ width: '100%', marginBottom: 8 }} onClick={createSession}>＋ 新会话</button>
             <div className="session-list">
               {sessions.length === 0 && <div className="hint">暂无会话</div>}
@@ -2594,6 +2678,39 @@ export default function ChatPage() {
           onDecide={decideConfirm}
           onClose={() => decideConfirm('deny')}
         />
+      )}
+
+      {showBindGuide && (
+        <Modal title="🔗 请先绑定云端项目" subtitle="云端模式下，工作区需绑定 hub 项目后才能对话"
+               onClose={() => setShowBindGuide(false)} width={420}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {cloudProjects.length === 0 ? (
+              <div className="hint">
+                未获取到可绑定的项目清单（可能无权限或 hub 不可达）。请到「运维」页的项目绑定处处理。
+              </div>
+            ) : (
+              <>
+                <label style={{ fontSize: 13 }}>
+                  选择 hub 项目
+                  <select style={{ display: 'block', width: '100%', marginTop: 4 }}
+                          value={bindTarget}
+                          onChange={(e) => setBindTarget(e.target.value ? Number(e.target.value) : '')}>
+                    {cloudProjects.map((p) => (
+                      <option key={p.id} value={p.id}>{p.name}（#{p.id}）</option>
+                    ))}
+                  </select>
+                </label>
+                <button className="btn primary" disabled={!bindTarget || bindingBusy} onClick={doBind}>
+                  {bindingBusy ? '绑定中…' : '绑定并开始对话'}
+                </button>
+              </>
+            )}
+            <div className="hint" style={{ fontSize: 12 }}>
+              · 绑定后本工作区的知识库/黑板数据将归属所选项目
+              · 也可稍后在「运维」页的绑定管理中调整
+            </div>
+          </div>
+        </Modal>
       )}
 
       {showNewSession && (

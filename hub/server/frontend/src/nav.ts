@@ -29,6 +29,7 @@ export const NAV_GROUPS: NavGroup[] = [
     items: [
       {to: '/projects', label: '项目', icon: '📁', title: '项目', anyOfPerms: []},
       {to: '/appkeys', label: '我的 AppKey', icon: '🔑', title: '我的 AppKey', anyOfPerms: ['appkey.self']},
+      {to: '/credits', label: '积分使用情况', icon: '⚡', title: '积分使用情况', anyOfPerms: []},
     ],
   },
   {
@@ -55,6 +56,7 @@ export const NAV_GROUPS: NavGroup[] = [
       {to: '/users', label: '用户管理', icon: '👥', title: '用户管理', anyOfPerms: ['user.manage'], platform: true},
       {to: '/providers', label: 'Provider', icon: '🧩', title: 'Provider', anyOfPerms: ['provider.manage'], platform: true},
       {to: '/platform-catalog', label: '平台目录', icon: '🗂️', title: '平台目录（菜单/开关/工具）', anyOfPerms: ['platform.catalog.manage'], platform: true},
+      {to: '/model-catalog', label: '模型目录', icon: '🧮', title: '模型目录与积分比例', anyOfPerms: ['platform.catalog.manage'], platform: true},
     ],
   },
 ];
