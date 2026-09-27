@@ -8,6 +8,7 @@ import {
   deleteProviderGrant,
   listOrgMembers,
   listOrgOptions,
+  listModelCatalog,
   listProviderCredits,
   listProviderGrants,
   listProviders,
@@ -18,12 +19,20 @@ import {loadSession} from '../auth';
 import Modal from '../components/Modal';
 import type {
   MemberDto,
+  ModelCatalogDto,
   OrgOptionDto,
   ProviderCreditDto,
   ProviderDto,
   ProviderGrantDto,
   UserDto,
 } from '../types';
+
+/** 解析模型输入框文本：与提交逻辑共用同一份切分规则，保证展示与落库一致。 */
+const parseModelsText = (text: string): string[] =>
+  text
+    .split(',')
+    .map((m) => m.trim())
+    .filter((m) => m.length > 0);
 
 const STATUS_LABELS: Record<string, string> = {
   active: '正常',
@@ -126,6 +135,8 @@ export default function ProvidersPage() {
   const [orgOptions, setOrgOptions] = useState<OrgOptionDto[]>([]);
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
+  // 模型目录（平台级模型名 → 积分比例）：表单打开时拉取，用于实时提示清单内模型的登记状态
+  const [catalog, setCatalog] = useState<ModelCatalogDto[] | null>(null);
 
   const reload = useCallback(async () => {
     try {
@@ -139,6 +150,23 @@ export default function ProvidersPage() {
   useEffect(() => {
     void reload();
   }, [reload]);
+
+  // 表单打开时拉模型目录（GET /api/model-catalog 对所有登录用户开放）；
+  // 失败静默降级为不显示关联提示，不阻塞表单。
+  useEffect(() => {
+    if (!formOpen) return;
+    let cancelled = false;
+    listModelCatalog()
+      .then((rows) => {
+        if (!cancelled) setCatalog(rows);
+      })
+      .catch(() => {
+        if (!cancelled) setCatalog(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [formOpen]);
 
   // 创建弹窗打开时：platformAdmin 拉全量组织选项（可建到任意组织）；非 admin 用会话内 owner/admin 组织
   const loadOrgOptions = useCallback(async () => {
@@ -195,10 +223,7 @@ export default function ProvidersPage() {
   const submitForm = async (e: React.FormEvent) => {
     e.preventDefault();
     setFormError('');
-    const models = modelsText
-      .split(',')
-      .map((m) => m.trim())
-      .filter((m) => m.length > 0);
+    const models = parseModelsText(modelsText);
     setBusy(true);
     try {
       if (editing) {
@@ -614,6 +639,7 @@ export default function ProvidersPage() {
                 placeholder="gpt-4o, gpt-4o-mini"
                 required
               />
+              {catalog !== null && <ModelCatalogHints models={parseModelsText(modelsText)} catalog={catalog} />}
             </label>
             <label>
               备注（可选）
@@ -884,6 +910,32 @@ export default function ProvidersPage() {
           </div>
         </Modal>
       )}
+    </div>
+  );
+}
+
+/**
+ * 模型清单的目录关联提示：逐个显示输入框里模型名的登记状态。
+ * 匹配语义与网关计费完全一致（findByModelName 精确匹配、区分大小写）——
+ * 提示「已登记」就代表请求这个模型名会按该比例扣积分，不做大小写归一。
+ */
+function ModelCatalogHints({models, catalog}: {models: string[]; catalog: ModelCatalogDto[]}) {
+  if (models.length === 0) return null;
+  const byName = new Map(catalog.map((c) => [c.modelName, c]));
+  return (
+    <div className="model-catalog-line">
+      {models.map((m) => {
+        const hit = byName.get(m);
+        return hit ? (
+          <span key={m} className="model-hit" title={`已登记：${hit.creditCost} 分/次`}>
+            ✓ {m} · {hit.creditCost}
+          </span>
+        ) : (
+          <span key={m} className="model-miss" title="未登记模型按默认 1 分/次计费；如需自定义比例请先到「模型目录」登记">
+            ○ {m} · 未登记
+          </span>
+        );
+      })}
     </div>
   );
 }

@@ -38,6 +38,7 @@ public class ModelCatalogService {
         if (modelName.isEmpty()) {
             throw ApiException.validation("模型名不能为空");
         }
+        requireNoComma(modelName);
         if (repo.existsByModelName(modelName)) {
             throw ApiException.conflict("模型已存在：" + modelName);
         }
@@ -59,6 +60,7 @@ public class ModelCatalogService {
         if (modelName.isEmpty()) {
             throw ApiException.validation("模型名不能为空");
         }
+        requireNoComma(modelName);
         repo.findByModelName(modelName)
                 .filter(other -> !other.getId().equals(id))
                 .ifPresent(other -> {
@@ -85,6 +87,16 @@ public class ModelCatalogService {
     /** 积分值统一 1 位小数、多余位数舍弃不进位（DOWN）。 */
     private BigDecimal truncate1(BigDecimal v) {
         return v.setScale(1, java.math.RoundingMode.DOWN);
+    }
+
+    /**
+     * 模型名禁止含逗号（中英文都拒）：目录按名称精确匹配请求模型名，
+     * 带逗号的名字永远无法被任何请求命中，还会占住唯一名额（历史脏数据「,deepseek-v4-pro,」的源头）。
+     */
+    private void requireNoComma(String modelName) {
+        if (modelName.indexOf(',') >= 0 || modelName.indexOf('，') >= 0) {
+            throw ApiException.validation("模型名不能包含逗号（多个模型请分开登记）：" + modelName);
+        }
     }
 
     private String emptyToNull(String s) {

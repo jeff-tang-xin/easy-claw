@@ -116,6 +116,17 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 }
 .modal-form { display: flex; flex-direction: column; gap: 12px; margin-top: 14px; }
 
+/* ============ Provider 表单：模型目录关联提示 ============ */
+.model-catalog-line { display: flex; flex-wrap: wrap; gap: 6px; font-weight: 400; }
+.model-hit {
+  color: var(--success); background: var(--success-bg);
+  border-radius: 6px; padding: 2px 8px; font-size: 0.85em;
+}
+.model-miss {
+  color: #92400e; background: #fffbeb;
+  border-radius: 6px; padding: 2px 8px; font-size: 0.85em;
+}
+
 /* ============ 密码临期提醒横幅 ============ */
 .pwd-expiry-banner {
   display: flex;

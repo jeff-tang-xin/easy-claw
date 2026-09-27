@@ -8,6 +8,9 @@
 //   - 右侧栏：hub 下发的运维服务器清单（一键连接 / 当次密码连接 + 文件上传）。
 //     服务器只来自平台（GET /api/spoke/ops-servers），spoke 不维护本地连接配置与凭证；
 //     运维工作区不绑定 hub 项目、没有知识库/黑板（那是 SOLO 工作区的能力）。
+//   - AI 模式下智能体回合执行中（tab.busy），终端按 Ctrl+C 发 stop 消息终止该回合
+//     （后端 stopChat + 主动推 stopped 复位；空闲时 Ctrl+C 仍是放弃本行）；
+//     SH 模式 Ctrl+C 照旧直通远程 shell 终止远端命令。
 // 确认按钮只给「允许一次 / 拒绝」：ops 模式白名单机制关闭（AgentOrchestrator.whitelistEnabled=false），
 // 回合/永久授权后端一律不生效，渲染出来只会造成「点了没反应」的错觉。
 import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
@@ -355,6 +358,7 @@ export default function OpsPage() {
     sentriesRef.current.set(active.terminalId, sentry);
     term.writeln(`\x1b[90m${active.title}（${active.username}@${active.host}）\x1b[0m`);
     term.writeln(`\x1b[90m徽标 AI（默认）：在此直接打字与智能体对话，白名单内命令(ls/df/systemctl status等)自动直执行；徽标 SH：键盘逐键直通远程 shell（Ctrl+C/Tab/↑ 可用）。点 tab 徽标切换\x1b[0m`);
+    term.writeln(`\x1b[90mAI 模式下智能体执行中按 Ctrl+C 可终止当前回合\x1b[0m`);
     // 键盘分流：AI 模式本地行编辑（回车提交分流，不直通 PTY）；SH 模式逐键直通远程 shell
     term.onData((data) => {
       const tab = tabsRef.current.find((t) => t.terminalId === active.terminalId);
@@ -489,9 +493,22 @@ export default function OpsPage() {
         clearBusy();
         break;
       case 'end':
+        term?.write('\r\n');
+        clearBusy();
+        break;
       case 'stopped':
         term?.write('\r\n');
         clearBusy();
+        // 回合被终止（Ctrl+C/停止）：挂起的工具确认已无意义，
+        // 残留确认条会造成「点了没反应」的错觉（见文件头交互模型说明）
+        if (tab) {
+          setPendingConfirms((prev) => {
+            if (!(tab.terminalId in prev)) return prev;
+            const next = {...prev};
+            delete next[tab.terminalId];
+            return next;
+          });
+        }
         break;
       default:
         // tool_end / context / file_changed / status 等终端页不渲染
@@ -811,10 +828,18 @@ export default function OpsPage() {
         const cps = Array.from(buf);
         cps.pop();
         buf = cps.join('');
-      } else if (ch === '\x03') {     // Ctrl+C：放弃本行
-        buf = '';
-        lineBufRef.current.set(tab.terminalId, '');
-        termWrite(tab.terminalId, '^C\r\n' + AGENT_PROMPT);
+      } else if (ch === '\x03') {     // Ctrl+C
+        if (tab.busy) {
+          // agent 回合执行中：终止智能体（后端 stopChat 中断 Flux 并主动推 stopped 复位 busy）。
+          // 此处不补提示符——stopped 事件到达后由 clearBusy 统一补，避免双提示符
+          sockRef.current?.send({type: 'stop', workspaceId, sessionId: tab.sessionId});
+          termWrite(tab.terminalId, '^C\r\n\x1b[90m⏹ 已请求终止智能体回合\x1b[0m\r\n');
+        } else {
+          // 空闲：放弃本行
+          buf = '';
+          lineBufRef.current.set(tab.terminalId, '');
+          termWrite(tab.terminalId, '^C\r\n' + AGENT_PROMPT);
+        }
         return;
       } else if (ch >= ' ') {         // 可打印字符（含 IME 提交的中文串）；其余控制字符忽略
         buf += ch;

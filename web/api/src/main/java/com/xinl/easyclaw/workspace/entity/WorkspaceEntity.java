@@ -44,7 +44,7 @@ public class WorkspaceEntity {
      * <p>决定该工作区允许绑定哪一类场景（类型必须一致）。ddl-auto:update 自动加列，
      * 存量行取默认值 {@code single}（既有工作区全部归入 SOLO）。
      */
-    @Column(nullable = false, length = 20)
+    @Column(nullable = false, length = 20,columnDefinition = "VARCHAR(20) NOT NULL DEFAULT 'single'")
     @Builder.Default
     private String type = "single";
 
