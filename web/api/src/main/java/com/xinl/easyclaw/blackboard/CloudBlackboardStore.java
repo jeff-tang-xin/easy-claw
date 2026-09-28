@@ -45,7 +45,8 @@ public class CloudBlackboardStore implements BlackboardStore {
     }
 
     @Override
-    public String append(WorkspaceContext workspace, String key, String author, String type, String content) {
+    public String append(WorkspaceContext workspace, String key, String author, String type, String content,
+                         String sessionId) {
         if (isArchivedKey(key)) {
             // 归档本是只读历史：禁止再追加（hub 侧同样拒绝，这里提前给出与本地一致的文案）
             return "❌ 该记录本已归档，为只读历史，不能再登记内容。请改用当前活跃记录本。";
@@ -66,6 +67,7 @@ public class CloudBlackboardStore implements BlackboardStore {
             payload.put("author", author == null ? "" : author);
             payload.put("type", type == null || type.isBlank() ? "note" : type);
             payload.put("content", body);
+            payload.put("sessionId", sessionId == null ? "" : sessionId);
             resp = hub.post("/api/spoke/blackboard/entries", payload);
         } catch (HubSpokeClient.HubCallException e) {
             // 不吞异常：让调用方知道这条没写进 hub（也绝不降级写本地，防两套数据分叉）
@@ -101,7 +103,8 @@ public class CloudBlackboardStore implements BlackboardStore {
                     n.path("ts").asText(""),
                     n.path("author").asText(""),
                     n.path("type").asText(""),
-                    n.path("content").asText("")));
+                    n.path("content").asText(""),
+                    n.path("sessionId").asText(null)));
         }
         // hub 已按 seq 升序返回；防御性再排一次，排序以 seq 为准（与本地一致）
         all.sort((a, b) -> Long.compare(a.seq(), b.seq()));

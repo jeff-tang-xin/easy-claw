@@ -24,6 +24,7 @@ import type {
   OrgOptionDto,
   OrgToolSettingDto,
   OpsCommandLogPage,
+  OpsServerCategoryDto,
   OpsServerDto,
   OpsServerGrantDto,
   PlatformToolDto,
@@ -603,6 +604,22 @@ export const updateOpsServer = (id: number, body: UpdateOpsServerBody) =>
   request<OpsServerDto>('PUT', `/api/platform/ops-servers/${id}`, body);
 
 export const deleteOpsServer = (id: number) => request<void>('DELETE', `/api/platform/ops-servers/${id}`);
+
+// ============ 运维服务器分类标签字典（V28：服务器 category 收口为受管标签） ============
+
+export const listOpsServerCategories = () =>
+  request<OpsServerCategoryDto[]>('GET', '/api/platform/ops-server-categories');
+
+export const createOpsServerCategory = (body: {name: string; sortOrder?: number}) =>
+  request<OpsServerCategoryDto>('POST', '/api/platform/ops-server-categories', body);
+
+/** 部分更新：name 重命名时服务端同步 ops_servers.category 引用行；不传不改 */
+export const updateOpsServerCategory = (id: number, body: {name?: string; sortOrder?: number}) =>
+  request<OpsServerCategoryDto>('PUT', `/api/platform/ops-server-categories/${id}`, body);
+
+/** 删除标签：仍被服务器引用时 409（先调整相关服务器分类） */
+export const deleteOpsServerCategory = (id: number) =>
+  request<void>('DELETE', `/api/platform/ops-server-categories/${id}`);
 
 /** 服务器用户时效授权清单（含已过期历史行） */
 export const listOpsServerGrants = (serverId: number) =>

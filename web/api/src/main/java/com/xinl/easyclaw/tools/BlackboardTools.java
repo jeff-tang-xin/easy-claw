@@ -15,14 +15,16 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * 共享记录本工具（blackboard）：给互相看不见的并行子 Agent 一块公共黑板。
+ * 共享记录本工具（blackboard）：个人跨会话的心得账本。
  * <p>
  * team 模式下每个子 Agent 是独立会话、独立上下文，彼此的发现无法互通，主 Agent 也只能在
  * 子任务结束时拿到一段总结。本工具让任何执行体随时把「结论/建议/风险」登记进同一个记录本，
  * 别人开工前读一遍就能站在同伴的结论上继续，而不是各干各的最后再拼。
  * <p>
- * 隔离键取 {@code ec.blackboardKey}（主会话写入、子 Agent 继承），因此同一次任务的
- * 主 Agent 与全部子 Agent 共享一块黑板，不同会话之间互不干扰。
+ * 记录本按「工作区（local）/ 项目+用户（cloud）」隔离，<b>不按会话分本</b>：
+ * 同一工作区的新会话能读到旧会话留下的结论（条目上的 sessionId 标注来源）；
+ * 主会话写入固定本名（{@link BlackboardKeys#DEFAULT_BOOK}），子 Agent 经
+ * {@code RuntimeContext.builder(parentRc)} 继承同一本。
  * <p>
  * 只提供追加与读取，<b>刻意不提供删除/清空</b>：黑板的价值在于不可抵赖的累积记录。
  * {@code author} 也不是入参，而是从运行时上下文解析 —— 不给冒名登记的机会。
@@ -62,7 +64,8 @@ public class BlackboardTools {
         }
         try {
             String safeType = type != null && TYPES.contains(type.trim().toLowerCase()) ? type.trim().toLowerCase() : "note";
-            return store.append(workspace, resolveKey(rc), resolveAuthor(rc), safeType, content.trim());
+            return store.append(workspace, resolveKey(rc), resolveAuthor(rc), safeType, content.trim(),
+                    rc == null ? null : rc.getSessionId());
         } catch (Exception e) {
             log.error("登记记录本失败", e);
             return "❌ 登记失败: " + e.getMessage();
@@ -128,22 +131,22 @@ public class BlackboardTools {
                 + e.content() + "\n\n";
     }
 
-    /** 记录本隔离键：优先父会话继承来的 key，取不到退回自身 sessionId（至少不串台） */
+    /** 记录本名：优先父会话继承（与主会话同本），取不到退回固定本名（至少不串台） */
     private String resolveKey(RuntimeContext rc) {
         if (rc == null) {
-            return "default";
+            return BlackboardKeys.DEFAULT_BOOK;
         }
         Object key = rc.get(BlackboardKeys.CTX_KEY);
         if (key instanceof String s && !s.isBlank()) {
             return s;
         }
-        String sid = rc.getSessionId();
-        return sid == null || sid.isBlank() ? "default" : sid;
+        return BlackboardKeys.DEFAULT_BOOK;
     }
 
     /**
-     * 登记者名：主 Agent 的 sessionId 等于 blackboardKey → {@code main}；
-     * 子 Agent（sessionId 形如 {@code sub-<UUID>}）取尾 6 位，够区分且不冗长。
+     * 登记者名：子 Agent（sessionId 形如 {@code sub-<UUID>}，见 AgentService 派发处）取尾 6 位，
+     * 够区分且不冗长；其余（主会话）一律 {@code main}。
+     * <b>不能再用「sessionId == blackboardKey」判定主/子</b>：记录本名已固定为 main，与会话 id 无关。
      */
     private String resolveAuthor(RuntimeContext rc) {
         if (rc == null) {
@@ -153,10 +156,9 @@ public class BlackboardTools {
         if (sid == null || sid.isBlank()) {
             return "unknown";
         }
-        Object key = rc.get(BlackboardKeys.CTX_KEY);
-        if (key instanceof String s && s.equals(sid)) {
-            return "main";
+        if (sid.startsWith("sub-")) {
+            return "sub-" + (sid.length() <= 6 ? sid : sid.substring(sid.length() - 6));
         }
-        return "sub-" + (sid.length() <= 6 ? sid : sid.substring(sid.length() - 6));
+        return "main";
     }
 }

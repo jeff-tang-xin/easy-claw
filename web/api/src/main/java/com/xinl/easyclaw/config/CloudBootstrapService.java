@@ -193,7 +193,8 @@ public class CloudBootstrapService {
         List<SpokeOpsServerView> servers = s == null ? List.of()
                 : s.opsServers().stream()
                         .map(o -> new SpokeOpsServerView(o.serverKey(), o.name(), o.host(), o.port(),
-                                o.username(), o.description(), o.projectId(), null, o.hasPassword(), o.osType()))
+                                o.username(), o.description(), o.projectId(), null, o.hasPassword(),
+                                o.osType(), o.category()))
                         .toList();
         return new CloudConfigView(
                 available,
@@ -343,7 +344,9 @@ public class CloudBootstrapService {
                         // V24：是否配置了密码（供前端预判一键连接；明文本身不下发浏览器）
                         n.hasNonNull("password") && !n.path("password").asText().isBlank(),
                         // V24：操作系统类型；旧 hub 未下发该字段时保持 null（容错）
-                        n.hasNonNull("osType") ? n.path("osType").asText() : null));
+                        n.hasNonNull("osType") ? n.path("osType").asText() : null,
+                        // V28：受管分类标签（web 端按标签归类渲染）；旧 hub 未下发时保持 null（容错）
+                        n.hasNonNull("category") ? n.path("category").asText() : null));
             }
             return List.copyOf(out);
         } catch (Exception e) {

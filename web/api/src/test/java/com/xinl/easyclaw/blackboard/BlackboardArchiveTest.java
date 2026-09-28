@@ -9,6 +9,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -48,7 +49,7 @@ class BlackboardArchiveTest {
     @DisplayName("归档后原文件消失、归档文件保留原内容")
     void archivePreservesContent(@TempDir Path root) throws IOException {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "保留我");
+        store.append(ws(root), "s1", "main", "note", "保留我", "sess-abc");
 
         Path original = bbDir(root).resolve("s1.jsonl");
         assertTrue(Files.exists(original), "前置条件：记录本应已创建");
@@ -69,12 +70,12 @@ class BlackboardArchiveTest {
     @DisplayName("归档后 seq 从 1 重新开始")
     void seqRestartsAfterArchive(@TempDir Path root) {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "第一条");
-        store.append(ws(root), "s1", "main", "note", "第二条");
+        store.append(ws(root), "s1", "main", "note", "第一条", null);
+        store.append(ws(root), "s1", "main", "note", "第二条", null);
 
         store.archiveBook(ws(root), "s1");
 
-        String result = store.append(ws(root), "s1", "main", "note", "归档后第一条");
+        String result = store.append(ws(root), "s1", "main", "note", "归档后第一条", null);
         assertTrue(result.contains("#1"),
                 "归档等于清空，序号必须重置，否则用户看到的编号会莫名其妙地延续旧值；实际: " + result);
 
@@ -87,7 +88,7 @@ class BlackboardArchiveTest {
     @DisplayName("归档后归档本仍出现在清单，带 archived 标记与归档时间，且可只读回看")
     void archivedBookRemainsVisibleAndReadable(@TempDir Path root) throws IOException {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "历史内容");
+        store.append(ws(root), "s1", "main", "note", "历史内容", null);
         String archivedName = store.archiveBook(ws(root), "s1");
 
         List<BlackboardStore.BlackboardBook> books = store.listBooks(ws(root));
@@ -108,9 +109,9 @@ class BlackboardArchiveTest {
     @DisplayName("活跃本与归档本同基础 key 时并存且各自可定位")
     void activeAndArchivedCoexist(@TempDir Path root) {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "旧");
+        store.append(ws(root), "s1", "main", "note", "旧", null);
         store.archiveBook(ws(root), "s1");
-        store.append(ws(root), "s1", "main", "note", "新");
+        store.append(ws(root), "s1", "main", "note", "新", null);
 
         List<BlackboardStore.BlackboardBook> books = store.listBooks(ws(root));
         assertEquals(2, books.size(), "应有一本归档 + 一本活跃；实际: " + books);
@@ -133,11 +134,11 @@ class BlackboardArchiveTest {
     @DisplayName("归档本拒绝再追加（返回失败说明且内容不变）")
     void archivedBookRejectsAppend(@TempDir Path root) {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "旧");
+        store.append(ws(root), "s1", "main", "note", "旧", null);
         String archivedName = store.archiveBook(ws(root), "s1");
         String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
 
-        String result = store.append(ws(root), archivedKey, "main", "note", "试图改写历史");
+        String result = store.append(ws(root), archivedKey, "main", "note", "试图改写历史", null);
         assertTrue(result.startsWith("❌"), "追加归档本必须被拒绝；实际: " + result);
         assertTrue(result.contains("只读"), "拒绝原因应说明归档本只读；实际: " + result);
 
@@ -150,7 +151,7 @@ class BlackboardArchiveTest {
     @DisplayName("归档本拒绝二次归档")
     void archivedBookRejectsReArchive(@TempDir Path root) {
         BlackboardStore store = new LocalBlackboardStore();
-        store.append(ws(root), "s1", "main", "note", "旧");
+        store.append(ws(root), "s1", "main", "note", "旧", null);
         String archivedName = store.archiveBook(ws(root), "s1");
         String archivedKey = archivedName.substring(0, archivedName.length() - ".jsonl".length());
 
@@ -158,5 +159,23 @@ class BlackboardArchiveTest {
                 () -> store.archiveBook(ws(root), archivedKey),
                 "对归档本再次归档必须被拒绝");
         assertTrue(ex.getMessage().contains("已归档"), "拒绝原因应说明已归档；实际: " + ex.getMessage());
+    }
+
+    @Test
+    @DisplayName("sessionId 随条目落盘并可回读；旧格式行（无 sessionId）兼容为 null")
+    void sessionIdRoundTripAndLegacyCompat(@TempDir Path root) throws IOException {
+        BlackboardStore store = new LocalBlackboardStore();
+        store.append(ws(root), "s1", "main", "finding", "新格式", "sess-xyz");
+        // 手工追加一行旧格式（无 sessionId 字段）模拟历史数据
+        Files.writeString(bbDir(root).resolve("s1.jsonl"),
+                "{\"seq\":0,\"ts\":\"2026-01-01T00:00:00\",\"author\":\"main\",\"type\":\"note\",\"content\":\"旧格式\"}"
+                        + System.lineSeparator(),
+                StandardCharsets.UTF_8, StandardOpenOption.APPEND);
+
+        List<BlackboardEntry> entries = store.read(ws(root), "s1", 10);
+        assertEquals(2, entries.size());
+        assertEquals("旧格式", entries.get(0).content());
+        assertNull(entries.get(0).sessionId(), "旧格式行缺 sessionId 应兼容为 null");
+        assertEquals("sess-xyz", entries.get(1).sessionId(), "新条目应带回 sessionId");
     }
 }

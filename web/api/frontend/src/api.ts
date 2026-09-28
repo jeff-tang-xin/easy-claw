@@ -135,7 +135,8 @@ export interface BlackboardBook {
 
 /**
  * 记录本条目（GET /api/blackboard/entries 元素，按 seq 升序返回最近 N 条）。
- * type: note / finding / risk / conclusion；author: main 或子 Agent sessionId 尾段。
+ * type: note / finding / risk / conclusion；author: main 或子 Agent sessionId 尾段；
+ * sessionId: 登记来源会话（历史/平台条目可能为空）。
  */
 export interface BlackboardEntry {
   seq: number;
@@ -143,6 +144,7 @@ export interface BlackboardEntry {
   author: string;
   type: string;
   content: string;
+  sessionId?: string | null;
 }
 
 /** 列出工作区的记录本（含归档本，按修改时间倒序） */

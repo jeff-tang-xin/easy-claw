@@ -14,8 +14,9 @@ package com.xinl.easyclaw.config;
  *                    下发浏览器的视图一律置 null——密码不过 spoke→浏览器链路）
  * @param hasPassword 是否配置了密码（V24：供前端预判「一键连接 vs 当次手输」，替代明文字段的 UI 判据）
  * @param osType      服务器操作系统类型（V24：如 Linux/Windows；旧 hub 未下发该字段时为 null，容错）
+ * @param category    受管分类标签（V28：web 端按标签归类渲染；旧 hub 未下发该字段时为 null，容错）
  */
 public record SpokeOpsServerView(String serverKey, String name, String host, int port,
                                  String username, String description, Long projectId, String password,
-                                 Boolean hasPassword, String osType) {
+                                 Boolean hasPassword, String osType, String category) {
 }

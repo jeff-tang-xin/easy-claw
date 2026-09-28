@@ -19,4 +19,16 @@ public interface BlackboardEntryRepository extends JpaRepository<BlackboardEntry
     /** 项目内指定本（source=workspace）的活跃条目（spoke 归档整本用）。 */
     List<BlackboardEntryEntity> findByProjectIdAndSourceAndBookKeyAndStatus(
             Long projectId, String source, String bookKey, String status);
+
+    /** 项目内指定登记人+本+状态的 workspace 条目，按 id 升序（V29 spoke 读端点：个人本）。 */
+    List<BlackboardEntryEntity> findByProjectIdAndSourceAndAuthorUserIdAndBookKeyAndStatusOrderByIdAsc(
+            Long projectId, String source, Long authorUserId, String bookKey, String status);
+
+    /** 项目内指定登记人的 workspace 条目，按 id 升序（V29 spoke books 端点：个人本清单分组）。 */
+    List<BlackboardEntryEntity> findByProjectIdAndSourceAndAuthorUserIdAndStatusOrderByIdAsc(
+            Long projectId, String source, Long authorUserId, String status);
+
+    /** 项目内指定登记人+本（source=workspace）的活跃条目（V29 spoke 归档整本用）。 */
+    List<BlackboardEntryEntity> findByProjectIdAndSourceAndAuthorUserIdAndBookKeyAndStatus(
+            Long projectId, String source, Long authorUserId, String bookKey, String status);
 }

@@ -14,4 +14,9 @@ public interface OpsServerRepository extends JpaRepository<OpsServerEntity, Long
     boolean existsByServerKey(String serverKey);
 
     java.util.Optional<OpsServerEntity> findByServerKey(String serverKey);
+
+    /** 分类标签管理（V28）：按标签查引用行（重命名同步）、判存在（删除拦截）。 */
+    List<OpsServerEntity> findAllByCategory(String category);
+
+    boolean existsByCategory(String category);
 }

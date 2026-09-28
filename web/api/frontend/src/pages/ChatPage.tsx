@@ -2226,7 +2226,7 @@ export default function ChatPage() {
                   <div key={e.seq} className={`bb-entry bb-${e.type}`}>
                     <div className="bb-entry-head">
                       <span className="bb-entry-type">{BB_TYPE[e.type] || e.type}</span>
-                      <span className="bb-entry-meta">#{e.seq} · {e.author} · {fmtBbTime(e.ts)}</span>
+                      <span className="bb-entry-meta">#{e.seq} · {e.author}{e.sessionId ? ` · ${e.sessionId.slice(-6)}` : ''} · {fmtBbTime(e.ts)}</span>
                     </div>
                     <div className="bb-entry-content">{e.content}</div>
                   </div>

@@ -2,14 +2,17 @@ import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   adminListUsers,
   createOpsServer,
+  createOpsServerCategory,
   createOpsServerGrant,
   createPlatformFlag,
   createPlatformMenu,
   deleteOpsGrant,
   deleteOpsServer,
+  deleteOpsServerCategory,
   deletePlatformFlag,
   deletePlatformMenu,
   listOpsServerCommandLogs,
+  listOpsServerCategories,
   listOpsServerGrants,
   listOpsServers,
   listOrgOptions,
@@ -19,6 +22,7 @@ import {
   listProjects,
   setPlatformToolEnabled,
   updateOpsServer,
+  updateOpsServerCategory,
   updatePlatformFlag,
   updatePlatformMenu,
 } from '../api';
@@ -28,6 +32,7 @@ import type {
   MenuItemDto,
   OpsCommandLogDto,
   OpsCommandLogPage,
+  OpsServerCategoryDto,
   OpsServerDto,
   OpsServerGrantDto,
   OrgOptionDto,
@@ -934,22 +939,29 @@ const emptyOpsServerForm = (): OpsServerForm => ({
   password: '',
 });
 
-/** 运维服务器目录：归属组织/项目后按归属下发给 spoke；未归属（orgId=0）不下发，须在此补全。 */
+/** 运维服务器目录：归属组织/项目后按归属下发给 spoke；未归属（orgId=0）不下发，须在此补全。
+ *  分类标签（V28）为受管字典：此处维护标签 CRUD，服务器表单从标签中选择。 */
 function PlatformOpsServersTab() {
   const [servers, setServers] = useState<OpsServerDto[] | null>(null);
+  const [categories, setCategories] = useState<OpsServerCategoryDto[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const [modal, setModal] = useState<null | {mode: 'create'} | {mode: 'edit'; item: OpsServerDto}>(null);
   const [grantsFor, setGrantsFor] = useState<OpsServerDto | null>(null);
   const [logsFor, setLogsFor] = useState<OpsServerDto | null>(null);
+  const [catModal, setCatModal] = useState(false);
   // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量；项目按组织逐个拉，失败降级为空
   const [orgNames, setOrgNames] = useState<Map<number, string>>(new Map());
   const [projectNames, setProjectNames] = useState<Map<number, string>>(new Map());
 
   const reload = useCallback(async () => {
     try {
-      const list = await listOpsServers();
+      const [list, cats] = await Promise.all([
+        listOpsServers(),
+        listOpsServerCategories().catch(() => [] as OpsServerCategoryDto[]),
+      ]);
       setServers(list);
+      setCategories(cats);
       setError('');
       const orgIds = [...new Set(list.map((s) => s.orgId).filter((id) => id > 0))];
       const [orgOpts, projectLists] = await Promise.all([
@@ -1008,6 +1020,15 @@ function PlatformOpsServersTab() {
           <div className="page-head" style={{marginBottom: 8}}>
             <span className="muted">共 {servers.length} 台</span>
             <div className="page-head-right">
+              {categories.length > 0 &&
+                categories.map((c) => (
+                  <span key={c.id} className="badge badge-current" style={{marginRight: 4}}>
+                    {c.name}
+                  </span>
+                ))}
+              <button type="button" className="btn btn-ghost btn-sm" onClick={() => setCatModal(true)}>
+                管理标签
+              </button>
               <button type="button" className="btn btn-primary" onClick={() => setModal({mode: 'create'})}>
                 ＋ 新增服务器
               </button>
@@ -1119,11 +1140,19 @@ function PlatformOpsServersTab() {
         <OpsServerFormModal
           mode={modal.mode}
           item={modal.mode === 'edit' ? modal.item : null}
+          categories={categories}
           onClose={() => setModal(null)}
           onSaved={() => {
             setModal(null);
             void reload();
           }}
+        />
+      )}
+      {catModal && (
+        <OpsCategoryManageModal
+          categories={categories}
+          onClose={() => setCatModal(false)}
+          onChanged={reload}
         />
       )}
       {grantsFor && (
@@ -1140,15 +1169,18 @@ function PlatformOpsServersTab() {
   );
 }
 
-/** 新增/编辑运维服务器弹窗：组织下拉 → 联动项目下拉（仅 active）；编辑回显归属。 */
+/** 新增/编辑运维服务器弹窗：组织下拉 → 联动项目下拉（仅 active）；编辑回显归属。
+ *  分类标签（V28）从受管字典下拉选择（不再自由文本）；编辑可选「未标注」清空。 */
 function OpsServerFormModal({
   mode,
   item,
+  categories,
   onClose,
   onSaved,
 }: {
   mode: 'create' | 'edit';
   item: OpsServerDto | null;
+  categories: OpsServerCategoryDto[];
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -1236,7 +1268,7 @@ function OpsServerFormModal({
       return;
     }
     if (!form.category.trim()) {
-      setFormError('请填写分类/标签');
+      setFormError('请选择分类标签');
       return;
     }
     setBusy(true);
@@ -1355,12 +1387,19 @@ function OpsServerFormModal({
         </label>
         <label>
           分类/标签 *
-          <input
-            value={form.category}
-            onChange={(e) => setField('category', e.target.value)}
-            placeholder="如：数据库 / 网关 / 应用"
-          />
-          <span className="field-hint">创建必填；用于按分类维护与筛选服务器。</span>
+          <select value={form.category} onChange={(e) => setField('category', e.target.value)}>
+            <option value="">— 请选择分类标签 —</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.name}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <span className="field-hint">
+            {mode === 'create'
+              ? '创建必选；标签在「管理标签」中维护，web 端按标签归类展示服务器。'
+              : '选「— 请选择分类标签 —」= 清除标注（未标注）；标签在「管理标签」中维护。'}
+          </span>
         </label>
         <label>
           系统类型
@@ -1432,6 +1471,155 @@ function OpsServerFormModal({
           </button>
         </div>
       </form>
+    </Modal>
+  );
+}
+
+/** 分类标签管理弹窗（V28）：清单 + 行内改名/排序 + 新增 + 删除（被引用时后端 409）。
+ *  重命名由服务端同步 ops_servers.category 引用行，保存后回调父级刷新两侧数据。 */
+function OpsCategoryManageModal({
+  categories,
+  onClose,
+  onChanged,
+}: {
+  categories: OpsServerCategoryDto[];
+  onClose: () => void;
+  onChanged: () => void | Promise<void>;
+}) {
+  const [rows, setRows] = useState(
+    categories.map((c) => ({id: c.id, name: c.name, sortOrder: c.sortOrder})),
+  );
+  const [newName, setNewName] = useState('');
+  const [newSort, setNewSort] = useState(0);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // 父级 reload 后（新增/保存/删除成功）同步清单；进行中的未保存编辑会被最近一次成功操作覆盖
+  useEffect(() => {
+    setRows(categories.map((c) => ({id: c.id, name: c.name, sortOrder: c.sortOrder})));
+  }, [categories]);
+
+  const setRow = (id: number, patch: Partial<{name: string; sortOrder: number}>) => {
+    setRows((prev) => prev.map((r) => (r.id === id ? {...r, ...patch} : r)));
+  };
+
+  const run = async (fn: () => Promise<unknown>) => {
+    setBusy(true);
+    setError('');
+    try {
+      await fn();
+      await onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title="管理分类标签" onClose={onClose}>
+      <div className="modal-form">
+        <div className="page-head" style={{marginBottom: 8}}>
+          <span className="muted">共 {rows.length} 个标签</span>
+        </div>
+        {rows.length === 0 ? (
+          <div className="empty-hint">暂无标签，先在下方新增。</div>
+        ) : (
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>标签名</th>
+                <th>排序</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.id}>
+                  <td>
+                    <input
+                      value={r.name}
+                      maxLength={64}
+                      onChange={(e) => setRow(r.id, {name: e.target.value})}
+                    />
+                  </td>
+                  <td>
+                    <input
+                      type="number"
+                      value={r.sortOrder}
+                      style={{width: 80}}
+                      onChange={(e) => setRow(r.id, {sortOrder: Number(e.target.value) || 0})}
+                    />
+                  </td>
+                  <td className="col-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm"
+                      disabled={busy}
+                      onClick={() =>
+                        void run(async () => {
+                          const name = r.name.trim();
+                          if (!name) throw new Error('标签名不能为空');
+                          await updateOpsServerCategory(r.id, {name, sortOrder: r.sortOrder});
+                        })
+                      }
+                    >
+                      保存
+                    </button>
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm menu-del"
+                      disabled={busy}
+                      title="仍被服务器引用时无法删除"
+                      onClick={() => {
+                        if (!window.confirm(`确定删除标签「${r.name}」？仍被服务器引用时会被拒绝。`)) return;
+                        void run(() => deleteOpsServerCategory(r.id));
+                      }}
+                    >
+                      删除
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        <div className="page-head" style={{marginTop: 12}}>
+          <input
+            value={newName}
+            maxLength={64}
+            placeholder="新标签名，如：数据库"
+            onChange={(e) => setNewName(e.target.value)}
+          />
+          <input
+            type="number"
+            value={newSort}
+            style={{width: 80}}
+            title="排序（小的在前）"
+            onChange={(e) => setNewSort(Number(e.target.value) || 0)}
+          />
+          <button
+            type="button"
+            className="btn btn-primary btn-sm"
+            disabled={busy || !newName.trim()}
+            onClick={() =>
+              void run(async () => {
+                await createOpsServerCategory({name: newName.trim(), sortOrder: newSort});
+                setNewName('');
+                setNewSort(0);
+              })
+            }
+          >
+            ＋ 新增标签
+          </button>
+        </div>
+        {error && <div className="form-error">{error}</div>}
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose} disabled={busy}>
+            关闭
+          </button>
+        </div>
+      </div>
     </Modal>
   );
 }

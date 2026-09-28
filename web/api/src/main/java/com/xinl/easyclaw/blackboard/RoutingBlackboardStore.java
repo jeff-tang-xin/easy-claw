@@ -33,11 +33,12 @@ public class RoutingBlackboardStore implements BlackboardStore {
     }
 
     @Override
-    public String append(WorkspaceContext workspace, String key, String author, String type, String content) {
+    public String append(WorkspaceContext workspace, String key, String author, String type, String content,
+                         String sessionId) {
         if (cloudMode()) {
-            return cloudStore.append(workspace, key, author, type, content);
+            return cloudStore.append(workspace, key, author, type, content, sessionId);
         }
-        return local.append(workspace, key, author, type, content);
+        return local.append(workspace, key, author, type, content, sessionId);
     }
 
     @Override

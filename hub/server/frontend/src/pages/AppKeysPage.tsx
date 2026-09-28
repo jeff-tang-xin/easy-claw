@@ -239,23 +239,44 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
     if (k.bindings.length === 0) return;
     setCloudTarget(k);
     const firstSpecific = k.bindings.find((b) => b.modelName);
-    setCloudProvider(k.cloudRoute ? String(k.cloudRoute.providerId) : String(firstSpecific?.providerId ?? ''));
+    setCloudProvider(
+      k.cloudRoute
+        ? String(k.cloudRoute.providerId)
+        : String((firstSpecific ?? k.bindings[0]).providerId),
+    );
     setCloudModel(k.cloudRoute?.modelName ?? '');
     setFormError('');
   };
 
-  /** 候选（providerId -> 具体模型列表），仅含绑定了具体模型的 provider */
+  /**
+   * 候选（providerId -> 可选真实模型列表）：
+   * - 具体模型绑定：落点即绑定模型（不依赖 providers 列表，保持既有行为）；
+   * - “全部模型”绑定：后端 applyCloudRoute 允许落点为 provider 声明清单内任意模型，
+   *   故用 providers 列表里的声明清单展开（仅 active，对齐后端校验）。
+   */
   const cloudCandidates = useMemo(() => {
     if (!cloudTarget) return [];
+    const providerById = new Map(providers.map((p) => [p.id, p]));
     const byProvider = new Map<number, {slug: string | null; name: string | null; models: string[]}>();
     for (const b of cloudTarget.bindings) {
-      if (!b.modelName) continue; // “全部模型”绑定不能作为别名的确定性落点
-      const entry = byProvider.get(b.providerId) ?? {slug: b.providerSlug, name: b.providerName, models: []};
-      entry.models.push(b.modelName);
+      const entry =
+        byProvider.get(b.providerId) ?? {slug: b.providerSlug, name: b.providerName, models: [] as string[]};
+      if (b.modelName) {
+        if (!entry.models.includes(b.modelName)) entry.models.push(b.modelName);
+      } else {
+        const p = providerById.get(b.providerId);
+        // 非 active 或声明清单为空的“全部模型”绑定无法落具体模型，跳过（后端同样会拒绝）
+        if (!p || p.status !== 'active') continue;
+        for (const m of p.models ?? []) {
+          if (!entry.models.includes(m)) entry.models.push(m);
+        }
+      }
       byProvider.set(b.providerId, entry);
     }
-    return [...byProvider.entries()].map(([providerId, v]) => ({providerId, ...v}));
-  }, [cloudTarget]);
+    return [...byProvider.entries()]
+        .filter(([, v]) => v.models.length > 0)
+        .map(([providerId, v]) => ({providerId, ...v}));
+  }, [cloudTarget, providers]);
 
   const submitCloudRoute = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -439,11 +460,11 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
                           type="button"
                           className="btn btn-ghost btn-sm"
                           onClick={() => openCloudRoute(k)}
-                          disabled={!k.bindings.some((b) => b.modelName)}
+                          disabled={k.bindings.length === 0}
                           title={
-                            k.bindings.some((b) => b.modelName)
-                              ? '配置逻辑别名 hub_cloud 的默认云端路由'
-                              : '需先在绑定中包含至少一个具体模型'
+                            k.bindings.length === 0
+                              ? '需先绑定至少一个 Provider'
+                              : '配置逻辑别名 hub_cloud 的默认云端路由'
                           }
                         >
                           云端路由
@@ -590,7 +611,10 @@ export default function AppKeysPage({orgId}: {orgId: number | null}) {
           {cloudCandidates.length === 0 ? (
             <div className="empty-state">
               <h3>没有可路由的具体模型</h3>
-              <p>请先在「编辑绑定」中为该 AppKey 绑定至少一个具体模型（不支持“全部模型”作为别名落点）。</p>
+              <p>
+                绑定的 Provider 均不可用：具体模型绑定需至少一行；「全部模型」绑定要求 Provider 处于正常状态
+                且声明了模型清单。请检查「编辑绑定」或联系管理员维护 Provider 模型清单。
+              </p>
             </div>
           ) : (
             <>

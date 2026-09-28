@@ -834,9 +834,9 @@ public class AgentService {
      *       那条是 deprecated v1 路径，且会设置 eventSink 使转发 emitter 失效。</li>
      *   <li><b>上下文隔离 + 黑板共享天然成立</b>：{@code invokeAgent} 内部用
      *       {@code RuntimeContext.builder(parentRc).sessionId(subSessionId).userId(userId)}
-     *       重建上下文——只换 sessionId，黑板隔离键（=父会话 id，见 {@link #buildContext}）、
+     *       重建上下文——只换 sessionId，黑板本名（固定 main，见 {@link #buildContext}）、
      *       工作区、权限、force-sync 全部继承。子智能体用独立 {@code sub-<UUID>} 会话落盘，
-     *       不污染父会话转录；又因黑板键相同，主/子共用同一块团队黑板（唯一通信通道）。</li>
+     *       不污染父会话转录；又因黑板本相同，主/子共用同一块团队黑板（唯一通信通道）。</li>
      *   <li><b>同步阻塞、回调收尾</b>：与 {@code executeStep} 一样是 fire-and-forget 回调式，
      *       由 {@code StreamingStepExecutor} 用 {@code onFinish}/{@code onError} 完成其 future。
      *       不在此 block，避免与 Reactor 线程模型耦合。</li>
@@ -869,7 +869,7 @@ public class AgentService {
             onFinish.accept("");
             return;
         }
-        // parentRc 复用 buildContext：黑板隔离键取父会话 id，子智能体经 builder(parentRc) 继承同一键
+        // parentRc 复用 buildContext：黑板本名固定 main，子智能体经 builder(parentRc) 继承同一本
         RuntimeContext parentRc = buildContext(workspace, parentSessionId);
         Optional<io.agentscope.core.agent.Agent> childOpt =
                 manager.createAgentIfPresent(agentId, parentRc);
@@ -2398,10 +2398,11 @@ public class AgentService {
                 .sessionId(sessionId)
                 // 注入 Workspace 上下文给文件工具（沙箱校验），不暴露给 LLM
                 .put(WorkspaceContext.class, workspace)
-                // 黑板隔离键取「父会话 id」：子 Agent 由 RuntimeContext.builder(parentRc) 创建，
-                // Builder.from 会复制 stringAttributes，故子 Agent 虽自带 sub-<UUID> 会话，
-                // 仍继承同一 key → 同一轮协作的主/子 Agent 共用一块黑板。
-                .put(BlackboardKeys.CTX_KEY, sessionId);
+                // 黑板本名固定为 main（记录本按工作区/项目+用户隔离，不按会话分本——
+                // 个人跨会话共享心得，条目上的 sessionId 标注来源）；
+                // 子 Agent 由 RuntimeContext.builder(parentRc) 创建，Builder.from 会复制
+                // stringAttributes，故继承同一本名 → 主/子 Agent 共用一块黑板。
+                .put(BlackboardKeys.CTX_KEY, BlackboardKeys.DEFAULT_BOOK);
         // worktree 路由（会话↔git worktree 挂钩）：路径纯推导不查库，目录存在才绑定——
         // 目录被手动清理时 isDirectory=false 自动回退主工作区根，回合不受影响。
         // 与黑板键同理，子 Agent 经 Builder.from 继承同一路由。

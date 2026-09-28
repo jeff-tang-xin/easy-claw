@@ -498,6 +498,13 @@ export interface OpsServerDto {
   passwordSet: boolean;
 }
 
+/** 运维服务器分类标签字典项（V28：服务器 category 收口为受管标签） */
+export interface OpsServerCategoryDto {
+  id: number;
+  name: string;
+  sortOrder: number;
+}
+
 /** 运维服务器用户时效授权（一人一服务器一条，重复提交=续期；过期行保留作历史） */
 export interface OpsServerGrantDto {
   id: number;

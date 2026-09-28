@@ -74,7 +74,8 @@ public class LocalBlackboardStore implements BlackboardStore {
     private final Map<String, AtomicLong> sequences = new ConcurrentHashMap<>();
 
     @Override
-    public String append(WorkspaceContext workspace, String key, String author, String type, String content) {
+    public String append(WorkspaceContext workspace, String key, String author, String type, String content,
+                         String sessionId) {
         if (isArchivedKey(key)) {
             // 归档本是只读历史：禁止再追加，否则「归档清空」后历史仍被改写，破坏不可抵赖性
             return "❌ 该记录本已归档，为只读历史，不能再登记内容。请改用当前活跃记录本。";
@@ -95,7 +96,8 @@ public class LocalBlackboardStore implements BlackboardStore {
                     OffsetDateTime.now().format(DateTimeFormatter.ISO_OFFSET_DATE_TIME),
                     author,
                     type,
-                    body);
+                    body,
+                    sessionId);
             Files.writeString(file,
                     MAPPER.writeValueAsString(entry) + System.lineSeparator(),
                     StandardCharsets.UTF_8,

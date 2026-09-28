@@ -13,6 +13,7 @@ import com.xinl.easyclaw.hub.entity.OpsServerGrantEntity;
 import com.xinl.easyclaw.hub.entity.ProjectEntity;
 import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.repository.OpsServerGrantRepository;
+import com.xinl.easyclaw.hub.repository.OpsServerCategoryRepository;
 import com.xinl.easyclaw.hub.repository.OpsServerRepository;
 import com.xinl.easyclaw.hub.repository.OrganizationRepository;
 import com.xinl.easyclaw.hub.repository.ProjectRepository;
@@ -42,6 +43,7 @@ import org.springframework.transaction.annotation.Transactional;
 public class OpsServerService {
 
     private final OpsServerRepository repo;
+    private final OpsServerCategoryRepository categories;
     private final OrganizationRepository organizations;
     private final ProjectRepository projects;
     private final UserRepository users;
@@ -50,11 +52,13 @@ public class OpsServerService {
     private final AuditService auditService;
     private final CryptoService crypto;
 
-    public OpsServerService(OpsServerRepository repo, OrganizationRepository organizations,
+    public OpsServerService(OpsServerRepository repo, OpsServerCategoryRepository categories,
+                            OrganizationRepository organizations,
                             ProjectRepository projects, UserRepository users,
                             OpsServerGrantRepository grants, PlatformAdminGuard guard,
                             AuditService auditService, CryptoService crypto) {
         this.repo = repo;
+        this.categories = categories;
         this.organizations = organizations;
         this.projects = projects;
         this.users = users;
@@ -94,7 +98,7 @@ public class OpsServerService {
         e.setUsername(req.username() == null ? "" : req.username().trim());
         e.setDescription(req.description() == null ? "" : req.description().trim());
         e.setOsType(req.osType() == null ? "" : req.osType().trim());
-        e.setCategory(req.category().trim());
+        e.setCategory(requireManagedCategory(req.category()));
         e.setSortOrder(req.sortOrder() == null ? 0 : req.sortOrder());
         e.setEnabled(req.enabled() == null ? Boolean.TRUE : req.enabled());
         e.setOrgId(orgId);
@@ -130,7 +134,7 @@ public class OpsServerService {
             e.setOsType(req.osType().trim());
         }
         if (req.category() != null) {
-            e.setCategory(req.category().trim());
+            e.setCategory(requireManagedCategory(req.category()));
         }
         if (req.sortOrder() != null) {
             e.setSortOrder(req.sortOrder());
@@ -186,7 +190,8 @@ public class OpsServerService {
                 .filter(e -> grants.existsByServerIdAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
                         e.getId(), ctx.userId(), now, now))
                 .map(e -> new SpokeOpsServer(e.getServerKey(), e.getName(), e.getHost(), e.getPort(),
-                        e.getUsername(), e.getDescription(), e.getOsType(), e.getProjectId(),
+                        e.getUsername(), e.getDescription(), e.getOsType(), e.getCategory(),
+                        e.getProjectId(),
                         e.getPasswordEnc() == null || e.getPasswordEnc().isEmpty()
                                 ? null : crypto.decrypt(e.getPasswordEnc())))
                 .toList();
@@ -279,6 +284,15 @@ public class OpsServerService {
             throw ApiException.notFound("组织不存在");
         }
         return orgId;
+    }
+
+    /** 分类标签收口（V28）：非空时必须是受管标签（400）；空串 = 未标注（历史行兼容）。 */
+    private String requireManagedCategory(String category) {
+        String trimmed = category == null ? "" : category.trim();
+        if (!trimmed.isEmpty() && !categories.existsByName(trimmed)) {
+            throw ApiException.validation("分类标签不存在（须先在平台目录创建）");
+        }
+        return trimmed;
     }
 
     /** projectId 可选标记：0/null = 不限定项目（合法）；>0 时必须存在且属于该组织（全库无外键，归属一致性在此收口）。 */

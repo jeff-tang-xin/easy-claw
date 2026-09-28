@@ -31,13 +31,14 @@ public interface BlackboardStore {
      * 追加一条记录，返回给 LLM 看的简短结果说明。
      *
      * @param workspace 当前工作区（决定存储位置）
-     * @param key       记录本隔离键（通常是父会话 id）
+     * @param key       记录本名（固定 {@code main}：记录本按工作区/项目+用户隔离，不按会话分本）
      * @param author    登记者名（由调用方从运行时上下文解析，不接受 LLM 传入）
      * @param type      条目类型（调用方已做白名单校验）
      * @param content   正文（非空，由调用方校验）
+     * @param sessionId 登记来源会话 id（仅作条目标注，不参与隔离）
      * @return 形如 {@code ✅ #12 已登记（risk, by main）} 的说明；失败时为可读的失败原因
      */
-    String append(WorkspaceContext workspace, String key, String author, String type, String content);
+    String append(WorkspaceContext workspace, String key, String author, String type, String content, String sessionId);
 
     /**
      * 读取最近 {@code limit} 条记录（按 seq 升序返回，便于按时间顺序阅读）。
@@ -50,7 +51,8 @@ public interface BlackboardStore {
      * 列出该工作区下所有记录本（含归档本），按最后修改时间倒序。
      * <p>
      * 供管理页面浏览用：{@link #read} 只能按已知 key 取单个记录本，而页面需要先知道
-     * 「这个工作区里有哪些记录本」。活跃本的 key 是存储侧的记录本键（通常是会话 id）；
+     * 「这个工作区里有哪些记录本」。活跃本的 key 是存储侧的记录本键（如 {@code main}，
+     * 历史数据可能是会话 id）；
      * 归档本的 key 是 {@code <基础key>.archived-<时间戳>} 完整唯一主干，可直接回传给
      * {@link #read} 定位归档件。
      * <p>

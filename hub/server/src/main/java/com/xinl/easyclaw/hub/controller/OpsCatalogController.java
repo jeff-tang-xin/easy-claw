@@ -2,16 +2,20 @@ package com.xinl.easyclaw.hub.controller;
 
 import com.xinl.easyclaw.hub.contract.ops.CreateOpsServerGrantRequest;
 import com.xinl.easyclaw.hub.contract.ops.CreateOpsServerRequest;
+import com.xinl.easyclaw.hub.contract.ops.CreateOpsServerCategoryRequest;
 import com.xinl.easyclaw.hub.contract.ops.CreateShellCommandRequest;
 import com.xinl.easyclaw.hub.contract.ops.OpsCommandLogPageResponse;
+import com.xinl.easyclaw.hub.contract.ops.OpsServerCategoryDto;
 import com.xinl.easyclaw.hub.contract.ops.OpsServerDto;
 import com.xinl.easyclaw.hub.contract.ops.OpsServerGrantDto;
 import com.xinl.easyclaw.hub.contract.ops.ShellCommandDto;
+import com.xinl.easyclaw.hub.contract.ops.UpdateOpsServerCategoryRequest;
 import com.xinl.easyclaw.hub.contract.ops.UpdateOpsServerRequest;
 import com.xinl.easyclaw.hub.contract.ops.UpdateShellCommandRequest;
 import com.xinl.easyclaw.hub.security.CurrentUserHolder;
 import com.xinl.easyclaw.hub.service.PlatformAdminGuard;
 import com.xinl.easyclaw.hub.service.ops.OpsCommandLogService;
+import com.xinl.easyclaw.hub.service.ops.OpsServerCategoryService;
 import com.xinl.easyclaw.hub.service.ops.OpsServerService;
 import com.xinl.easyclaw.hub.service.ops.ShellCommandService;
 import jakarta.validation.Valid;
@@ -35,13 +39,16 @@ import org.springframework.web.bind.annotation.RestController;
 public class OpsCatalogController {
 
     private final OpsServerService opsServers;
+    private final OpsServerCategoryService categories;
     private final ShellCommandService shellCommands;
     private final OpsCommandLogService commandLogs;
     private final PlatformAdminGuard platformAdminGuard;
 
-    public OpsCatalogController(OpsServerService opsServers, ShellCommandService shellCommands,
-                                OpsCommandLogService commandLogs, PlatformAdminGuard platformAdminGuard) {
+    public OpsCatalogController(OpsServerService opsServers, OpsServerCategoryService categories,
+                                ShellCommandService shellCommands, OpsCommandLogService commandLogs,
+                                PlatformAdminGuard platformAdminGuard) {
         this.opsServers = opsServers;
+        this.categories = categories;
         this.shellCommands = shellCommands;
         this.commandLogs = commandLogs;
         this.platformAdminGuard = platformAdminGuard;
@@ -74,6 +81,37 @@ public class OpsCatalogController {
         Long userId = CurrentUserHolder.requireUserId();
         platformAdminGuard.require(userId);
         opsServers.deleteCatalogItem(userId, id);
+        return ResponseEntity.noContent().build();
+    }
+
+    // ---- 运维服务器分类标签字典（V28）----
+
+    @GetMapping("/api/platform/ops-server-categories")
+    public List<OpsServerCategoryDto> listOpsServerCategories() {
+        platformAdminGuard.require(CurrentUserHolder.requireUserId());
+        return categories.listCatalog(CurrentUserHolder.requireUserId());
+    }
+
+    @PostMapping("/api/platform/ops-server-categories")
+    public OpsServerCategoryDto createOpsServerCategory(@Valid @RequestBody CreateOpsServerCategoryRequest req) {
+        Long userId = CurrentUserHolder.requireUserId();
+        platformAdminGuard.require(userId);
+        return categories.createCatalogItem(userId, req);
+    }
+
+    @PutMapping("/api/platform/ops-server-categories/{id}")
+    public OpsServerCategoryDto updateOpsServerCategory(@PathVariable Long id,
+                                                        @Valid @RequestBody UpdateOpsServerCategoryRequest req) {
+        Long userId = CurrentUserHolder.requireUserId();
+        platformAdminGuard.require(userId);
+        return categories.updateCatalogItem(userId, id, req);
+    }
+
+    @DeleteMapping("/api/platform/ops-server-categories/{id}")
+    public ResponseEntity<Void> deleteOpsServerCategory(@PathVariable Long id) {
+        Long userId = CurrentUserHolder.requireUserId();
+        platformAdminGuard.require(userId);
+        categories.deleteCatalogItem(userId, id);
         return ResponseEntity.noContent().build();
     }
 
