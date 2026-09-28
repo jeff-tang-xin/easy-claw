@@ -27,6 +27,7 @@ import java.security.KeyPair;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
@@ -80,6 +81,9 @@ public class SshConnectionService {
     private final Map<String, String> sessionConn = new ConcurrentHashMap<>();
     /** terminalId → 交互终端（跨工作区索引，WS 断连时按 terminalId 清理） */
     private final Map<String, ShellEntry> terminals = new ConcurrentHashMap<>();
+
+    /** 连接 → 终端输出环形缓冲（AI snapshot/tail 工具的数据源；disconnect 清理） */
+    private final Map<String, TerminalScrollBuffer> scrollBuffers = new ConcurrentHashMap<>();
 
     /** 连接运行时索引键：同一工作区按 connId 并存多条连接 */
     private static String wsKey(String workspaceId, long connId) {
@@ -186,6 +190,7 @@ public class SshConnectionService {
     /** 断开指定连接并关闭其全部交互终端；该连接未活跃时静默返回 */
     public void disconnect(String workspaceId, long connId) {
         serverInfoByConn.remove(wsKey(workspaceId, connId));
+        scrollBuffers.remove(wsKey(workspaceId, connId));
         SshHolder holder = active.remove(wsKey(workspaceId, connId));
         if (holder == null) {
             return;
@@ -428,8 +433,21 @@ public class SshConnectionService {
             PipedInputStream in = new PipedInputStream(64 * 1024);
             PipedOutputStream stdin = new PipedOutputStream(in);
             channel.setIn(in);
-            channel.setOut(new ForwardingOutputStream(outputConsumer));
-            channel.setErr(new ForwardingOutputStream(outputConsumer));
+            // 输出回调：字节转发浏览器的同时 tee 进连接级环形缓冲（AI 的「眼睛」）。
+            // 缓冲按 wsKey 取（openShell 时确保存在）；Consumer 包一层，原 outputConsumer
+            // 语义不变，缓冲失败不影响转发
+            String key = wsKey(workspaceId, connId);
+            TerminalScrollBuffer scroll = scrollBuffers.computeIfAbsent(key, k -> new TerminalScrollBuffer());
+            Consumer<byte[]> teeConsumer = bytes -> {
+                try {
+                    scroll.append(bytes, 0, bytes.length);
+                } catch (Exception e) {
+                    log.debug("终端缓冲写入失败（忽略）: {}", e.getMessage());
+                }
+                outputConsumer.accept(bytes);
+            };
+            channel.setOut(new ForwardingOutputStream(teeConsumer));
+            channel.setErr(new ForwardingOutputStream(teeConsumer));
             channel.open().verify(CONNECT_TIMEOUT);
             terminals.put(terminalId, new ShellEntry(workspaceId, connId, channel, stdin));
             log.info("交互终端已打开: workspace={}, conn={}, terminal={}, {}@{}",
@@ -603,6 +621,114 @@ public class SshConnectionService {
     public record RemoteFile(String fileName, long size, InputStream content) {
     }
 
+    // ==================== 文件管理（SFTP：列目录/新建/重命名） ====================
+
+    /**
+     * 列远程目录（SFTP readDir，单次往返——不逐个 stat）。
+     * <p>
+     * 过滤 {@code .}/{@code ..}；排序：目录优先，同类按名称不区分大小写。
+     * {@code /proc}、{@code /sys} 等虚拟文件系统个别条目属性异常时不单独容错
+     * （readDir 返回的属性即服务端给的，拿不到 size 按 0 处理），整目录读失败才抛错。
+     *
+     * @param path 远程目录绝对路径；null/空 = 用户家目录（"."）
+     */
+    public List<RemoteEntry> listDir(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            throw new IOException("尚未连接远程服务器或连接已断开");
+        }
+        String dir = (path == null || path.isBlank()) ? "." : path.trim();
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            List<RemoteEntry> out = new ArrayList<>();
+            for (SftpClient.DirEntry e : sftp.readDir(dir)) {
+                String name = e.getFilename();
+                if (".".equals(name) || "..".equals(name)) {
+                    continue;
+                }
+                SftpClient.Attributes a = e.getAttributes();
+                String full = "/".equals(dir) ? "/" + name : dir + "/" + name;
+                long modified = a.getModifyTime() != null ? a.getModifyTime().toMillis() : 0L;
+                out.add(new RemoteEntry(name, full, a.isDirectory(), a.getSize(), modified));
+            }
+            out.sort(Comparator.comparing(RemoteEntry::directory).reversed()
+                    .thenComparing(RemoteEntry::name, String.CASE_INSENSITIVE_ORDER));
+            return out;
+        }
+    }
+
+    /** 新建远程目录（SFTP mkdir）；父目录须已存在，目标已存在则报错。 */
+    public void makeDirectory(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String target = requirePath(path);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (exists(sftp, target)) {
+                throw new IOException("路径已存在: " + target);
+            }
+            sftp.mkdir(target);
+            log.info("远程目录已创建: workspace={}, {}", workspaceId, target);
+        }
+    }
+
+    /** 新建空文件（SFTP write 空流）；目标已存在则报错，防止误截断已有文件。 */
+    public void createFile(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String target = requirePath(path);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (exists(sftp, target)) {
+                throw new IOException("路径已存在: " + target);
+            }
+            try (OutputStream os = sftp.write(target)) {
+                os.write(new byte[0]);
+            }
+            log.info("远程文件已创建: workspace={}, {}", workspaceId, target);
+        }
+    }
+
+    /** 重命名/移动（SFTP rename）；源不存在或目标已存在则报错。 */
+    public void rename(String workspaceId, long connId, String from, String to) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String source = requirePath(from);
+        String target = requirePath(to);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (!exists(sftp, source)) {
+                throw new IOException("源路径不存在: " + source);
+            }
+            if (exists(sftp, target)) {
+                throw new IOException("目标路径已存在: " + target);
+            }
+            sftp.rename(source, target);
+            log.info("远程路径已重命名: workspace={}, {} -> {}", workspaceId, source, target);
+        }
+    }
+
+    private SshHolder requireHolder(String workspaceId, long connId) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            throw new IOException("尚未连接远程服务器或连接已断开");
+        }
+        return holder;
+    }
+
+    private static String requirePath(String path) throws IOException {
+        if (path == null || path.isBlank()) {
+            throw new IOException("远程路径为空");
+        }
+        return path.trim();
+    }
+
+    private static boolean exists(SftpClient sftp, String path) {
+        try {
+            sftp.stat(path);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 远程目录条目（{@link #listDir} 返回单元） */
+    public record RemoteEntry(String name, String path, boolean directory, long size, long modified) {
+    }
+
     // ==================== 内部结构 ====================
 
     /** 工作区 primary 连接（最近建立的）；无活跃连接返回 null，exec 侧据此报错 */
@@ -693,5 +819,27 @@ public class SshConnectionService {
 
     /** 连接绑定的运维服务器信息（来自 hub 下发快照；osType 旧 hub 未下发时为 null） */
     public record OpsServerInfo(String serverKey, String name, String host, String username, String osType) {
+    }
+
+    // ==================== 终端输出缓冲（AI snapshot/tail） ====================
+
+    /**
+     * 取指定连接终端的当前屏幕快照（最近约 256KB 输出，已剥 ANSI）。
+     *
+     * @return 快照文本；连接无缓冲（未开过终端/已断开）返回 null
+     */
+    public String terminalSnapshot(String workspaceId, long connId) {
+        TerminalScrollBuffer buf = scrollBuffers.get(wsKey(workspaceId, connId));
+        return buf == null ? null : buf.snapshot();
+    }
+
+    /**
+     * 取指定连接终端最近 N 行输出（已剥 ANSI）。
+     *
+     * @return 文本；连接无缓冲返回 null
+     */
+    public String terminalTail(String workspaceId, long connId, int maxLines) {
+        TerminalScrollBuffer buf = scrollBuffers.get(wsKey(workspaceId, connId));
+        return buf == null ? null : buf.tail(maxLines);
     }
 }

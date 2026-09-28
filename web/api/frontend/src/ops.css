@@ -5,6 +5,7 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
   background: var(--bg, #0f1115);
 }
 
@@ -210,6 +211,22 @@
 }
 .ops-conn-list li.active { border-color: #4ade8055; }
 
+/* 分类标签分组标题（V28：服务器按标签归类渲染；仅多组时显示） */
+.ops-conn-list li.ops-cat-label {
+  border: none;
+  border-radius: 0;
+  padding: 2px 2px 0;
+  justify-content: flex-start;
+  gap: 6px;
+  font-size: 0.78em;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+}
+.ops-cat-count {
+  font-size: 0.9em;
+  color: #64748b;
+}
+
 .ops-conn-info { display: flex; flex-direction: column; min-width: 0; }
 .ops-conn-info b { font-size: 0.92em; }
 .ops-conn-info span {
@@ -235,6 +252,36 @@
   padding: 1px 8px;
   cursor: pointer;
 }
+
+/* 已连接行内的断开按钮：弱化的次级按钮，与绿色「使用中」徽标区分 */
+.ops-conn-disc {
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: transparent;
+}
+.ops-conn-disc:hover { background: rgba(248, 113, 113, 0.14); }
+
+/* rz 挂起提示条：远端等待发送文件时出现在终端列顶部 */
+.ops-rz-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 0.85em;
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.1);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+}
+.ops-rz-bar button {
+  padding: 3px 12px;
+  font-size: 0.95em;
+  border-radius: 6px;
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  background: transparent;
+}
+.ops-rz-bar button:hover { background: rgba(56, 189, 248, 0.18); }
 
 .ops-empty {
   color: #94a3b8;
@@ -298,3 +345,226 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ==================== 文件管理面板（OpsFilePanel） ==================== */
+
+.ops-fm-panel {
+  position: absolute;
+  left: 8px;
+  top: 56px;
+  bottom: 64px;
+  width: 300px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.ops-fm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border, #2a2d35);
+}
+.ops-fm-close {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.2em;
+  cursor: pointer;
+  line-height: 1;
+}
+.ops-fm-close:hover { color: #e2e8f0; }
+
+.ops-fm-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+  font-size: 0.88em;
+}
+
+.ops-fm-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  cursor: default;
+  white-space: nowrap;
+}
+.ops-fm-row:hover { background: rgba(148, 163, 184, 0.1); }
+.ops-fm-row.selected { background: rgba(74, 222, 128, 0.16); }
+
+.ops-fm-arrow {
+  width: 12px;
+  flex: none;
+  color: #94a3b8;
+  font-size: 0.8em;
+}
+.ops-fm-icon { flex: none; }
+.ops-fm-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ops-fm-large {
+  flex: none;
+  margin-left: 6px;
+  font-size: 0.85em;
+  color: #fb923c;
+}
+.ops-fm-hint { color: #64748b; font-size: 0.85em; padding: 2px 0; }
+.ops-fm-error { color: #f87171; font-size: 0.82em; padding: 2px 0; }
+
+.ops-fm-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 132px;
+  padding: 4px;
+  background: #1d2026;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  font-size: 0.86em;
+  /* 显式浅色文字：菜单为 fixed 定位，不依赖继承（曾继承到深色导致深底深字看不见） */
+  color: #e2e8f0;
+}
+.ops-fm-menu div {
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: default;
+  color: #e2e8f0;
+}
+.ops-fm-menu div:hover { background: rgba(74, 222, 128, 0.16); color: #4ade80; }
+
+/* ==================== 文件任务中心（OpsTransferCenter） ==================== */
+
+.ops-tc {
+  position: absolute;
+  right: 16px;
+  bottom: 70px;
+  width: 420px;
+  max-height: 60%;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.ops-tc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border, #2a2d35);
+}
+.ops-tc-close {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.2em;
+  cursor: pointer;
+}
+.ops-tc-tabs { display: flex; gap: 4px; padding: 6px 8px 0; }
+.ops-tc-tabs button {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.ops-tc-tabs button.active {
+  color: #e2e8f0;
+  border-bottom-color: #4ade80;
+}
+.ops-tc-list { padding: 8px 12px; overflow: auto; }
+.ops-tc-empty { color: #64748b; font-size: 0.86em; padding: 12px 0; text-align: center; }
+
+.ops-tc-item { padding: 8px 0; border-bottom: 1px solid rgba(148, 163, 184, 0.12); }
+.ops-tc-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85em;
+}
+.ops-tc-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ops-tc-size { color: #94a3b8; flex: none; }
+.ops-tc-state { flex: none; width: 16px; text-align: center; }
+.ops-tc-state.done { color: #4ade80; }
+.ops-tc-state.error { color: #f87171; }
+.ops-tc-del {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+.ops-tc-del:hover { color: #f87171; }
+
+.ops-tc-bar {
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+.ops-tc-bar-fill {
+  height: 100%;
+  background: #4ade80;
+  transition: width 0.15s ease;
+}
+.ops-tc-err {
+  margin-top: 4px;
+  font-size: 0.8em;
+  color: #f87171;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==================== 选中即问浮层（P1） ==================== */
+
+.ops-sel-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 120px;
+  padding: 4px;
+  background: #1d2026;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  font-size: 0.86em;
+  color: #e2e8f0;
+}
+.ops-sel-menu div {
+  padding: 6px 12px;
+  border-radius: 5px;
+  cursor: default;
+  color: #e2e8f0;
+}
+.ops-sel-menu div:hover { background: rgba(74, 222, 128, 0.16); color: #4ade80; }
+
+/* ==================== 幕布路径提示（P1） ==================== */
+
+.ops-route-hint {
+  padding: 3px 14px 0;
+  font-size: 0.78em;
+}
+.ops-route-hint.shell { color: #fbbf24; }
+.ops-route-hint.ai { color: #4ade80; }
