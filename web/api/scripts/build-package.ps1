@@ -1,21 +1,29 @@
 # Easy Claw - Windows build & package script
-# Usage:
-#   .\scripts\build-package.ps1                    # app-image (bundled JRE) + zip, no Java needed on target
-#   .\scripts\build-package.ps1 -ExeInstaller      # exe installer (needs WiX Toolset)
-#   .\scripts\build-package.ps1 -FatJarOnly        # fat jar only (target needs JDK 21+)
-#   .\scripts\build-package.ps1 -Version 1.2.0     # override version
-#   .\scripts\build-package.ps1 -SkipFrontend      # skip frontend build
+# Usage (run from web/api):
+#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts\build-package.ps1
+#             # app-image (bundled JRE) + zip, no Java needed on target
+#   ... -ExeInstaller      # exe installer (needs WiX Toolset)
+#   ... -FatJarOnly        # fat jar only (target needs JDK 21+)
+#   ... -Version 1.2.0     # override version
+#   ... -SkipFrontend      # skip frontend build
+#   ... -RunTests          # run tests (skipped by default: packaging also builds all upstream modules)
+#   ... -JdkPath C:\path\to\jdk   # use this JDK instead of auto-detection
+#   ... -JdkVersion 21            # required JDK major version (default 21)
 
 param(
     [switch]$ExeInstaller,
     [switch]$FatJarOnly,
     [string]$Version = "",
-    [switch]$SkipFrontend
+    [switch]$SkipFrontend,
+    [switch]$RunTests,
+    [string]$JdkPath = "",
+    [int]$JdkVersion = 21
 )
 
 $ErrorActionPreference = "Stop"
 
-$ProjectRoot = Split-Path -Parent $PSScriptRoot
+$ProjectRoot = Split-Path -Parent $PSScriptRoot      # web/api
+$RepoRoot    = Split-Path -Parent $ProjectRoot      # repo root (parent pom + sibling modules)
 $TargetDir   = Join-Path $ProjectRoot "target"
 $DistDir     = Join-Path $TargetDir "dist"
 $AppName     = "Easy-Claw"
@@ -30,20 +38,23 @@ Write-Host "  Mode: $Mode" -ForegroundColor Cyan
 Write-Host ""
 
 # ---------- read version from pom.xml ----------
+# web/api/pom.xml declares no <version> of its own - it inherits from parent
+# easy-claw-parent - so the first <version> in the file (inside <parent>) is it.
+# (Stripping the <parent> block first would grab the first dependency's
+#  "${project.version}" placeholder instead.)
 if (-not $Version) {
     $pomFile = Join-Path $ProjectRoot "pom.xml"
     $pomContent = Get-Content $pomFile -Raw
-    $noParent = [regex]::Replace($pomContent, '<parent>.*?</parent>', '', [System.Text.RegularExpressions.RegexOptions]::Singleline)
-    if ($noParent -match '<version>([^<]+)</version>') {
-        $Version = $Matches[1] -replace '-SNAPSHOT', ''
+    if ($pomContent -match '<version>([^<]+)</version>') {
+        $Version = $Matches[1] -replace '-SNAPSHOT$', ''
     } else {
         $Version = "1.0.0"
     }
 }
 Write-Host "[1/5] Version : $Version" -ForegroundColor Yellow
 
-# ---------- find JDK 21+ ----------
-$requiredMajor = 21
+# ---------- find JDK ----------
+$requiredMajor = $JdkVersion
 $candidates = @()
 if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
 $candidates += "$env:USERPROFILE\.jdks\ms-21*"
@@ -55,6 +66,35 @@ $candidates += "C:\Program Files\Microsoft\jdk-21*"
 $candidates += "C:\Program Files\Amazon Corretto\jdk21*"
 
 $foundJdk = $null
+
+# explicit -JdkPath wins: validate it and never silently fall back to detection
+if ($JdkPath) {
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        $javaExe = Join-Path $JdkPath "bin\java.exe"
+        if (-not (Test-Path $javaExe)) {
+            Write-Host "ERROR: -JdkPath '$JdkPath' does not contain bin\java.exe" -ForegroundColor Red
+            exit 1
+        }
+        $verLine = & $javaExe -version 2>&1 | Select-Object -First 1
+        if ($verLine -match '"(\d+)\.') {
+            $major = [int]$Matches[1]
+            if ($major -lt $requiredMajor) {
+                Write-Host "ERROR: JDK at '$JdkPath' is $major, need JDK $requiredMajor+" -ForegroundColor Red
+                exit 1
+            }
+            $foundJdk = (Get-Item $JdkPath).FullName
+            Write-Host "      Found JDK $major at $foundJdk (-JdkPath)" -ForegroundColor Green
+        } else {
+            Write-Host "ERROR: could not determine java version at '$JdkPath'" -ForegroundColor Red
+            exit 1
+        }
+    } finally { $ErrorActionPreference = $prevEAP }
+    # skip auto-detection below when the JDK was given explicitly
+    $candidates = @()
+}
+
 $prevEAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 try {
@@ -114,10 +154,21 @@ Write-Host "      java     : $javaVersion" -ForegroundColor Gray
 Write-Host ""
 Write-Host "[2/5] Maven build" -ForegroundColor Yellow
 
-$mvnArgs = @("clean", "package")
-if ($SkipFrontend) { $mvnArgs += "-Pskip-frontend" }
+if (-not (Get-Command mvn -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: mvn not found on PATH. Install Maven or add its bin directory to PATH." -ForegroundColor Red
+    exit 1
+}
 
-Push-Location $ProjectRoot
+# Build from the repo root with -am so sibling SNAPSHOT modules (easy-claw-base,
+# easy-claw-agent-core, the agent implementations, agentscope-core, ...) are
+# compiled from current sources. Building inside web/api only would resolve them
+# from the local Maven repository - stale or missing there on most machines.
+# -pl uses the artifactId form: path form (web/api) fails for nested modules.
+$mvnArgs = @("clean", "package", "-pl", ":easy-claw", "-am")
+if (-not $RunTests) { $mvnArgs += "-DskipTests" }
+if ($SkipFrontend)  { $mvnArgs += "-Dskip.frontend=true" }
+
+Push-Location $RepoRoot
 try {
     & mvn @mvnArgs
     if ($LASTEXITCODE -ne 0) { Write-Host "ERROR: Maven build failed" -ForegroundColor Red; exit 1 }
@@ -187,7 +238,7 @@ if ($Mode -ne "fatjar") {
     New-Item -ItemType Directory -Path $pkgInput | Out-Null
     Copy-Item $jarFile (Join-Path $pkgInput "easy-claw.jar")
 
-    # Spring Boot fat jar entrypoint is JarLauncher (reads MANIFEST's Start-Class)
+    # Spring Boot 3.2+ fat jar entrypoint (reads MANIFEST's Start-Class)
     $mainClass = "org.springframework.boot.loader.launch.JarLauncher"
     $javaOpts = @(
         "-Xmx2g",
@@ -270,13 +321,13 @@ if errorlevel 1 (
 "@
     $batContent | Out-File -FilePath (Join-Path $appDir "Easy-Claw.bat") -Encoding ASCII
 
-    # 2) Patch Easy-Claw.cfg: ensure all java-options propagate; add console encoding hint
+    # 2) Patch Easy-Claw.cfg: add a file-logging location for direct exe launches
     $cfgFile = Join-Path $appDir "app\Easy-Claw.cfg"
     if (Test-Path $cfgFile) {
         $cfg = Get-Content $cfgFile -Raw
-        # log directory in cfg too (for exe direct-launch case)
         if ($cfg -notmatch "logging.file.path") {
-            $cfg = $cfg -replace '\[JavaOptions\]', "[JavaOptions]`njava-options=-Dlogging.file.path=`$APPDIR\\..\\..\\logs"
+            # forward slashes only: the cfg is properties-style, backslashes get eaten
+            $cfg = $cfg -replace '\[JavaOptions\]', "[JavaOptions]`njava-options=-Dlogging.file.path=`$APPDIR/../../logs"
             Set-Content -Path $cfgFile -Value $cfg -Encoding ASCII
         }
     }
@@ -292,7 +343,13 @@ if ($pkgReady -and $Mode -eq "app-image") {
     $zipPath = Join-Path $DistDir "$AppName-$Version-windows-x64.zip"
     if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
     $appDir = Join-Path $DistDir $AppName
-    Compress-Archive -Path (Join-Path $appDir "*") -DestinationPath $zipPath -CompressionLevel Optimal
+
+    # include the README inside the app folder so zip users get it too
+    Copy-Item (Join-Path $DistDir "README.txt") (Join-Path $appDir "README.txt") -Force
+
+    # zip the Easy-Claw folder itself so the archive has a top-level Easy-Claw/
+    # (matches the README instructions and the Linux/macOS tar layout)
+    Compress-Archive -Path $appDir -DestinationPath $zipPath -CompressionLevel Optimal
     Write-Host "      zip: $zipPath" -ForegroundColor Green
     $zipSize = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
     Write-Host "      size: ${zipSize} MB" -ForegroundColor Gray
