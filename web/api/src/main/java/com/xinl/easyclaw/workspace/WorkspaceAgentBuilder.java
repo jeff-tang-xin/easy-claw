@@ -367,6 +367,13 @@ public class WorkspaceAgentBuilder {
                 // （phase=start/end 经 AgentEventEmitter 实时推送，CustomEventTranslator 翻译），
                 // 旧的 CompactionNoticeMiddleware（下一推理步才延迟到达）已删除。
 
+        // 运维 P2（pull 形态）：仅追加静态「终端工具能力提示」，引导模型按需主动读取；
+        // 终端内容不注入对话（push 形态已废弃），工具返回经 TerminalOutputSanitizer 脱敏
+        if (opsMode) {
+            builder.middleware(
+                    new com.xinl.easyclaw.ops.middleware.TerminalToolHintMiddleware());
+        }
+
         // ===== 记忆账簿策略（用户级配置生效点）=====
         // 子 Agent 默认关闭记忆 hooks（每回合提取 + 周期合并）：子的上下文防爆由
         // compaction 负责（不受影响），值得沉淀的结论经黑板归口主 Agent 统一沉淀，

@@ -107,4 +107,56 @@ public class OpsTools {
                 ? "[服务器: " + info.name() + " | " + info.username() + "@" + info.host() + "]"
                 : "[服务器: " + info.name() + " | " + os + " | " + info.username() + "@" + info.host() + "]";
     }
+
+    // ==================== 终端上下文（AI 的「眼睛」） ====================
+
+    /** snapshot 返回字符上限：与 remote_shell 输出上限一致，防止吃满上下文 */
+    private static final int MAX_SNAPSHOT_CHARS = 60_000;
+
+    @Tool(name = "terminal_snapshot", description = "读取当前会话所绑定终端的最近屏幕内容（用户在终端里手动执行命令的真实输出，已去除颜色等控制符，常见凭证已脱敏）。\n"
+            + "【何时用】用户问「这是什么情况/刚才为什么报错/你看下现在的输出」，或你需要了解用户在终端手动操作的结果时——先读本工具获取上下文，不要让用户手动复制粘贴。\n"
+            + "【边界】只含终端最近的输出（有容量上限，更早的内容可能已被覆盖）；只读、不执行任何命令。\n"
+            + "【注意】未连接/未开过终端时返回错误，此时提示用户先连接。")
+    public String terminalSnapshot(WorkspaceContext workspace, RuntimeContext rc) {
+        return readScroll(workspace, rc, false, 0);
+    }
+
+    @Tool(name = "terminal_tail", description = "读取当前会话所绑定终端最近 N 行输出（用户手动操作的真实输出，已去除控制符，常见凭证已脱敏）。\n"
+            + "【何时用】只需要看最后几行（如最近一次命令的结果、报错尾部）时用本工具，比 terminal_snapshot 更省上下文。\n"
+            + "【边界】只读、不执行命令；N 建议 20~200。")
+    public String terminalTail(
+            @ToolParam(name = "lines", description = "要读取的最近行数（如 50）") Integer lines,
+            WorkspaceContext workspace,
+            RuntimeContext rc) {
+        int n = lines == null ? 50 : Math.max(1, Math.min(2000, lines));
+        return readScroll(workspace, rc, true, n);
+    }
+
+    /** snapshot/tail 共用：解析目标连接 → 取缓冲 → 截断 */
+    private String readScroll(WorkspaceContext workspace, RuntimeContext rc, boolean tail, int lines) {
+        if (workspace == null || workspace.getWorkspaceId() == null) {
+            return "❌ 当前没有可用的工作区。";
+        }
+        String workspaceId = workspace.getWorkspaceId();
+        long boundConn = ssh.connIdForSession(rc == null ? null : rc.getSessionId(), workspaceId);
+        long targetConn = boundConn > 0 ? boundConn : ssh.primaryConnId(workspaceId);
+        if (targetConn <= 0) {
+            return "❌ 尚未连接远程服务器：请让用户先在运维页面建立连接。";
+        }
+        String text = tail
+                ? ssh.terminalTail(workspaceId, targetConn, lines)
+                : ssh.terminalSnapshot(workspaceId, targetConn);
+        if (text == null) {
+            return "❌ 该连接还没有终端输出（可能刚连接、尚未执行命令）。";
+        }
+        if (text.isBlank()) {
+            return "（终端当前无可见输出）";
+        }
+        if (!tail && text.length() > MAX_SNAPSHOT_CHARS) {
+            text = text.substring(text.length() - MAX_SNAPSHOT_CHARS)
+                    + "\n...（仅保留最近部分，更早内容已超出缓冲）";
+        }
+        // 终端内容出网前脱敏：掩掉常见凭证形态，降低敏感信息进入 LLM 的风险
+        return com.xinl.easyclaw.ops.service.TerminalOutputSanitizer.sanitize(text.stripTrailing());
+    }
 }

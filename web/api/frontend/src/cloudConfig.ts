@@ -34,6 +34,8 @@ export interface CloudOpsServer {
   description: string;
   /** 归属的 hub 项目 id：数据归属参考；服务器清单不再按项目过滤（hub 已按授权下发全部） */
   projectId: number;
+  /** 受管分类标签（V28：hub 标签字典收口；空/缺省 = 未标注，归入「未分类」组） */
+  category?: string;
   /** hub 侧是否配置了密码：true=一键连接（spoke 服务端快照自取凭证）；false=连接时当次手输 */
   hasPassword?: boolean;
 }

@@ -13,7 +13,7 @@
 //     SH 模式 Ctrl+C 照旧直通远程 shell 终止远端命令。
 // 确认按钮只给「允许一次 / 拒绝」：ops 模式白名单机制关闭（AgentOrchestrator.whitelistEnabled=false），
 // 回合/永久授权后端一律不生效，渲染出来只会造成「点了没反应」的错觉。
-import {useCallback, useEffect, useMemo, useRef, useState} from 'react';
+import {useCallback, useEffect, useMemo, useRef, useState, Fragment} from 'react';
 import {useParams} from 'react-router-dom';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
@@ -24,6 +24,9 @@ import {getJson, postJson} from '../api';
 import {createOpsSocket, OpsChatEvent, OpsSocket} from '../opsSocket';
 import {CloudOpsServer, useCloudConfig} from '../cloudConfig';
 import {encryptPassword, getOpsPublicKey} from '../opsCrypto';
+import OpsFilePanel from '../OpsFilePanel';
+import OpsTransferCenter from '../OpsTransferCenter';
+import {useOpsTransfers} from '../opsTransfers';
 import '../ops.css';
 
 /** 一条活跃连接（SshConnectionService.status.connections 元素；serverKey 供匹配回下发清单） */
@@ -183,6 +186,59 @@ export default function OpsPage() {
   // 连接面板状态
   const [opsError, setOpsError] = useState('');
 
+  // 文件管理面板 / 任务中心（P1：目录树 + 右键菜单 + 传输进度）
+  const [filePanelOpen, setFilePanelOpen] = useState(false);
+  const [taskCenterOpen, setTaskCenterOpen] = useState(false);
+  const transfers = useOpsTransfers();
+
+  /** 终端选中文字后的快捷操作浮层（选中即问：问 AI / 解释） */
+  const [selAction, setSelAction] = useState<{ x: number; y: number; text: string } | null>(null);
+
+  /**
+   * 终端区 mouseup：读取 xterm 选区文字，非空则在鼠标位置弹出快捷浮层。
+   * 用事件委托绑在终端列容器（tab 容器是动态的，绑父节点即可）；选区来自
+   * 当前聚焦的 xterm 实例。点击空白（无选区）关闭浮层。
+   */
+  const onTerminalMouseUp = useCallback((ev: MouseEvent) => {
+    const tid = activeTabRef.current;
+    if (!tid) return;
+    const term = termsRef.current.get(tid)?.term;
+    const selected = term?.getSelection()?.trim();
+    if (selected && selected.length <= 8000) {
+      setSelAction({x: ev.clientX, y: ev.clientY, text: selected});
+    } else {
+      setSelAction(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    document.addEventListener('mouseup', onTerminalMouseUp);
+    return () => document.removeEventListener('mouseup', onTerminalMouseUp);
+  }, [onTerminalMouseUp]);
+
+  /** 向远程交互 shell 发送 ^C（\x03）：中断 PTY 上的前台任务（tail -f/top 等滚动/阻塞命令）。
+   * AI 工具走独立执行通道不占交互 PTY，故 ^C 只影响交互 shell，不会误伤 AI 正在执行的工具命令 */
+  const sendIntrToRemote = (tab: TermTab) => {
+    sockRef.current?.send({
+      type: 'term_data', workspaceId, terminalId: tab.terminalId,
+      data_b64: bytesToB64(new TextEncoder().encode('\x03')),
+    });
+  };
+
+  /** 选中浮层动作：把选中文本连同意图发给当前 tab 的 AI */
+  const askWithSelection = (intent: 'ask' | 'explain') => {
+    const tab = currentTab();
+    if (!tab || !selAction) return;
+    const prompt = intent === 'explain'
+      ? `请解释下面这段终端输出（是什么、可能的原因、如需处理给出建议）：\n${selAction.text}`
+      : selAction.text;
+    setSelAction(null);
+    // 先中断远程前台任务（tail -f 滚屏会冲掉 AI 回复、污染 AI 读到的终端快照），再发起询问
+    if (tab.connected) sendIntrToRemote(tab);
+    // 走 AI 通道（强制，不受当前 mode 影响）：直接复用 dispatchLine
+    dispatchLine(tab, prompt);
+  };
+
   // cloud 模式：平台下发的运维配置（local 模式 cloudMode=false，无服务器来源）
   const cloud = useCloudConfig();
   /** 一键连接进行中的服务器 serverKey（防重复点击） */
@@ -211,9 +267,25 @@ export default function OpsPage() {
     return cloud.opsServers ?? [];
   }, [cloud.cloudMode, cloud.opsServers]);
 
+  /** 按分类标签归类（V28）：组名按中文名排序，「未分类」固定最后；组内保持 hub 下发顺序。 */
+  const groupedServers = useMemo(() => {
+    const groups = new Map<string, CloudOpsServer[]>();
+    for (const s of cloudServers) {
+      const key = s.category?.trim() || '未分类';
+      const list = groups.get(key);
+      if (list) list.push(s);
+      else groups.set(key, [s]);
+    }
+    return [...groups.entries()].sort(([a], [b]) =>
+      a === '未分类' ? 1 : b === '未分类' ? -1 : a.localeCompare(b, 'zh-Hans-CN'),
+    );
+  }, [cloudServers]);
+
   // 终端 tab 状态（tabsRef/activeTabRef 是回调闭包里读最新值的镜像）
   const [tabs, setTabs] = useState<TermTab[]>([]);
   const [activeTabId, setActiveTabId] = useState<string | null>(null);
+  /** rz 挂起的终端（远端等待我们发送文件）：显示专用「选择文件」按钮做用户手势兜底 */
+  const [rzPendingTid, setRzPendingTid] = useState<string | null>(null);
   const tabsRef = useRef<TermTab[]>([]);
   const activeTabRef = useRef<string | null>(null);
   useEffect(() => { tabsRef.current = tabs; }, [tabs]);
@@ -232,12 +304,14 @@ export default function OpsPage() {
   /** terminalId → SH 模式行缓冲（键盘直通的逐键输入拼成整行，回车时上报命令记录；
    * tab 补全/↑↓ 历史由远端 shell 处理，补全内容不进本地缓冲，记录可能缺补全部分——审计可接受） */
   const shLineBufRef = useRef<Map<string, string>>(new Map());
+  /** terminalId → AI 模式本地命令历史（↑↓ 翻阅用；SH 模式用远程 bash 自带历史，不记这里）。
+   * idx=-1 表示编辑态（未在翻阅）；draft 存翻阅前的未提交草稿，↓ 翻回最新时恢复 */
+  const historiesRef = useRef<Map<string, {items: string[]; idx: number; draft: string}>>(new Map());
   /** terminalId → 终端容器 div（JSX ref 回填，供 xterm.open 挂载） */
   const containersRef = useRef<Map<string, HTMLDivElement | null>>(new Map());
   const sockRef = useRef<OpsSocket | null>(null);
   /** WS 是否已建立（refreshStatus 晚于 onOpen 到达时决定要不要补 reattach） */
   const sockOpenRef = useRef(false);
-  const fileRef = useRef<HTMLInputElement | null>(null);
   /** terminalId → 常驻 ZMODEM Sentry：下行字节先过它，普通输出透传上屏，ZMODEM 帧头截获成会话 */
   const sentriesRef = useRef<Map<string, ZmodemSentry>>(new Map());
   /** terminalId → 活跃 ZMODEM 会话（传输期间抑制键盘/幕布直发，防击键破坏协议帧） */
@@ -356,9 +430,12 @@ export default function OpsPage() {
       on_retract: () => { /* 帧头误判回缩：Sentry 已把字节重新排队送 to_terminal，无需处理 */ },
     });
     sentriesRef.current.set(active.terminalId, sentry);
-    term.writeln(`\x1b[90m${active.title}（${active.username}@${active.host}）\x1b[0m`);
-    term.writeln(`\x1b[90m徽标 AI（默认）：在此直接打字与智能体对话，白名单内命令(ls/df/systemctl status等)自动直执行；徽标 SH：键盘逐键直通远程 shell（Ctrl+C/Tab/↑ 可用）。点 tab 徽标切换\x1b[0m`);
-    term.writeln(`\x1b[90mAI 模式下智能体执行中按 Ctrl+C 可终止当前回合\x1b[0m`);
+    term.writeln(`\x1b[36m── ${active.title} · ${active.username}@${active.host} ──\x1b[0m`);
+    term.writeln(`\x1b[90m直接打字 = 与 AI 对话（↑↓ 翻输入历史）\x1b[0m`);
+    term.writeln(`\x1b[90mls/df 等常用命令自动直接执行\x1b[0m`);
+    term.writeln(`\x1b[90m!命令 = 强制直通远程 shell（如 !tail -f app.log）\x1b[0m`);
+    term.writeln(`\x1b[90mvim/top 等交互程序 → 点 tab 上 AI/SH 徽标切换\x1b[0m`);
+    term.writeln(`\x1b[90mAI 执行中按 Ctrl+C 可打断当前回合\x1b[0m`);
     // 键盘分流：AI 模式本地行编辑（回车提交分流，不直通 PTY）；SH 模式逐键直通远程 shell
     term.onData((data) => {
       const tab = tabsRef.current.find((t) => t.terminalId === active.terminalId);
@@ -655,8 +732,7 @@ export default function OpsPage() {
     }
   };
 
-  const disconnect = async () => {
-    const tab = currentTab();
+  const disconnect = async (tab: TermTab) => {
     if (!tab || !workspaceId) return;
     try {
       // 先标记断开：立即停掉该 tab 的键盘直通
@@ -672,8 +748,6 @@ export default function OpsPage() {
     }
   };
 
-  const uploadDirRef = useRef('');
-
   // ==================== ZMODEM（sz 自动收 / rz 弹选发送） ====================
 
   /** 下行检测到 ZMODEM 帧头：receive=远端 sz（自动收文件落盘）；send=远端 rz（弹文件选择器） */
@@ -683,6 +757,7 @@ export default function OpsPage() {
     const finish = () => {
       zmSessionsRef.current.delete(terminalId);
       zmSendPendingRef.current.delete(terminalId);
+      setRzPendingTid((cur) => (cur === terminalId ? null : cur));
     };
     zsession.on('session_end', finish);
     if (zsession.type === 'receive') {
@@ -699,10 +774,12 @@ export default function OpsPage() {
       });
       zsession.start();
     } else {
-      // 远端 rz 等我们发文件：自动弹文件选择器（用户刚敲 rz，页面有激活态，可弹出）；
-      // 若被浏览器拦截，点顶栏「上传文件」兜底（upload 里优先喂挂起的 rz 会话）
+      // 远端 rz 等我们发文件：先尝试自动弹文件选择器（用户刚敲 rz 的手势链，部分浏览器可放行）；
+      // 无论是否被拦截，都置 rzPendingTid —— 终端列顶部出现「选择文件发送」按钮，
+      // 由用户点击（确定的用户手势）兜底触发选择器，替代原顶栏「上传文件」入口
       zmSendPendingRef.current.set(terminalId, zsession);
-      termWrite(terminalId, `\r\n\x1b[36m⇡ 远端请求接收文件（rz）—— 请选择要发送的文件\x1b[0m\r\n`);
+      setRzPendingTid(terminalId);
+      termWrite(terminalId, '\r\n\x1b[36m⇡ 远端请求接收文件（rz）—— 请选择要发送的文件\x1b[0m\r\n');
       zmFileRef.current?.click();
     }
   };
@@ -710,6 +787,7 @@ export default function OpsPage() {
   /** 把选定的文件经 ZMODEM 发给挂起的 rz 会话 */
   const zmodemSend = async (terminalId: string, zsession: ZmodemSession, files: File[]) => {
     zmSendPendingRef.current.delete(terminalId);
+    setRzPendingTid((cur) => (cur === terminalId ? null : cur));
     try {
       await Zmodem.Browser.send_files(zsession, files, {
         on_file_complete: (xfer) => {
@@ -720,73 +798,6 @@ export default function OpsPage() {
     } catch (e) {
       termWrite(terminalId, `\r\n\x1b[31m✗ ZMODEM 发送失败：${String(e)}\x1b[0m\r\n`);
       zmSessionsRef.current.delete(terminalId);
-    }
-  };
-
-  const upload = async (f: File) => {
-    const tab = currentTab();
-    if (!tab || !workspaceId) return;
-    // 该 tab 有挂起的 rz 会话：文件喂给 ZMODEM 而非 SFTP（远端正在等协议数据流）
-    const pending = zmSendPendingRef.current.get(tab.terminalId);
-    if (pending) {
-      await zmodemSend(tab.terminalId, pending, [f]);
-      return;
-    }
-    // 目标目录：弹窗询问并记住上次输入；留空 = 远程家目录（SFTP "."）
-    const dir = window.prompt('上传到远程哪个目录？（留空 = 家目录）', uploadDirRef.current || '.');
-    if (dir === null) return; // 用户取消
-    const targetDir = dir.trim();
-    uploadDirRef.current = targetDir;
-    setOpsError('');
-    try {
-      const fd = new FormData();
-      fd.append('file', f);
-      const qs = `workspaceId=${encodeURIComponent(workspaceId)}&connId=${tab.connId}`
-        + (targetDir ? `&targetDir=${encodeURIComponent(targetDir)}` : '');
-      const res = await fetch(`/api/ops/upload?${qs}`, {method: 'POST', body: fd});
-      if (!res.ok) {
-        const detail = (await res.text()).trim();
-        throw new Error(detail || (res.status === 413 ? '文件超过大小限制（500MB）' : `HTTP ${res.status}`));
-      }
-      termWrite(tab.terminalId, `\x1b[90m已上传 ${f.name}（${f.size} 字节）-> ${targetDir || '家目录'}\x1b[0m\r\n`);
-    } catch (e) {
-      setOpsError(String(e));
-    }
-  };
-
-  // ==================== 文件下载（SFTP 流式） ====================
-
-  /** 下载当前 tab 连接上的远程文件：GET /api/ops/download（SFTP 流式）→ 浏览器落盘。
-   * 文件名取路径末段；失败（不存在/无权限）以 opsError 提示 */
-  const downloadFile = async () => {
-    const tab = currentTab();
-    if (!tab || !workspaceId) return;
-    const path = window.prompt('下载远程哪个文件？（绝对路径，如 /var/log/app.log）');
-    if (path === null) return; // 用户取消
-    const p = path.trim();
-    if (!p) return;
-    setOpsError('');
-    try {
-      const qs = `workspaceId=${encodeURIComponent(workspaceId)}&connId=${tab.connId}`
-        + `&path=${encodeURIComponent(p)}`;
-      const res = await fetch(`/api/ops/download?${qs}`);
-      if (!res.ok) {
-        const detail = (await res.text()).trim();
-        throw new Error(detail || `HTTP ${res.status}`);
-      }
-      const blob = await res.blob();
-      const name = p.split('/').pop() || 'download';
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
-      termWrite(tab.terminalId, `\x1b[90m已下载 ${name}（${blob.size} 字节）\x1b[0m\r\n`);
-    } catch (e) {
-      setOpsError(`下载失败：${String(e)}`);
     }
   };
 
@@ -809,20 +820,82 @@ export default function OpsPage() {
     }
   };
 
+  /** AI 模式本地历史翻阅：up=true 更旧（↑）/ false 更新（↓）。
+   * 返回替换后的行内容；null = 无历史或已到边界（不动）。
+   * 首次 ↑ 存下当前草稿，↓ 翻到最新时恢复 */
+  const historyNav = (terminalId: string, buf: string, up: boolean): string | null => {
+    const h = historiesRef.current.get(terminalId);
+    if (!h || h.items.length === 0) return null;
+    if (up) {
+      if (h.idx === -1) {
+        h.draft = buf;
+        h.idx = h.items.length - 1;
+      } else if (h.idx > 0) {
+        h.idx--;
+      } else {
+        return null; // 已到最旧一条
+      }
+    } else {
+      if (h.idx === -1) return null; // 编辑态按 ↓：无操作
+      if (h.idx < h.items.length - 1) {
+        h.idx++;
+      } else {
+        h.idx = -1; // 翻回最新：恢复草稿
+        return h.draft;
+      }
+    }
+    return h.items[h.idx];
+  };
+
   /** AI 模式终端 keystroke：本地行编辑（远程 PTY 不收键），回车提交分流。
-   * 中文 IME 由 xterm 处理：composition 确认后 onData 收到完整串，按普通字符回显 */
+   * 中文 IME 由 xterm 处理：composition 确认后 onData 收到完整串，按普通字符回显。
+   * ↑↓ 翻本地命令历史（远程 bash 历史在此模式不可达）；Tab 补全依赖远程 readline，
+   * 本地无法代劳，给出明确指引（! 前缀 / SH 模式） */
   const agentKeystroke = (tab: TermTab, data: string) => {
     let buf = lineBufRef.current.get(tab.terminalId) ?? '';
-    for (const ch of data) {
+    const chars = Array.from(data);
+    for (let i = 0; i < chars.length; i++) {
+      const ch = chars[i];
       if (ch === '\r') {
         const line = buf.trim();
         buf = '';
         lineBufRef.current.set(tab.terminalId, '');
+        // 记入本地历史（去重连续重复；上限 200 条，超出丢最旧）
+        if (line) {
+          const h = historiesRef.current.get(tab.terminalId) ?? {items: [], idx: -1, draft: ''};
+          if (h.items[h.items.length - 1] !== line) h.items.push(line);
+          if (h.items.length > 200) h.items.shift();
+          h.idx = -1;
+          historiesRef.current.set(tab.terminalId, h);
+        }
         // 擦掉本地回显行：shell 路径由远程回显重打，AI 路径由对话回显重打
         termWrite(tab.terminalId, '\r\x1b[K');
         if (line) dispatchLine(tab, line);
         else termWrite(tab.terminalId, AGENT_PROMPT);
         return;
+      }
+      if (ch === '\x1b') {
+        // ESC 序列：↑(\x1b[A)/↓(\x1b[B) 翻本地历史；其余（ESC[ / ESC O 引导）整段跳过
+        const seq = chars[i + 1];
+        if ((seq === '[' || seq === 'O') && (chars[i + 2] === 'A' || chars[i + 2] === 'B')) {
+          const line = historyNav(tab.terminalId, buf, chars[i + 2] === 'A');
+          if (line !== null) {
+            buf = line;
+            lineBufRef.current.set(tab.terminalId, buf);
+            termWrite(tab.terminalId, `\r\x1b[K${AGENT_PROMPT}${buf}`);
+          }
+          i += 2;
+        } else if (seq === '[' || seq === 'O') {
+          i += 2; // 其他方向键/Home/End 等：忽略整段，避免引字符混进行缓冲
+        }
+        continue;
+      }
+      if (ch === '\t') {
+        // Tab 补全由远程 bash readline 完成，AI 模式不直通：指引用户走可用路径
+        termWrite(tab.terminalId,
+          '\r\n\x1b[90mⓘ AI 模式不支持 Tab 补全 —— 需要补全/远程历史，点 tab 上 AI/SH 徽标切 SH 模式\x1b[0m\r\n');
+        termWrite(tab.terminalId, `\r\x1b[K${AGENT_PROMPT}${buf}`);
+        continue;
       }
       if (ch === '\x7f') {            // 退格（按码点删，emoji/扩展中文不残留半字符）
         const cps = Array.from(buf);
@@ -830,15 +903,17 @@ export default function OpsPage() {
         buf = cps.join('');
       } else if (ch === '\x03') {     // Ctrl+C
         if (tab.busy) {
-          // agent 回合执行中：终止智能体（后端 stopChat 中断 Flux 并主动推 stopped 复位 busy）。
+          // agent 回合执行中：终止智能体回合 + 同时中断远程前台任务（双发，两端都停）。
           // 此处不补提示符——stopped 事件到达后由 clearBusy 统一补，避免双提示符
           sockRef.current?.send({type: 'stop', workspaceId, sessionId: tab.sessionId});
-          termWrite(tab.terminalId, '^C\r\n\x1b[90m⏹ 已请求终止智能体回合\x1b[0m\r\n');
+          sendIntrToRemote(tab);
+          termWrite(tab.terminalId, '^C\r\n\x1b[90m⏹ 已终止智能体回合，并向远程发送 ^C\x1b[0m\r\n');
         } else {
-          // 空闲：放弃本行
+          // 空闲：仅透传 ^C；擦掉本地编辑行，^C 与新提示符由远程 bash 回显
           buf = '';
           lineBufRef.current.set(tab.terminalId, '');
-          termWrite(tab.terminalId, '^C\r\n' + AGENT_PROMPT);
+          termWrite(tab.terminalId, '\r\x1b[K');
+          sendIntrToRemote(tab);
         }
         return;
       } else if (ch >= ' ') {         // 可打印字符（含 IME 提交的中文串）；其余控制字符忽略
@@ -886,11 +961,20 @@ export default function OpsPage() {
   };
 
   /** 一行输入的分流执行（终端行编辑与底部幕布输入共用）：
-   * SH 模式或 AI 模式命中只读命令白名单 → 直写远程 shell；其余一律发给智能体 */
-  const dispatchLine = (tab: TermTab, text: string) => {
+   * 规则：①「!」前缀 → 强制直通 shell（剥掉 !）；② SH 模式或命中只读白名单 → 直通；
+   * ③ 其余发给智能体。
+   * forceShell 供「选中即问」之外的显式直通场景；幕布路径提示与本函数判定保持一致 */
+  const dispatchLine = (tab: TermTab, text: string, forceShell = false) => {
     const sock = sockRef.current;
     if (!sock || !workspaceId) return;
-    if (tab.mode === 'shell' || isShellShortcut(text, shellWhitelist.shortcuts, shellWhitelist.subs)) {
+    // 「!」前缀：用户显式要求直通（类似 shell 的强制执行记号）
+    let command = text;
+    if (text.startsWith('!') && text.length > 1) {
+      command = text.slice(1);
+      forceShell = true;
+    }
+    if (forceShell || tab.mode === 'shell'
+        || isShellShortcut(text, shellWhitelist.shortcuts, shellWhitelist.subs)) {
       if (!tab.connected) {
         termWrite(tab.terminalId, '\x1b[31m该连接已断开 —— 请重新连接\x1b[0m\r\n');
         return;
@@ -898,8 +982,8 @@ export default function OpsPage() {
       // 直接写进该 tab 的远程 shell：远端回显即用户所见，本地不再重复打印
       // ZMODEM 传输中：幕布文本混进协议流会破坏传输，丢弃
       if (zmSessionsRef.current.has(tab.terminalId)) return;
-      reportUserCommand(tab, text); // 幕布 SH 模式/白名单命令：整行上报审计
-      sock.send({type: 'term_data', workspaceId, terminalId: tab.terminalId, data: text + '\r'});
+      reportUserCommand(tab, command); // 幕布 SH 模式/白名单命令：整行上报审计
+      sock.send({type: 'term_data', workspaceId, terminalId: tab.terminalId, data: command + '\r'});
       return;
     }
     if (!tab.sessionId) {
@@ -958,21 +1042,11 @@ export default function OpsPage() {
           {activeTab ? `已连接 ${activeTab.username}@${activeTab.host}` : '未连接'}
         </span>
         <div className="ops-topbar-actions">
-          <button disabled={!activeTab} onClick={() => fileRef.current?.click()}>📤 上传文件</button>
-          <button disabled={!activeTab} onClick={() => void downloadFile()}>📥 下载文件</button>
-          <button disabled={!activeTab} onClick={disconnect}>断开</button>
+          <button disabled={!activeTab} onClick={() => setFilePanelOpen((v) => !v)}>📂 文件管理</button>
+          <button disabled={!activeTab} onClick={() => setTaskCenterOpen((v) => !v)}>📊 任务中心</button>
         </div>
-        <input
-          ref={fileRef}
-          type="file"
-          hidden
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void upload(f);
-            e.target.value = '';
-          }}
-        />
-        {/* rz 挂起会话的文件选择器（onZmodemDetect 自动弹出；被浏览器拦截时点「上传文件」兜底） */}
+        {/* rz 挂起会话的文件选择器：onZmodemDetect 自动尝试弹出；被浏览器拦截时
+            点终端列顶部的「选择文件发送」按钮（用户手势）兜底触发 */}
         <input
           ref={zmFileRef}
           type="file"
@@ -980,7 +1054,7 @@ export default function OpsPage() {
           hidden
           onChange={(e) => {
             const files = e.target.files ? Array.from(e.target.files) : [];
-            const tid = activeTabRef.current;
+            const tid = rzPendingTid ?? activeTabRef.current;
             const pending = tid ? zmSendPendingRef.current.get(tid) : undefined;
             if (files.length && tid && pending) void zmodemSend(tid, pending, files);
             e.target.value = '';
@@ -1019,6 +1093,13 @@ export default function OpsPage() {
               ))}
             </div>
           )}
+          {/* rz 挂起（远端等待发送文件）：专用按钮，用户手势触发文件选择器兜底 */}
+          {rzPendingTid && (
+            <div className="ops-rz-bar">
+              <span>⇡ 远端 rz 等待接收文件</span>
+              <button onClick={() => zmFileRef.current?.click()}>选择文件发送</button>
+            </div>
+          )}
           {/* 每个 tab 一个常驻容器：切 tab 只切显隐，滚动回溯与远端输出都不丢 */}
           {tabs.map((t) => (
             <div
@@ -1039,6 +1120,19 @@ export default function OpsPage() {
             </div>
           )}
           <div className="ops-curtain">
+            {/* 实时路径提示：当前输入将走哪条通道（直通 shell / 发给 AI），白名单边界可见 */}
+            {curtain.trim() && (() => {
+              const toShell = curtain.startsWith('!')
+                || activeTab?.mode === 'shell'
+                || isShellShortcut(curtain, shellWhitelist.shortcuts, shellWhitelist.subs);
+              return (
+                <div className={'ops-route-hint ' + (toShell ? 'shell' : 'ai')}>
+                  {curtain.startsWith('!')
+                    ? '→ 直通远程 shell（! 前缀，AI 不可见）'
+                    : toShell ? '→ 直通远程 shell（只读命令，AI 不可见）' : '→ 发给智能体'}
+                </div>
+              );
+            })()}
             <div className="ops-curtain-row">
               <input
                 value={curtain}
@@ -1071,36 +1165,55 @@ export default function OpsPage() {
           )}
 
           <ul className="ops-conn-list">
-            {cloudServers.map((s) => {
-              // 活跃 tab 按 serverKey 匹配（/api/ops/status 快照带回）
-              const tab = tabs.find((t) => t.serverKey === s.serverKey);
-              return (
-                <li key={s.serverKey} className={tab && tab.terminalId === activeTabId ? 'active' : ''}>
-                  <div className="ops-conn-info">
-                    <b>{s.name}</b>
-                    <span>{s.username}@{s.host}:{s.port}{s.description ? ` · ${s.description}` : ''}</span>
-                  </div>
-                  <div className="ops-conn-actions">
-                    {tab ? (
-                      <span
-                        className="ops-badge"
-                        title="点击切换到该终端"
-                        onClick={() => setActiveTabId(tab.terminalId)}
-                      >
-                        使用中
-                      </span>
-                    ) : (
-                      <button
-                        disabled={connectingKey === s.serverKey}
-                        onClick={() => void connectServer(s)}
-                      >
-                        {connectingKey === s.serverKey ? '连接中…' : s.hasPassword ? '一键连接' : '连接'}
-                      </button>
-                    )}
-                  </div>
-                </li>
-              );
-            })}
+            {groupedServers.map(([category, list]) => (
+              <Fragment key={category}>
+                {groupedServers.length > 1 && (
+                  <li className="ops-cat-label">
+                    <span>{category}</span>
+                    <span className="ops-cat-count">{list.length}</span>
+                  </li>
+                )}
+                {list.map((s) => {
+                  // 活跃 tab 按 serverKey 匹配（/api/ops/status 快照带回）
+                  const tab = tabs.find((t) => t.serverKey === s.serverKey);
+                  return (
+                    <li key={s.serverKey} className={tab && tab.terminalId === activeTabId ? 'active' : ''}>
+                      <div className="ops-conn-info">
+                        <b>{s.name}</b>
+                        <span>{s.username}@{s.host}:{s.port}{s.description ? ` · ${s.description}` : ''}</span>
+                      </div>
+                      <div className="ops-conn-actions">
+                        {tab ? (
+                          <>
+                            <span
+                              className="ops-badge"
+                              title="点击切换到该终端"
+                              onClick={() => setActiveTabId(tab.terminalId)}
+                            >
+                              使用中
+                            </span>
+                            <button
+                              className="ops-conn-disc"
+                              title="断开该连接"
+                              onClick={() => void disconnect(tab)}
+                            >
+                              断开
+                            </button>
+                          </>
+                        ) : (
+                          <button
+                            disabled={connectingKey === s.serverKey}
+                            onClick={() => void connectServer(s)}
+                          >
+                            {connectingKey === s.serverKey ? '连接中…' : s.hasPassword ? '一键连接' : '连接'}
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </Fragment>
+            ))}
             {cloud.cloudMode && cloudServers.length === 0 && (
               <li className="ops-empty">平台未下发服务器清单</li>
             )}
@@ -1108,6 +1221,34 @@ export default function OpsPage() {
 
         </aside>
       </div>
+
+      {/* 文件管理面板：浮在终端左侧，作用于当前激活 tab 的连接 */}
+      {filePanelOpen && activeTab && (
+        <OpsFilePanel
+          workspaceId={workspaceId}
+          connId={activeTab.connId}
+          upload={transfers.upload}
+          download={transfers.download}
+          onClose={() => setFilePanelOpen(false)}
+        />
+      )}
+
+      {/* 文件任务中心浮窗 */}
+      {taskCenterOpen && (
+        <OpsTransferCenter
+          tasks={transfers.tasks}
+          onRemove={transfers.remove}
+          onClose={() => setTaskCenterOpen(false)}
+        />
+      )}
+
+      {/* 选中即问浮层：终端选中文字后弹出 */}
+      {selAction && (
+        <div className="ops-sel-menu" style={{left: selAction.x, top: selAction.y}}>
+          <div onClick={() => askWithSelection('ask')}>💬 问 AI</div>
+          <div onClick={() => askWithSelection('explain')}>🔍 解释</div>
+        </div>
+      )}
     </div>
   );
 }
