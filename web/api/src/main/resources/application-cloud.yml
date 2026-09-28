@@ -1,0 +1,50 @@
+# ============================
+# 云端模式（spoke 接入 hub）：模型配置值的【云端供给方】
+#
+# 公共模型配置（provider / base-url / api-key / model-name）对 local 与 cloud 只有一份，
+# 区别只在值的供给方：
+#   local —— 由 application.yml 的 providers 表 + 环境变量直接供给
+#   cloud —— 由本文件两个特例输入派生供给：
+#            hub-url + app-key ──物化──> providers 表中名为 openai 的普通条目
+#                                        （base-url = <hub-url>/api/gateway/v1，api-key = app-key）
+#            模型面 / 组织 / 权限由 bootstrap 快照动态供给（仅启动时拉取，见 CloudBootstrapService）
+# 物化之后，注册、解析、model-limits 三级回退与本地 provider 走完全相同的代码路径。
+#
+# 激活方式（二选一）：
+#   1) 启动参数 --spring.profiles.active=dev-sqlite,cloud
+#   2) 运行层 ~/.easyClaw/application.yml 的 spring.profiles.active 改为 dev-sqlite,cloud
+#
+# 使用：模型 ID 形如 openai:<模型名>（快照模型面内的名字），可填在
+# agentscope.model.default-model 或 agents.<id>.model-name 等任意模型位。
+# 注：此处刻意复用 openai 这个 provider key——cloud 对框架而言只是一个 OpenAI 兼容
+# 供给方（base-url 指向 hub 网关），注册/解析/三级回退与本地 provider 完全同路径。
+# 快照不可用 = cloud 条目缺席，cloud:xxx 与「未配置的 provider」行为一致（回退默认）。
+# app-key 是密钥：本文件随源码入库只留占位符，真实值走环境变量 HUB_APPKEY
+# 或运行层 ~/.easyClaw/application.yml 覆盖，绝不入库。
+# ============================
+agentscope:
+  # ---- 多 Provider 表：key 为 provider 名，模型 ID 形如 <provider>:<model> ----
+  providers:
+    openai:
+      api-key: ${cloud.app-key}
+      base-url: ${cloud.hub-url:}/api/gateway/v1
+      # 逻辑别名：真实 provider+model 由 hub 按 appkey 的 hub_cloud 路由配置决定
+      model-name: hub_cloud
+  # 这里刻意【不配】max-tokens：写 `max-tokens: null` 并不能把值置空——Spring 的 PropertySource
+  # 把 null 视作「属性缺席」，Binder 会回落到 AgentScopeProperties.Model.maxTokens 的 Java 默认值
+  # 32768（实测见 ModelConfigModeInvariantTest）。真正保证 cloud 不下发任何输出上限的是下面的
+  # model-limits-enabled: false，resolveMaxTokens 在三级回退之前就被它短路。
+  # 注：缺失时 OpenAI 上游走服务端默认值，hub 的 Anthropic 转换器会补 4096。
+  # 上限整体不维护：真实 provider+model 由 hub 按 appkey 的 hub_cloud 路由决定，web 不感知
+  # 真实模型，公共 application.yml 的 model-limits 表（按真实模型名编写）在云端无一条该生效。
+  # 关掉它而不是靠「模型名恰好匹配不到」，避免有人给本 provider 补 max-tokens 或把
+  # agents.<id>.model-name 填成真实模型名时，web 又悄悄开始下发上限。
+  model-limits-enabled: false
+cloud:
+  hub-url: http://localhost:18081
+  app-key: ${HUB_APPKEY:}
+model:
+  provider: openai
+  temperature: 0.3
+  stream: true
+  parallel-tool-calls: true

@@ -1,0 +1,570 @@
+/* 运维页（OpsPage）布局与样式：终端占主区，右侧连接面板，底部智能幕布 */
+
+.ops-page {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg, #0f1115);
+}
+
+.ops-topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border, #2a2d35);
+  background: var(--panel, #16181d);
+}
+
+.ops-title { font-weight: 700; }
+
+.ops-status {
+  font-size: 0.85em;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #2a2d35);
+}
+.ops-status.on { color: #4ade80; border-color: #4ade8055; }
+.ops-status.off { color: #94a3b8; }
+
+.ops-topbar-actions { margin-left: auto; display: flex; gap: 8px; }
+
+.ops-error {
+  padding: 6px 18px;
+  color: #f87171;
+  font-size: 0.85em;
+  background: rgba(248, 113, 113, 0.08);
+  border-bottom: 1px solid rgba(248, 113, 113, 0.25);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.ops-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+
+.ops-terminal-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.ops-terminal {
+  flex: 1;
+  min-height: 0;
+  padding: 6px 10px;
+}
+/* xterm 需要显式高度才能铺满容器 */
+.ops-terminal .xterm { height: 100%; }
+
+/* ---- 终端 tab 栏（多连接并存，一条连接一个 tab） ---- */
+
+.ops-tabs {
+  flex-shrink: 0;
+  display: flex;
+  gap: 4px;
+  padding: 6px 8px 0;
+  background: var(--panel, #16181d);
+  border-bottom: 1px solid var(--border, #2a2d35);
+  overflow-x: auto;
+}
+.ops-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  background: #12161c;
+  color: #8b98a5;
+  border: 1px solid var(--border, #2a2d35);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.ops-tab:hover { color: #cdd9e5; }
+.ops-tab.active {
+  background: #101418;
+  color: #e6edf3;
+  border-color: #3a4450;
+}
+.ops-tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2ea043;
+  flex: none;
+}
+/* tab 上的幕布模式徽标：AI=智能体（青）/ SH=直写 shell（橙），点击切换 */
+.ops-tab-mode {
+  flex: none;
+  margin-left: 2px;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  user-select: none;
+}
+.ops-tab-mode.agent { background: #103441; color: #39c5cf; border: 1px solid #1d5f6b; }
+.ops-tab-mode.agent:hover { background: #164a58; }
+.ops-tab-mode.shell { background: #3d2e10; color: #e3a327; border: 1px solid #6b521d; }
+.ops-tab-mode.shell:hover { background: #4d3a14; }
+.ops-terminal.hidden { display: none; }
+.ops-terminal-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #4d5761;
+}
+
+/* ---- 智能幕布 ---- */
+
+.ops-curtain {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border, #2a2d35);
+  padding: 8px 12px;
+  background: var(--panel, #16181d);
+}
+
+/* 确认条悬浮在终端区底部之上（fixed 不受任何父级布局/滚动影响，必可见） */
+.ops-confirm {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 88px;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 14px;
+  border: 1px solid #facc1555;
+  border-radius: 8px;
+  background: #1c1e14;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.45);
+  font-size: 0.9em;
+}
+.ops-confirm-allow { background: #16a34a; border-color: #16a34a; color: #fff; }
+.ops-confirm-deny { background: transparent; color: #f87171; }
+
+.ops-curtain-row {
+  display: flex;
+  gap: 8px;
+}
+.ops-curtain-row input {
+  flex: 1;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #2a2d35);
+  background: var(--bg, #0f1115);
+  color: inherit;
+}
+.ops-curtain-row button {
+  padding: 8px 18px;
+  border-radius: 8px;
+}
+
+/* ---- 右侧连接面板 ---- */
+
+.ops-side {
+  width: 340px;
+  flex-shrink: 0;
+  border-left: 1px solid var(--border, #2a2d35);
+  background: var(--panel, #16181d);
+  overflow: auto;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ops-side-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 700;
+}
+
+.ops-conn-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ops-conn-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+}
+.ops-conn-list li.active { border-color: #4ade8055; }
+
+/* 分类标签分组标题（V28：服务器按标签归类渲染；仅多组时显示） */
+.ops-conn-list li.ops-cat-label {
+  border: none;
+  border-radius: 0;
+  padding: 2px 2px 0;
+  justify-content: flex-start;
+  gap: 6px;
+  font-size: 0.78em;
+  color: #94a3b8;
+  letter-spacing: 0.05em;
+}
+.ops-cat-count {
+  font-size: 0.9em;
+  color: #64748b;
+}
+
+.ops-conn-info { display: flex; flex-direction: column; min-width: 0; }
+.ops-conn-info b { font-size: 0.92em; }
+.ops-conn-info span {
+  font-size: 0.78em;
+  color: #94a3b8;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ops-conn-actions { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
+.ops-conn-actions button {
+  padding: 3px 8px;
+  font-size: 0.82em;
+  border-radius: 6px;
+}
+
+.ops-badge {
+  font-size: 0.78em;
+  color: #4ade80;
+  border: 1px solid #4ade8055;
+  border-radius: 999px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+/* 已连接行内的断开按钮：弱化的次级按钮，与绿色「使用中」徽标区分 */
+.ops-conn-disc {
+  color: #f87171;
+  border: 1px solid rgba(248, 113, 113, 0.4);
+  background: transparent;
+}
+.ops-conn-disc:hover { background: rgba(248, 113, 113, 0.14); }
+
+/* rz 挂起提示条：远端等待发送文件时出现在终端列顶部 */
+.ops-rz-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 12px;
+  font-size: 0.85em;
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.1);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+}
+.ops-rz-bar button {
+  padding: 3px 12px;
+  font-size: 0.95em;
+  border-radius: 6px;
+  color: #7dd3fc;
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  background: transparent;
+}
+.ops-rz-bar button:hover { background: rgba(56, 189, 248, 0.18); }
+
+.ops-empty {
+  color: #94a3b8;
+  font-size: 0.85em;
+  border: none !important;
+  justify-content: center !important;
+}
+
+.ops-conn-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+}
+.ops-conn-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.82em;
+  color: #94a3b8;
+}
+.ops-conn-form input,
+.ops-conn-form textarea,
+.ops-conn-form select {
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #2a2d35);
+  background: var(--bg, #0f1115);
+  color: inherit;
+  font-family: inherit;
+  font-size: 0.95em;
+}
+.ops-conn-form textarea { resize: vertical; font-family: monospace; }
+
+.ops-form-actions { display: flex; gap: 8px; }
+
+/* cloud 模式：工作区 ↔ hub 项目绑定区 */
+.ops-bind-hint {
+  margin: 0;
+  color: #94a3b8;
+  font-size: 0.85em;
+  line-height: 1.5;
+}
+.ops-bind-hint button { margin-left: 8px; }
+
+.ops-bind-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+}
+.ops-bind-project {
+  font-size: 0.85em;
+  color: #4ade80;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==================== 文件管理面板（OpsFilePanel） ==================== */
+
+.ops-fm-panel {
+  position: absolute;
+  left: 8px;
+  top: 56px;
+  bottom: 64px;
+  width: 300px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+
+.ops-fm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border, #2a2d35);
+}
+.ops-fm-close {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.2em;
+  cursor: pointer;
+  line-height: 1;
+}
+.ops-fm-close:hover { color: #e2e8f0; }
+
+.ops-fm-tree {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0;
+  font-size: 0.88em;
+}
+
+.ops-fm-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  cursor: default;
+  white-space: nowrap;
+}
+.ops-fm-row:hover { background: rgba(148, 163, 184, 0.1); }
+.ops-fm-row.selected { background: rgba(74, 222, 128, 0.16); }
+
+.ops-fm-arrow {
+  width: 12px;
+  flex: none;
+  color: #94a3b8;
+  font-size: 0.8em;
+}
+.ops-fm-icon { flex: none; }
+.ops-fm-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ops-fm-large {
+  flex: none;
+  margin-left: 6px;
+  font-size: 0.85em;
+  color: #fb923c;
+}
+.ops-fm-hint { color: #64748b; font-size: 0.85em; padding: 2px 0; }
+.ops-fm-error { color: #f87171; font-size: 0.82em; padding: 2px 0; }
+
+.ops-fm-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 132px;
+  padding: 4px;
+  background: #1d2026;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  font-size: 0.86em;
+  /* 显式浅色文字：菜单为 fixed 定位，不依赖继承（曾继承到深色导致深底深字看不见） */
+  color: #e2e8f0;
+}
+.ops-fm-menu div {
+  padding: 6px 10px;
+  border-radius: 5px;
+  cursor: default;
+  color: #e2e8f0;
+}
+.ops-fm-menu div:hover { background: rgba(74, 222, 128, 0.16); color: #4ade80; }
+
+/* ==================== 文件任务中心（OpsTransferCenter） ==================== */
+
+.ops-tc {
+  position: absolute;
+  right: 16px;
+  bottom: 70px;
+  width: 420px;
+  max-height: 60%;
+  z-index: 45;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+  overflow: hidden;
+}
+.ops-tc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-weight: 700;
+  border-bottom: 1px solid var(--border, #2a2d35);
+}
+.ops-tc-close {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  font-size: 1.2em;
+  cursor: pointer;
+}
+.ops-tc-tabs { display: flex; gap: 4px; padding: 6px 8px 0; }
+.ops-tc-tabs button {
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  padding: 6px 12px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.ops-tc-tabs button.active {
+  color: #e2e8f0;
+  border-bottom-color: #4ade80;
+}
+.ops-tc-list { padding: 8px 12px; overflow: auto; }
+.ops-tc-empty { color: #64748b; font-size: 0.86em; padding: 12px 0; text-align: center; }
+
+.ops-tc-item { padding: 8px 0; border-bottom: 1px solid rgba(148, 163, 184, 0.12); }
+.ops-tc-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 0.85em;
+}
+.ops-tc-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ops-tc-size { color: #94a3b8; flex: none; }
+.ops-tc-state { flex: none; width: 16px; text-align: center; }
+.ops-tc-state.done { color: #4ade80; }
+.ops-tc-state.error { color: #f87171; }
+.ops-tc-del {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 0.95em;
+}
+.ops-tc-del:hover { color: #f87171; }
+
+.ops-tc-bar {
+  margin-top: 6px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.18);
+  overflow: hidden;
+}
+.ops-tc-bar-fill {
+  height: 100%;
+  background: #4ade80;
+  transition: width 0.15s ease;
+}
+.ops-tc-err {
+  margin-top: 4px;
+  font-size: 0.8em;
+  color: #f87171;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ==================== 选中即问浮层（P1） ==================== */
+
+.ops-sel-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 120px;
+  padding: 4px;
+  background: #1d2026;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  font-size: 0.86em;
+  color: #e2e8f0;
+}
+.ops-sel-menu div {
+  padding: 6px 12px;
+  border-radius: 5px;
+  cursor: default;
+  color: #e2e8f0;
+}
+.ops-sel-menu div:hover { background: rgba(74, 222, 128, 0.16); color: #4ade80; }
+
+/* ==================== 幕布路径提示（P1） ==================== */
+
+.ops-route-hint {
+  padding: 3px 14px 0;
+  font-size: 0.78em;
+}
+.ops-route-hint.shell { color: #fbbf24; }
+.ops-route-hint.ai { color: #4ade80; }

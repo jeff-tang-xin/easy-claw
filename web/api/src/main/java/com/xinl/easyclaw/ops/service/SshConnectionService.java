@@ -1,0 +1,845 @@
+package com.xinl.easyclaw.ops.service;
+
+import org.apache.sshd.client.SshClient;
+import org.apache.sshd.client.channel.ChannelShell;
+import org.apache.sshd.client.channel.ClientChannel;
+import org.apache.sshd.client.channel.ClientChannelEvent;
+import org.apache.sshd.client.session.ClientSession;
+import org.apache.sshd.common.NamedResource;
+import org.apache.sshd.common.config.keys.FilePasswordProvider;
+import org.apache.sshd.common.util.security.SecurityUtils;
+import org.apache.sshd.sftp.client.SftpClient;
+import org.apache.sshd.sftp.client.SftpClientFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.FilterInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.PipedInputStream;
+import java.io.PipedOutputStream;
+import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.EnumSet;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
+
+/**
+ * 运维场景 SSH 连接运行时管理。
+ * <p>
+ * 三个职责，全部按 workspaceId 隔离：
+ * <ul>
+ *   <li><b>连接</b>：每工作区可同时多条活跃连接（按 connId 隔离，各自独立终端 tab）；
+ *       最近建立的连接作为智能体 remote_shell 的默认执行目标（primary）。
+ *       凭证明文只在调用瞬间存在，不缓存</li>
+ *   <li><b>命令执行</b>：{@code exec} 供 remote_shell 工具用（一次性 exec channel，
+ *       收集 stdout/stderr/退出码，作用于 primary 连接）；{@code openShell} 供 Web 终端用
+ *       （PTY 交互通道，输出经回调推给 WS，作用于指定 connId 的连接）</li>
+ *   <li><b>文件上传</b>：SFTP put 到指定连接的远程目录</li>
+ * </ul>
+ * <p>
+ * <b>主机密钥校验</b>：当前显式使用 AcceptAll（首次连接不弹指纹确认）。
+ * 运维工具连接的是用户自己填写的内网/自有服务器；严格 TOFU 指纹校验留作后续增强，
+ * 届时需给前端加指纹确认交互，不能只改这里。
+ */
+@Service
+public class SshConnectionService {
+
+    private static final Logger log = LoggerFactory.getLogger(SshConnectionService.class);
+    private static final Duration CONNECT_TIMEOUT = Duration.ofSeconds(15);
+    private static final Duration AUTH_TIMEOUT = Duration.ofSeconds(15);
+    /** exec 默认超时（秒），与 application.yml 的 shell-timeout-seconds 对齐 */
+    private static final long DEFAULT_EXEC_TIMEOUT_SECONDS = 300;
+
+    /** (workspaceId|connId) → 活跃连接；同一工作区可并存多条（不同 connId） */
+    private final Map<String, SshHolder> active = new ConcurrentHashMap<>();
+    /** workspaceId → 最近建立连接的 connId（智能体 remote_shell 的默认目标） */
+    private final Map<String, Long> primaryConn = new ConcurrentHashMap<>();
+    /**
+     * 运维服务器只来自 hub 下发：serverKey（{@code workspaceId|serverKey}）→ 运行时分配的 connId。
+     * spoke 不再本地持久化连接配置，connId 仅在进程内按工作区单调分配，断开即释放。
+     */
+    private final Map<String, Long> serverConnIds = new ConcurrentHashMap<>();
+    /** (workspaceId|connId) → 连接绑定的服务器信息（运维服务器只来自 hub，connectByServer 时登记） */
+    private final Map<String, OpsServerInfo> serverInfoByConn = new ConcurrentHashMap<>();
+    /** workspaceId → 该工作区已分配的最大 connId（重启后从 1 重新分配，活跃连接也随重启清空） */
+    private final Map<String, AtomicLong> connIdSequences = new ConcurrentHashMap<>();
+    /** sessionId → 绑定的连接键 wsKey（运维多 tab：一个连接一个会话，remote_shell 定向执行） */
+    private final Map<String, String> sessionConn = new ConcurrentHashMap<>();
+    /** terminalId → 交互终端（跨工作区索引，WS 断连时按 terminalId 清理） */
+    private final Map<String, ShellEntry> terminals = new ConcurrentHashMap<>();
+
+    /** 连接 → 终端输出环形缓冲（AI snapshot/tail 工具的数据源；disconnect 清理） */
+    private final Map<String, TerminalScrollBuffer> scrollBuffers = new ConcurrentHashMap<>();
+
+    /** 连接运行时索引键：同一工作区按 connId 并存多条连接 */
+    private static String wsKey(String workspaceId, long connId) {
+        return workspaceId + "|" + connId;
+    }
+
+    // ==================== 连接管理 ====================
+
+    /** 服务器键在工作区内的索引：运维服务器只来自 hub，serverKey 由 hub 保证工作区内唯一 */
+    private static String serverKey(String workspaceId, String serverKey) {
+        return workspaceId + "||" + serverKey;
+    }
+
+    /**
+     * 按 hub 下发的服务器建立活跃连接（运维服务器的唯一连接入口）。
+     * <p>
+     * connId 在工作区内运行时单调分配并与 serverKey 绑定：已活跃则直接复用（不重连，
+     * 保留 shell 状态），否则分配新 connId。密码仅在本次 SSH 认证时使用，方法返回后即丢弃，
+     * spoke 不做任何持久化。
+     *
+     * @param osType      服务器操作系统类型（来自 hub 下发快照；旧 hub 未下发时为 null）
+     * @return 该服务器绑定的 connId
+     * @throws IOException 连接/认证失败（消息已可直接展示给用户）
+     */
+    public long connectByServer(String workspaceId, String serverKey, String connName, String host, int port,
+                                String username, String password, String osType) throws IOException {
+        String sKey = serverKey(workspaceId, serverKey);
+        Long existing = serverConnIds.get(sKey);
+        if (existing != null && isConnected(workspaceId, existing)) {
+            primaryConn.put(workspaceId, existing);
+            serverInfoByConn.put(wsKey(workspaceId, existing),
+                    new OpsServerInfo(serverKey, connName, host, username, osType));
+            return existing;
+        }
+        long connId = connIdSequences
+                .computeIfAbsent(workspaceId, k -> new AtomicLong())
+                .incrementAndGet();
+        connect(workspaceId, connId, connName, host, port, username, "password", password, null, null);
+        serverConnIds.put(sKey, connId);
+        serverInfoByConn.put(wsKey(workspaceId, connId),
+                new OpsServerInfo(serverKey, connName, host, username, osType));
+        return connId;
+    }
+
+    /**
+     * 建立指定连接配置的活跃连接（同 connId 重连时先关旧；其他 connId 的连接不受影响）。
+     * 凭证明文参数在方法返回后即丢弃。
+     *
+     * @throws IOException 连接/认证失败（消息已可直接展示给用户）
+     */
+    public void connect(String workspaceId, long connId, String connName, String host, int port, String username,
+                        String authType, String password, String privateKey, String passphrase)
+            throws IOException {
+        disconnect(workspaceId, connId);
+        SshClient client = SshClient.setUpDefaultClient();
+        client.start();
+        boolean ok = false;
+        try {
+            ClientSession session = client.connect(username, host, port)
+                    .verify(CONNECT_TIMEOUT).getSession();
+            if ("key".equals(authType)) {
+                if (privateKey == null || privateKey.isBlank()) {
+                    throw new IOException("私钥内容为空");
+                }
+                Iterable<KeyPair> pairs = SecurityUtils.loadKeyPairIdentities(
+                        null, NamedResource.ofName("ops-key"),
+                        new ByteArrayInputStream(privateKey.getBytes(StandardCharsets.UTF_8)),
+                        FilePasswordProvider.of(passphrase == null ? "" : passphrase));
+                boolean added = false;
+                for (KeyPair kp : pairs) {
+                    session.addPublicKeyIdentity(kp);
+                    added = true;
+                    break;
+                }
+                if (!added) {
+                    throw new IOException("私钥解析失败：无法从中读取密钥对（支持 OpenSSH/PEM 格式）");
+                }
+            } else {
+                if (password == null) {
+                    throw new IOException("密码为空");
+                }
+                session.addPasswordIdentity(password);
+            }
+            session.auth().verify(AUTH_TIMEOUT);
+            active.put(wsKey(workspaceId, connId), new SshHolder(client, session, connId, connName, host, username, Instant.now()));
+            primaryConn.put(workspaceId, connId);
+            ok = true;
+            log.info("运维连接已建立: workspace={}, conn={}, {}@{}:{}", workspaceId, connId, username, host, port);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("连接失败: " + e.getMessage(), e);
+        } finally {
+            if (!ok) {
+                try {
+                    client.stop();
+                } catch (Exception ignored) {
+                    // 关闭失败无需处理
+                }
+            }
+        }
+    }
+
+    /** 断开指定连接并关闭其全部交互终端；该连接未活跃时静默返回 */
+    public void disconnect(String workspaceId, long connId) {
+        serverInfoByConn.remove(wsKey(workspaceId, connId));
+        scrollBuffers.remove(wsKey(workspaceId, connId));
+        SshHolder holder = active.remove(wsKey(workspaceId, connId));
+        if (holder == null) {
+            return;
+        }
+        if (primaryConn.get(workspaceId) != null && primaryConn.get(workspaceId) == connId) {
+            primaryConn.remove(workspaceId);
+        }
+        terminals.entrySet().removeIf(e -> {
+            if (workspaceId.equals(e.getValue().workspaceId) && e.getValue().connId == connId) {
+                closeQuietly(e.getValue());
+                return true;
+            }
+            return false;
+        });
+        // 释放该 connId 绑定的 serverKey（运维服务器只来自 hub；断开后下次连接重新分配 connId）
+        String prefix = workspaceId + "||";
+        serverConnIds.entrySet().removeIf(e ->
+                e.getKey().startsWith(prefix) && e.getValue() == connId);
+        try {
+            holder.session.close(false);
+        } catch (Exception ignored) {
+            // 关闭失败无需处理
+        }
+        try {
+            holder.client.stop();
+        } catch (Exception ignored) {
+            // 关闭失败无需处理
+        }
+        log.info("运维连接已断开: workspace={}, conn={}, {}@{}", workspaceId, connId, holder.username, holder.host);
+    }
+
+    /** 活跃运维连接快照（授权守卫用）：仅 session 存活的连接，含 workspaceId/connId/serverKey。 */
+    public List<ActiveServerConn> activeServerConns() {
+        List<ActiveServerConn> out = new ArrayList<>();
+        for (Map.Entry<String, OpsServerInfo> e : serverInfoByConn.entrySet()) {
+            SshHolder holder = active.get(e.getKey());
+            if (holder == null || !holder.session.isOpen() || !holder.session.isAuthenticated()) {
+                continue;
+            }
+            int sep = e.getKey().lastIndexOf('|');
+            if (sep <= 0) {
+                continue;
+            }
+            out.add(new ActiveServerConn(e.getKey().substring(0, sep),
+                    Long.parseLong(e.getKey().substring(sep + 1)), e.getValue().serverKey()));
+        }
+        return out;
+    }
+
+    /** 活跃运维连接条目（{@link #activeServerConns} 返回值） */
+    public record ActiveServerConn(String workspaceId, long connId, String serverKey) {
+    }
+
+    /** 工作区 primary 连接（最近建立）是否可用 —— remote_shell 工具的前置判断 */
+    public boolean isConnected(String workspaceId) {
+        return primaryHolder(workspaceId) != null;
+    }
+
+    /** 指定连接是否活跃 */
+    public boolean isConnected(String workspaceId, long connId) {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        return holder != null && holder.session.isOpen() && holder.session.isAuthenticated();
+    }
+
+    /** 连接状态快照（给前端展示；不含任何凭证）。connections 为该工作区全部活跃连接 */
+    public Map<String, Object> status(String workspaceId) {
+        Map<String, Object> out = new HashMap<>();
+        // connId → serverKey 反向索引（运维服务器只来自 hub；供前端把活跃连接匹配回下发清单）
+        String prefix = workspaceId + "||";
+        Map<Long, String> connServerKeys = new HashMap<>();
+        for (Map.Entry<String, Long> e : serverConnIds.entrySet()) {
+            if (e.getKey().startsWith(prefix)) {
+                connServerKeys.put(e.getValue(), e.getKey().substring(prefix.length()));
+            }
+        }
+        List<Map<String, Object>> conns = new ArrayList<>();
+        for (Map.Entry<String, SshHolder> e : active.entrySet()) {
+            if (!e.getKey().startsWith(workspaceId + "|")) {
+                continue;
+            }
+            SshHolder h = e.getValue();
+            if (!h.session.isOpen() || !h.session.isAuthenticated()) {
+                continue;
+            }
+            Map<String, Object> c = new HashMap<>();
+            c.put("connId", h.connId);
+            c.put("serverKey", connServerKeys.get(h.connId));
+            c.put("connName", h.connName);
+            c.put("host", h.host);
+            c.put("username", h.username);
+            c.put("connectedAt", h.connectedAt.toString());
+            conns.add(c);
+        }
+        out.put("connections", conns);
+        return out;
+    }
+
+    /** 工作区 primary 连接（最近建立）的 connId；无活跃连接返回 0（不校验存活，存活判断用 isConnected/opsServerInfo） */
+    public long primaryConnId(String workspaceId) {
+        Long connId = primaryConn.get(workspaceId);
+        return connId == null ? 0 : connId;
+    }
+
+    /**
+     * 指定连接绑定的服务器信息（remote_shell 结果横幅与命令审计上报用）。
+     * 连接不存在或已断开返回 null。
+     */
+    public OpsServerInfo opsServerInfo(String workspaceId, long connId) {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen() || !holder.session.isAuthenticated()) {
+            return null;
+        }
+        return serverInfoByConn.get(wsKey(workspaceId, connId));
+    }
+
+    // ==================== 会话绑定（智能幕布按 tab 会话定向执行） ====================
+
+    /**
+     * 绑定「会话 → 连接」：该会话里智能体的 remote_shell 固定作用于这条连接。
+     * 运维页每个连接一个智能体会话（前端 chat 消息携带 connId 时调用）。
+     */
+    public void bindSession(String sessionId, String workspaceId, long connId) {
+        if (sessionId == null || sessionId.isBlank() || workspaceId == null
+                || workspaceId.isBlank() || connId <= 0) {
+            return;
+        }
+        sessionConn.put(sessionId, wsKey(workspaceId, connId));
+    }
+
+    /** 解除会话绑定（WS 断连清理 orphaned 会话时调用，防 map 无界增长） */
+    public void unbindSession(String sessionId) {
+        if (sessionId != null) {
+            sessionConn.remove(sessionId);
+        }
+    }
+
+    /**
+     * 会话绑定的连接 id；未绑定或绑定不属于该工作区时返回 0（调用方回退 primary 连接）。
+     * 校验 workspace 前缀，防止拿 A 工作区会话的绑定去操作 B 工作区的连接。
+     */
+    public long connIdForSession(String sessionId, String workspaceId) {
+        String key = sessionId == null ? null : sessionConn.get(sessionId);
+        if (key == null || workspaceId == null || workspaceId.isBlank()
+                || !key.startsWith(workspaceId + "|")) {
+            return 0;
+        }
+        try {
+            return Long.parseLong(key.substring(workspaceId.length() + 1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    // ==================== 命令执行（remote_shell 工具） ====================
+
+    /**
+     * 在远程执行一条命令并收集完整输出（阻塞）。
+     *
+     * @param timeoutSeconds 超时秒数；超时后通道被强制关闭并返回 timedOut 结果
+     */
+    public ExecResult exec(String workspaceId, String command, long timeoutSeconds) throws IOException {
+        SshHolder holder = primaryHolder(workspaceId);
+        long timeout = timeoutSeconds > 0 ? timeoutSeconds : DEFAULT_EXEC_TIMEOUT_SECONDS;
+        return execOn(holder, workspaceId, command, timeout);
+    }
+
+    public ExecResult exec(String workspaceId, String command) throws IOException {
+        return exec(workspaceId, command, DEFAULT_EXEC_TIMEOUT_SECONDS);
+    }
+
+    /** 在指定连接上执行命令（会话绑定了连接时由 remote_shell 使用） */
+    public ExecResult exec(String workspaceId, long connId, String command, long timeoutSeconds) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen() || !holder.session.isAuthenticated()) {
+            throw new IOException("该会话绑定的远程连接已断开（connId=" + connId + "）：请重新连接后再试");
+        }
+        long timeout = timeoutSeconds > 0 ? timeoutSeconds : DEFAULT_EXEC_TIMEOUT_SECONDS;
+        return execOn(holder, workspaceId, command, timeout);
+    }
+
+    private ExecResult execOn(SshHolder holder, String workspaceId, String command, long timeout) throws IOException {
+        if (holder == null) {
+            throw new IOException("尚未连接远程服务器");
+        }
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        ByteArrayOutputStream err = new ByteArrayOutputStream();
+        try (ClientChannel channel = holder.session.createExecChannel(command)) {
+            channel.setOut(out);
+            channel.setErr(err);
+            channel.open().verify(CONNECT_TIMEOUT);
+            Set<ClientChannelEvent> events =
+                    channel.waitFor(EnumSet.of(ClientChannelEvent.CLOSED), Duration.ofSeconds(timeout));
+            boolean timedOut = events.contains(ClientChannelEvent.TIMEOUT);
+            if (timedOut) {
+                log.warn("远程命令超时: workspace={}, command={}, timeout={}s", workspaceId, command, timeout);
+            }
+            Integer code = channel.getExitStatus();
+            return new ExecResult(code == null ? -1 : code,
+                    out.toString(StandardCharsets.UTF_8),
+                    err.toString(StandardCharsets.UTF_8),
+                    timedOut);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("远程执行失败: " + e.getMessage(), e);
+        }
+    }
+
+    // ==================== 交互终端（Web shell） ====================
+
+    /**
+     * 打开一个 PTY 交互终端。输出（含 ANSI 控制序列）经 {@code outputConsumer}
+     * 以原始字节块回调（在 sshd 读线程上调用，消费方自行保证线程安全）。
+     *
+     * @return 错误消息；null = 成功
+     */
+    public String openShell(String workspaceId, long connId, String terminalId, int cols, int rows,
+                            Consumer<byte[]> outputConsumer) {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            return "尚未连接远程服务器";
+        }
+        ShellEntry existing = terminals.get(terminalId);
+        if (existing != null) {
+            closeQuietly(existing);
+            terminals.remove(terminalId);
+        }
+        try {
+            ChannelShell channel = (ChannelShell) holder.session.createShellChannel();
+            channel.setPtyType("xterm-256color");
+            channel.setPtyColumns(cols > 0 ? cols : 80);
+            channel.setPtyLines(rows > 0 ? rows : 24);
+            // 关闭 ONLCR（输出 \n→\r\n 转换）：ZMODEM（rz/sz）是二进制协议，帧内 0x0A 被
+            // PTY 行规程改写会破坏帧长度与 CRC；前端 xterm 以 convertEol 补偿普通输出的显示。
+            // 其余 modes 保持 sshd 默认（setupSensibleDefaultPty）
+            Map<org.apache.sshd.common.channel.PtyMode, Integer> ptyModes = new HashMap<>();
+            ptyModes.put(org.apache.sshd.common.channel.PtyMode.ONLCR,
+                    org.apache.sshd.common.channel.PtyMode.FALSE_SETTING);
+            channel.setPtyModes(ptyModes);
+            PipedInputStream in = new PipedInputStream(64 * 1024);
+            PipedOutputStream stdin = new PipedOutputStream(in);
+            channel.setIn(in);
+            // 输出回调：字节转发浏览器的同时 tee 进连接级环形缓冲（AI 的「眼睛」）。
+            // 缓冲按 wsKey 取（openShell 时确保存在）；Consumer 包一层，原 outputConsumer
+            // 语义不变，缓冲失败不影响转发
+            String key = wsKey(workspaceId, connId);
+            TerminalScrollBuffer scroll = scrollBuffers.computeIfAbsent(key, k -> new TerminalScrollBuffer());
+            Consumer<byte[]> teeConsumer = bytes -> {
+                try {
+                    scroll.append(bytes, 0, bytes.length);
+                } catch (Exception e) {
+                    log.debug("终端缓冲写入失败（忽略）: {}", e.getMessage());
+                }
+                outputConsumer.accept(bytes);
+            };
+            channel.setOut(new ForwardingOutputStream(teeConsumer));
+            channel.setErr(new ForwardingOutputStream(teeConsumer));
+            channel.open().verify(CONNECT_TIMEOUT);
+            terminals.put(terminalId, new ShellEntry(workspaceId, connId, channel, stdin));
+            log.info("交互终端已打开: workspace={}, conn={}, terminal={}, {}@{}",
+                    workspaceId, connId, terminalId, holder.username, holder.host);
+            return null;
+        } catch (Exception e) {
+            return "打开终端失败: " + e.getMessage();
+        }
+    }
+
+    /** 向终端写入输入（键盘输入/粘贴）；返回错误消息，null = 成功 */
+    public String writeShell(String workspaceId, String terminalId, String data) {
+        return writeShellBytes(workspaceId, terminalId, data.getBytes(StandardCharsets.UTF_8));
+    }
+
+    /**
+     * 向终端写入原始字节（ZMODEM 等二进制协议通道）。
+     * <p>
+     * 与 {@link #writeShell(String, String, String)} 的区别：不做 UTF-8 编码——ZMODEM 帧
+     * 含任意字节（≥0x80），经 UTF-8 编码会被改写。前端 term_data 的 {@code data_b64} 变体
+     * 走此路径；纯键盘输入仍走文本路径。
+     *
+     * @return 错误消息；null = 成功
+     */
+    public String writeShellBytes(String workspaceId, String terminalId, byte[] data) {
+        ShellEntry entry = terminals.get(terminalId);
+        if (entry == null || !workspaceId.equals(entry.workspaceId)) {
+            return "终端不存在或已关闭";
+        }
+        try {
+            entry.stdin.write(data);
+            entry.stdin.flush();
+            return null;
+        } catch (IOException e) {
+            closeShell(workspaceId, terminalId);
+            return "终端输入失败（已关闭）: " + e.getMessage();
+        }
+    }
+
+    /**
+     * 终端窗口尺寸变化。
+     * <p>
+     * <b>已知限制</b>：MINA SSHD 2.12.1 未暴露 window-change 通道请求的公开 API
+     * （PtyCapableChannelSession/ClientChannel 均无 resize 方法），故此处仅记录日志、
+     * 不向远端发送尺寸变更；远端 PTY 保持打开时的初始行列数，bash 的行回绕在
+     * resize 后可能出现短暂错位，不影响功能。后续升级 SSHD 或自行实现
+     * window-change 报文后再补齐。
+     */
+    public String resizeShell(String workspaceId, String terminalId, int cols, int rows) {
+        ShellEntry entry = terminals.get(terminalId);
+        if (entry == null || !workspaceId.equals(entry.workspaceId)) {
+            return null; // 终端已关，resize 静默忽略
+        }
+        log.debug("PTY resize 暂不支持（SSHD 2.12.1 无公开 API）: terminal={}, {}x{}", terminalId, cols, rows);
+        return null;
+    }
+
+    public void closeShell(String workspaceId, String terminalId) {
+        ShellEntry entry = terminals.remove(terminalId);
+        if (entry != null && workspaceId.equals(entry.workspaceId)) {
+            closeQuietly(entry);
+        }
+    }
+
+    /** WS 连接断开时按 terminalId 清理（不校验 workspace，调用方来自连接关闭回调） */
+    public void closeShellByTerminalId(String terminalId) {
+        ShellEntry entry = terminals.remove(terminalId);
+        if (entry != null) {
+            closeQuietly(entry);
+        }
+    }
+
+    // ==================== 文件上传（SFTP） ====================
+
+    /**
+     * 上传文件到远程目录（SFTP put）。
+     *
+     * @param targetDir 远程目录（须已存在），如 {@code /home/user/upload}
+     * @return 错误消息；null = 成功
+     */
+    public String upload(String workspaceId, long connId, String targetDir, String fileName, InputStream content) {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            return "尚未连接远程服务器";
+        }
+        String safeName = fileName == null ? "upload.bin" : fileName.replaceAll("[\\\\/:*?\"<>|]", "_");
+        String remotePath = (targetDir == null || targetDir.isBlank() ? "." : targetDir.trim())
+                + "/" + safeName;
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            try {
+                sftp.stat(targetDir == null || targetDir.isBlank() ? "." : targetDir.trim());
+            } catch (Exception e) {
+                return "远程目录不存在: " + targetDir;
+            }
+            try (OutputStream os = sftp.write(remotePath)) {
+                content.transferTo(os);
+            }
+            log.info("文件已上传: workspace={}, -> {}", workspaceId, remotePath);
+            return null;
+        } catch (Exception e) {
+            return "上传失败: " + e.getMessage();
+        }
+    }
+
+    // ==================== 文件下载（SFTP） ====================
+
+    /**
+     * 打开远程文件下载流（SFTP read，流式——不整读进内存，支持大文件）。
+     * <p>
+     * 返回的 {@link RemoteFile#content()} 读取完毕后 <b>必须 close</b>：close 会连带关闭
+     * 底层 SFTP 客户端（流与客户端生命周期绑定，避免连接泄漏）。
+     *
+     * @param remotePath 远程文件路径（绝对路径或相对家目录）
+     * @throws IOException 连接不可用 / 路径不存在 / 是目录 / 打开失败
+     */
+    public RemoteFile openDownload(String workspaceId, long connId, String remotePath) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            throw new IOException("尚未连接远程服务器或连接已断开");
+        }
+        String path = remotePath == null ? "" : remotePath.trim();
+        if (path.isEmpty()) {
+            throw new IOException("远程路径为空");
+        }
+        SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session);
+        boolean success = false;
+        try {
+            SftpClient.Attributes attr = sftp.stat(path);
+            if (attr.isDirectory()) {
+                throw new IOException("远程路径是目录，不支持下载: " + path);
+            }
+            String fileName = path.substring(path.lastIndexOf('/') + 1);
+            if (fileName.isBlank()) {
+                fileName = "download.bin";
+            }
+            InputStream raw = sftp.read(path);
+            success = true;
+            // 流关闭时连带关闭 SFTP 客户端（try-with-resources 只看到最外层流）
+            InputStream wrapped = new FilterInputStream(raw) {
+                @Override
+                public void close() throws IOException {
+                    try {
+                        super.close();
+                    } finally {
+                        try {
+                            sftp.close();
+                        } catch (Exception ignored) {
+                            // 关闭失败无需处理
+                        }
+                    }
+                }
+            };
+            log.info("文件下载开始: workspace={}, {}", workspaceId, path);
+            return new RemoteFile(fileName, attr.getSize(), wrapped);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("打开远程文件失败: " + e.getMessage(), e);
+        } finally {
+            if (!success) {
+                try {
+                    sftp.close();
+                } catch (Exception ignored) {
+                    // 关闭失败无需处理
+                }
+            }
+        }
+    }
+
+    /** 远程下载文件句柄：fileName 供 Content-Disposition，size 供 Content-Length（-1 = 未知） */
+    public record RemoteFile(String fileName, long size, InputStream content) {
+    }
+
+    // ==================== 文件管理（SFTP：列目录/新建/重命名） ====================
+
+    /**
+     * 列远程目录（SFTP readDir，单次往返——不逐个 stat）。
+     * <p>
+     * 过滤 {@code .}/{@code ..}；排序：目录优先，同类按名称不区分大小写。
+     * {@code /proc}、{@code /sys} 等虚拟文件系统个别条目属性异常时不单独容错
+     * （readDir 返回的属性即服务端给的，拿不到 size 按 0 处理），整目录读失败才抛错。
+     *
+     * @param path 远程目录绝对路径；null/空 = 用户家目录（"."）
+     */
+    public List<RemoteEntry> listDir(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            throw new IOException("尚未连接远程服务器或连接已断开");
+        }
+        String dir = (path == null || path.isBlank()) ? "." : path.trim();
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            List<RemoteEntry> out = new ArrayList<>();
+            for (SftpClient.DirEntry e : sftp.readDir(dir)) {
+                String name = e.getFilename();
+                if (".".equals(name) || "..".equals(name)) {
+                    continue;
+                }
+                SftpClient.Attributes a = e.getAttributes();
+                String full = "/".equals(dir) ? "/" + name : dir + "/" + name;
+                long modified = a.getModifyTime() != null ? a.getModifyTime().toMillis() : 0L;
+                out.add(new RemoteEntry(name, full, a.isDirectory(), a.getSize(), modified));
+            }
+            out.sort(Comparator.comparing(RemoteEntry::directory).reversed()
+                    .thenComparing(RemoteEntry::name, String.CASE_INSENSITIVE_ORDER));
+            return out;
+        }
+    }
+
+    /** 新建远程目录（SFTP mkdir）；父目录须已存在，目标已存在则报错。 */
+    public void makeDirectory(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String target = requirePath(path);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (exists(sftp, target)) {
+                throw new IOException("路径已存在: " + target);
+            }
+            sftp.mkdir(target);
+            log.info("远程目录已创建: workspace={}, {}", workspaceId, target);
+        }
+    }
+
+    /** 新建空文件（SFTP write 空流）；目标已存在则报错，防止误截断已有文件。 */
+    public void createFile(String workspaceId, long connId, String path) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String target = requirePath(path);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (exists(sftp, target)) {
+                throw new IOException("路径已存在: " + target);
+            }
+            try (OutputStream os = sftp.write(target)) {
+                os.write(new byte[0]);
+            }
+            log.info("远程文件已创建: workspace={}, {}", workspaceId, target);
+        }
+    }
+
+    /** 重命名/移动（SFTP rename）；源不存在或目标已存在则报错。 */
+    public void rename(String workspaceId, long connId, String from, String to) throws IOException {
+        SshHolder holder = requireHolder(workspaceId, connId);
+        String source = requirePath(from);
+        String target = requirePath(to);
+        try (SftpClient sftp = SftpClientFactory.instance().createSftpClient(holder.session)) {
+            if (!exists(sftp, source)) {
+                throw new IOException("源路径不存在: " + source);
+            }
+            if (exists(sftp, target)) {
+                throw new IOException("目标路径已存在: " + target);
+            }
+            sftp.rename(source, target);
+            log.info("远程路径已重命名: workspace={}, {} -> {}", workspaceId, source, target);
+        }
+    }
+
+    private SshHolder requireHolder(String workspaceId, long connId) throws IOException {
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen()) {
+            throw new IOException("尚未连接远程服务器或连接已断开");
+        }
+        return holder;
+    }
+
+    private static String requirePath(String path) throws IOException {
+        if (path == null || path.isBlank()) {
+            throw new IOException("远程路径为空");
+        }
+        return path.trim();
+    }
+
+    private static boolean exists(SftpClient sftp, String path) {
+        try {
+            sftp.stat(path);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 远程目录条目（{@link #listDir} 返回单元） */
+    public record RemoteEntry(String name, String path, boolean directory, long size, long modified) {
+    }
+
+    // ==================== 内部结构 ====================
+
+    /** 工作区 primary 连接（最近建立的）；无活跃连接返回 null，exec 侧据此报错 */
+    private SshHolder primaryHolder(String workspaceId) {
+        Long connId = primaryConn.get(workspaceId);
+        if (connId == null) {
+            return null;
+        }
+        SshHolder holder = active.get(wsKey(workspaceId, connId));
+        if (holder == null || !holder.session.isOpen() || !holder.session.isAuthenticated()) {
+            return null;
+        }
+        return holder;
+    }
+
+    private void closeQuietly(ShellEntry entry) {
+        try {
+            entry.stdin.close();
+        } catch (Exception ignored) {
+            // 关闭失败无需处理
+        }
+        try {
+            entry.channel.close(false);
+        } catch (Exception ignored) {
+            // 关闭失败无需处理
+        }
+    }
+
+    private static final class SshHolder {
+        final SshClient client;
+        final ClientSession session;
+        final long connId;
+        final String connName;
+        final String host;
+        final String username;
+        final Instant connectedAt;
+
+        SshHolder(SshClient client, ClientSession session, long connId, String connName,
+                  String host, String username, Instant connectedAt) {
+            this.client = client;
+            this.session = session;
+            this.connId = connId;
+            this.connName = connName;
+            this.host = host;
+            this.username = username;
+            this.connectedAt = connectedAt;
+        }
+    }
+
+    private static final class ShellEntry {
+        final String workspaceId;
+        final long connId;
+        final ChannelShell channel;
+        final PipedOutputStream stdin;
+
+        ShellEntry(String workspaceId, long connId, ChannelShell channel, PipedOutputStream stdin) {
+            this.workspaceId = workspaceId;
+            this.connId = connId;
+            this.channel = channel;
+            this.stdin = stdin;
+        }
+    }
+
+    /** 把 sshd 推来的字节块原样转发给消费方（不做字符解码，避免多字节字符被包边界劈开） */
+    private static final class ForwardingOutputStream extends OutputStream {
+        private final Consumer<byte[]> consumer;
+
+        ForwardingOutputStream(Consumer<byte[]> consumer) {
+            this.consumer = consumer;
+        }
+
+        @Override
+        public void write(int b) {
+            consumer.accept(new byte[]{(byte) b});
+        }
+
+        @Override
+        public void write(byte[] b, int off, int len) {
+            byte[] chunk = new byte[len];
+            System.arraycopy(b, off, chunk, 0, len);
+            consumer.accept(chunk);
+        }
+    }
+
+    /** 一次性命令执行结果 */
+    public record ExecResult(int exitCode, String stdout, String stderr, boolean timedOut) {
+    }
+
+    /** 连接绑定的运维服务器信息（来自 hub 下发快照；osType 旧 hub 未下发时为 null） */
+    public record OpsServerInfo(String serverKey, String name, String host, String username, String osType) {
+    }
+
+    // ==================== 终端输出缓冲（AI snapshot/tail） ====================
+
+    /**
+     * 取指定连接终端的当前屏幕快照（最近约 256KB 输出，已剥 ANSI）。
+     *
+     * @return 快照文本；连接无缓冲（未开过终端/已断开）返回 null
+     */
+    public String terminalSnapshot(String workspaceId, long connId) {
+        TerminalScrollBuffer buf = scrollBuffers.get(wsKey(workspaceId, connId));
+        return buf == null ? null : buf.snapshot();
+    }
+
+    /**
+     * 取指定连接终端最近 N 行输出（已剥 ANSI）。
+     *
+     * @return 文本；连接无缓冲返回 null
+     */
+    public String terminalTail(String workspaceId, long connId, int maxLines) {
+        TerminalScrollBuffer buf = scrollBuffers.get(wsKey(workspaceId, connId));
+        return buf == null ? null : buf.tail(maxLines);
+    }
+}

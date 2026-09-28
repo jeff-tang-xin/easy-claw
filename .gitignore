@@ -20,7 +20,9 @@ package-lock.json
 /CLAUDE.md
 .claude
 .oxroot
-AGENTS.md
+/AGENTS.md
+# 例外：平台内置工作规范模板必须随 jar 入库（/AGENTS.md 只忽略工作区根的运行时副本）
+!web/api/src/main/resources/seed/AGENTS.md
 .vscode
 .reasonix
 build.bat
@@ -31,6 +33,9 @@ run-compile.ps1
 .agents
 .easyClaw/
 /local
+
+# 会话级 git worktree（会话↔worktree 挂钩，2026-09-14）
+.easyclaw-worktrees/
 
 # 构建与调试临时产物（Maven 输出重定向、过滤脚本）
 /b[0-9]*.log
@@ -53,3 +58,10 @@ run-compile.ps1
 # 正常情况下已由 WorkspaceAgentBuilder 显式注入 .easyClaw/agent/transcripts，此处仅防污染 git。
 /default/
 /default_old_backup/
+*.txt
+*.log
+
+# 本地接口抓包/调试临时文件（含真实 Bearer 等敏感信息，严禁入库）
+/img-test.bat
+/img-req.json
+/img-resp.json

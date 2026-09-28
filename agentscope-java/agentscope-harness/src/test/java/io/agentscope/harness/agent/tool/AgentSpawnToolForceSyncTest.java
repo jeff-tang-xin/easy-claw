@@ -117,13 +117,13 @@ class AgentSpawnToolForceSyncTest {
                         .put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, 0)
                         .build();
         assertTrue(AgentSpawnTool.resolveEffectiveTimeoutMs(5, forceBadOverride) == 30_000L);
-        // Clamp at 600s.
+        // Clamp at 1800s.
         RuntimeContext forceHuge =
                 RuntimeContext.builder()
                         .put(AgentSpawnTool.CTX_FORCE_SYNC, true)
                         .put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, 9999)
                         .build();
-        assertTrue(AgentSpawnTool.resolveEffectiveTimeoutMs(5, forceHuge) == 600_000L);
+        assertTrue(AgentSpawnTool.resolveEffectiveTimeoutMs(5, forceHuge) == 1_800_000L);
     }
 
     @Test

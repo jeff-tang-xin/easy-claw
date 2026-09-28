@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-mode-ops</artifactId>
+    <name>Easy Claw - Mode: Ops</name>
+    <description>
+        运维调度模式。工作区形态为「运维」：SSH 连接远程服务器，终端直操作 + 智能体辅助。
+        计划为单阶段单步（与 single 同构，仅 modeId 不同）。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-base</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</project>

@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.xinl</groupId>
+        <artifactId>easy-claw-parent</artifactId>
+        <version>1.0.0-SNAPSHOT</version>
+        <relativePath>../../../pom.xml</relativePath>
+    </parent>
+
+    <artifactId>easy-claw-mode-schedule</artifactId>
+    <name>Easy Claw - Mode: Schedule</name>
+    <description>
+        定时 workflow 调度模式。
+        执行结构与 team 完全一致，差别只在触发方式：team 由用户会话触发，schedule 由 cron 触发。
+    </description>
+
+    <dependencies>
+        <dependency>
+            <groupId>com.xinl</groupId>
+            <artifactId>easy-claw-base</artifactId>
+            <version>1.0.0-SNAPSHOT</version>
+        </dependency>
+    </dependencies>
+</project>

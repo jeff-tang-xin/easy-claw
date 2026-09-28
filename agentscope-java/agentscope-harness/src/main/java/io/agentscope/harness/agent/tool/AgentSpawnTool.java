@@ -107,7 +107,7 @@ public class AgentSpawnTool {
     private static final Logger log = LoggerFactory.getLogger(AgentSpawnTool.class);
 
     private static final int DEFAULT_TIMEOUT_SECONDS = 30;
-    private static final int MAX_TIMEOUT_SECONDS = 600;
+    private static final int MAX_TIMEOUT_SECONDS = 1800;
     private static final int MAX_SPAWN_DEPTH = 3;
 
     /**

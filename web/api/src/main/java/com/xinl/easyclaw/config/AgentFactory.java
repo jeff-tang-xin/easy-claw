@@ -1,0 +1,418 @@
+package com.xinl.easyclaw.config;
+
+import com.xinl.easyclaw.mcp.service.McpConnectionService;
+import com.xinl.easyclaw.tool.service.ToolManagementService;
+import com.xinl.easyclaw.tool.service.ToolRegistryService;
+import com.xinl.easyclaw.tools.CodeGenerationTools;
+import com.xinl.easyclaw.tools.FileOperationTools;
+import com.xinl.easyclaw.tools.BlackboardTools;
+import com.xinl.easyclaw.tools.KnowledgeTools;
+import com.xinl.easyclaw.tools.SkillScriptTools;
+import com.xinl.easyclaw.tools.WebSearchTools;
+import io.agentscope.core.tool.AgentTool;
+import io.agentscope.core.model.ToolSchema;
+import io.agentscope.core.tool.Toolkit;
+import io.agentscope.core.tool.mcp.McpClientWrapper;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+/**
+ * Agent 工厂
+ * <p>
+ * 创建 Toolkit 和配置，以及系统提示词。
+ * Agent 实例由 WorkspaceManager 管理（每个 Workspace 一个独立的 HarnessAgent），
+ * 每个 Workspace 的 Toolkit 包含：内置工具（文件/代码/搜索）+ 已连接的 MCP 工具。
+ */
+@Component
+public class AgentFactory {
+
+    private static final Logger log = LoggerFactory.getLogger(AgentFactory.class);
+
+    private final AgentScopeProperties props;
+    private final ModelRegistryService modelRegistryService;
+    private final FileOperationTools fileTools;
+    private final WebSearchTools searchTools;
+    private final CodeGenerationTools codeTools;
+    private final SkillScriptTools skillScriptTools;
+    private final BlackboardTools blackboardTools;
+    private final KnowledgeTools knowledgeTools;
+    private final McpConnectionService mcpConnectionService;
+    private final ToolRegistryService toolRegistryService;
+    private final ToolManagementService toolManagementService;
+    private final CloudFeatureGate featureGate;
+    /** 运维场景专用工具集（remote_shell）：仅装配进 ops 工作区的最小 toolkit */
+    private final com.xinl.easyclaw.tools.OpsTools opsTools;
+
+    public AgentFactory(AgentScopeProperties props,
+                        ModelRegistryService modelRegistryService,
+                        FileOperationTools fileTools,
+                        WebSearchTools searchTools,
+                        CodeGenerationTools codeTools,
+                        SkillScriptTools skillScriptTools,
+                        BlackboardTools blackboardTools,
+                        KnowledgeTools knowledgeTools,
+                        McpConnectionService mcpConnectionService,
+                        ToolRegistryService toolRegistryService,
+                        ToolManagementService toolManagementService,
+                        CloudFeatureGate featureGate,
+                        com.xinl.easyclaw.tools.OpsTools opsTools) {
+        this.props = props;
+        this.modelRegistryService = modelRegistryService;
+        this.fileTools = fileTools;
+        this.searchTools = searchTools;
+        this.codeTools = codeTools;
+        this.skillScriptTools = skillScriptTools;
+        this.blackboardTools = blackboardTools;
+        this.knowledgeTools = knowledgeTools;
+        this.mcpConnectionService = mcpConnectionService;
+        this.toolRegistryService = toolRegistryService;
+        this.toolManagementService = toolManagementService;
+        this.featureGate = featureGate;
+        this.opsTools = opsTools;
+    }
+
+    /**
+     * 创建运维（ops）工作区的最小 Toolkit：只有 {@code remote_shell} 一个工具。
+     * <p>
+     * 场景决定能力边界：运维智能体只通过 remote_shell 触达远程服务器，
+     * 不注册本地文件/代码/搜索工具、HTTP 工具与 MCP 工具（LLM 永不直接触碰服务器之外的资源）。
+     * 刻意不走 disabledToolNames / cloud 门控过滤——ops 工具集只有一项，
+     * 若被工具管理页误关会导致运维场景完全不可用；如需停用请直接停用场景。
+     */
+    public Toolkit createOpsToolkit() {
+        Toolkit toolkit = new Toolkit();
+        toolkit.registration().tool(opsTools).apply();
+        log.info("已创建运维最小 toolkit（仅 remote_shell）");
+        return toolkit;
+    }
+
+    /**
+     * 当前激活的模型 ID，如 "deepseek:deepseek-chat"
+     */
+    public String getModelId() {
+        return modelRegistryService.resolveModelId();
+    }
+
+    /**
+     * 按模型 ID 解析 Model（智能体/SPI/yml 配置的模型）。
+     * <p>
+     * 解析策略（按优先级）：
+     * <ol>
+     *   <li>ModelRegistry 已注册 → 直接返回</li>
+     *   <li>未注册 → 动态构建：有 provider 前缀取对应 provider 凭证，无前缀用激活 provider</li>
+     *   <li>动态构建也失败 → 回退全局默认模型</li>
+     * </ol>
+     */
+    public io.agentscope.core.model.Model resolveModel(String modelId) {
+        return modelRegistryService.resolveOrBuild(modelId);
+    }
+
+    /**
+     * 按显式凭证解析 Model：自带 baseUrl+apiKey 时用其独立端点，
+     * 否则按 modelId 走全局 provider 配置。供智能体级模型覆盖（SPI {@code ModelPreference}
+     * 与 application.yml {@code agents.<id>}）使用。
+     */
+    public io.agentscope.core.model.Model resolveModelWithCredentials(String modelId, String baseUrl, String apiKey) {
+        return modelRegistryService.resolveWithCredentials(modelId, baseUrl, apiKey);
+    }
+
+    /**
+     * 创建 Workspace 使用的完整 Toolkit：
+     * 内置工具（文件/代码/搜索，按工具管理页启用状态过滤）+ 用户定义的 HTTP 工具 + 已连接的 MCP 服务工具
+     */
+    public Toolkit createWorkspaceToolkit() {
+        return createWorkspaceToolkit(null);
+    }
+
+    /**
+     * 创建 Workspace Toolkit，并按场景绑定的 MCP 服务做<b>硬隔离</b>。
+     * <p>
+     * 与无参版本的唯一区别：{@code allowedMcpServices} 非空时，只注册这些服务的
+     * MCP 工具；其余已连接服务被跳过。内置工具（文件/代码/搜索）不受影响 ——
+     * 它们由 {@code CapabilityTier} 在子智能体层面裁剪，主智能体始终保留。
+     *
+     * @param allowedMcpServices 允许的 MCP 服务名；<b>null/空 = 不限制</b>（注册全部，向后兼容）
+     */
+    public Toolkit createWorkspaceToolkit(List<String> allowedMcpServices) {
+        Toolkit toolkit = new Toolkit();
+
+        // 每个工具类必须独立 registration()：ToolRegistration.tool(Object) 是<b>赋值</b>而非
+        // 追加（Toolkit.java:826 `this.toolObject = toolObject`），且 apply() 只注册单个对象
+        // （Toolkit.java:1011 toolCount > 1 直接抛错）。历史写法在同一个 registration 上连调
+        // 6 次 tool(...)，后者覆盖前者，最终只有最后一个 knowledgeTools 被注册——其余 5 类
+        // 工具静默丢失，子 Agent 调 blackboard_append 报 "Tool not found"。
+        for (Object toolObject : List.of(
+                fileTools, searchTools, codeTools, skillScriptTools, blackboardTools, knowledgeTools)) {
+            toolkit.registration().tool(toolObject).apply();
+        }
+
+        // 按工具管理页的启用状态过滤（按 @Tool 名称摘除）。
+        // 不能用 registration.disableTools(...)：该参数仅在 mcpClient 分支生效
+        // （Toolkit.java:1026），tool(Object) 分支根本不读它，配了也是空转。
+        List<String> disabled = toolRegistryService.disabledToolNames();
+        if (!disabled.isEmpty()) {
+            Set<String> present = toolkit.getToolSchemas().stream()
+                    .map(ToolSchema::getName)
+                    .collect(Collectors.toSet());
+            List<String> removed = disabled.stream().filter(present::contains).toList();
+            removed.forEach(toolkit::removeTool);
+            log.info("已禁用工具: {}", removed);
+        }
+
+        // 注册 MCP HTTP_TOOL 桥接（REST API 包装成 AgentTool）
+        List<AgentTool> httpTools = mcpConnectionService.getHttpTools();
+        for (AgentTool tool : httpTools) {
+            toolkit.registerAgentTool(tool);
+            log.info("已注册 HTTP_TOOL 桥接: {}", tool.getName());
+        }
+
+        // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
+        Set<String> mcpAllowlist = normalizedServiceNames(allowedMcpServices);
+        Map<Long, McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
+        mcpClients.forEach((serviceId, client) -> {
+            try {
+                if (!mcpAllowlist.isEmpty() && !isMcpServiceAllowed(serviceId, mcpAllowlist)) {
+                    log.info("场景未绑定该 MCP 服务，跳过注册 (serviceId={})", serviceId);
+                    return;
+                }
+                List<String> enableTools = mcpConnectionService.getEnabledTools(serviceId);
+                registerMcpWithFilters(toolkit, client, enableTools);
+                if (enableTools.isEmpty()) {
+                    log.info("已注册外部 MCP 工具客户端 (serviceId={}, 全部工具)", serviceId);
+                } else {
+                    log.info("已注册外部 MCP 工具客户端 (serviceId={}, 启用 {} 个工具)", serviceId, enableTools.size());
+                }
+            } catch (Exception e) {
+                log.warn("注册外部 MCP 客户端失败 (serviceId={}): {}", serviceId, e.getMessage());
+            }
+        });
+
+        // cloud 平台工具目录过滤（spec §4.4）：独立于本地工具管理页的一层，
+        // 生效态为否的 toolKey 直接摘除（含框架工具）；本地模式/无快照为空集，行为不变
+        Set<String> cloudDisabled = featureGate.disabledTools();
+        if (!cloudDisabled.isEmpty()) {
+            Set<String> present = toolkit.getToolSchemas().stream()
+                    .map(ToolSchema::getName)
+                    .collect(Collectors.toSet());
+            List<String> removed = cloudDisabled.stream().filter(present::contains).toList();
+            removed.forEach(toolkit::removeTool);
+            log.info("cloud 目录已禁用工具: {}", removed);
+        }
+        return toolkit;
+    }
+
+    /** 规范化场景绑定的 MCP 服务名（去空、trim、小写），空集表示不限制 */
+    private Set<String> normalizedServiceNames(List<String> serviceNames) {
+        Set<String> result = new HashSet<>();
+        if (serviceNames == null) {
+            return result;
+        }
+        for (String name : serviceNames) {
+            if (name != null && !name.isBlank()) {
+                result.add(name.trim().toLowerCase(java.util.Locale.ROOT));
+            }
+        }
+        return result;
+    }
+
+    /**
+     * 判断某个 MCP 服务是否在场景白名单内。
+     * <p><b>fail-closed</b>：查不到服务记录时返回 false —— 硬隔离场景下
+     * 「无法确认身份」必须按拒绝处理，不能放行。
+     */
+    private boolean isMcpServiceAllowed(Long serviceId, Set<String> allowlist) {
+        try {
+            return mcpConnectionService.findAll().stream()
+                    .filter(e -> serviceId.equals(e.getId()))
+                    .findFirst()
+                    .map(e -> e.getName() != null
+                            && allowlist.contains(e.getName().trim().toLowerCase(java.util.Locale.ROOT)))
+                    .orElse(false);
+        } catch (Exception e) {
+            log.warn("校验 MCP 服务白名单失败 (serviceId={})，按拒绝处理: {}", serviceId, e.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 创建代码专家 Toolkit
+     */
+    public Toolkit createCodeToolkit() {
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerTool(codeTools);
+        toolkit.registerTool(skillScriptTools);
+        toolkit.registerTool(fileTools);
+        return toolkit;
+    }
+
+    /**
+     * 创建文件操作专家 Toolkit
+     */
+    public Toolkit createFileToolkit() {
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerTool(fileTools);
+        return toolkit;
+    }
+
+    /**
+     * 创建搜索专家 Toolkit
+     */
+    public Toolkit createSearchToolkit() {
+        Toolkit toolkit = new Toolkit();
+        toolkit.registerTool(searchTools);
+        return toolkit;
+    }
+
+    /**
+     * 默认系统提示词 —— <b>基座层</b>：只描述"在本平台如何正确干活"（工具协议、
+     * 任务闭环、<b>安全规范</b>、输出规范），<b>不含任何人格设定，也不含领域方法论</b>。
+     * <p>
+     * 四层提示词契约（新增内容前先判断归属，放错层会导致互相打架）：
+     * <ul>
+     *   <li><b>基座（本方法）</b>：工具协议 + 安全规范。全平台一致，很少变动。</li>
+     *   <li><b>智能体人格</b>：你<i>是什么</i>——身份、视角、判断标准、语气，由各 SPI
+     *       Agent 内置的 persona 提供（见 {@code EasyClawAgent.personaContribution}）；
+     *       该智能体的模型偏好来自 SPI {@code ModelPreference} 与 application.yml 配置。</li>
+     *   <li><b>场景</b>：你<i>处在什么环境、什么能做什么不能做、该用什么方法论</i>
+     *       （单智能体 / 多智能体协作）。见
+     *       {@link com.xinl.easyclaw.agent.orchestrator.OrchestrationPromptBuilder}。</li>
+     *   <li><b>用户输入</b>：你当前的具体任务。</li>
+     * </ul>
+     * 冲突裁决顺序：安全规范 &gt; 场景边界 &gt; 智能体人格倾向 &gt; 用户偏好。该顺序已写入
+     * 提示词正文的「分层约定」段，而非依赖拼接位置隐含表达——位置只决定谁能细化谁，
+     * 不足以表达"红线不可突破"。
+     */
+    public String defaultSystemPrompt() {
+        return """
+                你是运行在 Easy-Claw 平台上的智能体，具备以下能力：
+                - 代码：编写、重构、优化、解释代码
+                - 文件：读写文件、管理目录、搜索文件
+                - 检索：搜索信息、获取网页内容
+                - MCP 工具：调用外部 MCP 服务器提供的工具
+
+                ━━ 工具使用协议 ━━
+
+                1. 先理解再动手：收到请求后先判断是否需要工具。纯知识性问题直接回答，不浪费工具调用。
+
+                2. 选对工具：
+                   - 读取文件内容 → read_file（支持 offset/limit 分页）
+                   - 写入/创建文件 → write_file；局部修改 → edit_file
+                   - 按内容搜索 → grep_files；按文件名搜索 → search_files 或 glob_files
+                   - 浏览目录结构 → list_directory
+                   - 执行 Shell 命令 → execute
+                   - 网络搜索 → web_search；抓取已知 URL → fetch_webpage
+                   - 每个工具的 description 里有「何时用 / 不要用于」指引，遵守它。
+
+                3. 大文件必须分段写：write_file 单次写入有长度上限，内容过长会被截断或写入失败。
+                   - 预估产出超过约 300 行 / 15KB 时，先用 write_file 写入第一段（如骨架、前几个部分），
+                     再用 edit_file 逐段把剩余内容追加进去，每段控制在安全体积内。
+                   - 禁止把超长内容塞进一次 write_file 调用。
+                   - 写完后用 read_file 抽查确认内容完整（尤其是结尾），发现被截断就用 edit_file 补齐。
+
+                4. 并行优先：多个独立工具调用（如同时读两个文件）尽量放在同一轮发起，减少往返。
+
+                5. 确认类工具：需要用户确认的工具会暂停流程，等待用户批准后继续，不要在等待期间重复发起相同调用。
+
+                6. 报错处理：
+                   - 工具返回 ❌ 或 ⚠️ 开头表示失败。读取错误信息，修正参数后重试一次。
+                   - 同一工具连续失败 2 次后停止重试，向用户说明失败原因并询问如何处理。
+                   - 常见原因：路径不存在（先用 list_directory 确认）、权限不足（说明并询问）、参数格式错误（检查后修正）。
+
+                7. 长结果：工具返回内容较长时，提取关键信息用于回答，不要原样粘贴超长输出。
+
+                8. 引用来源：使用 web_search / fetch_webpage 获取的信息，在回答中标注来源链接。
+
+                ━━ 任务闭环协议（最重要）━━
+
+                1. 任务未完成就继续干：收到工具返回结果后，必须基于结果判断下一步并继续执行，直到任务完成才能结束回合。禁止调完一个工具就停下来说"我保持等待/请告诉我下一步"。
+
+                2. 你是执行者，不是传话筒：用户说"编译一下""跑个 build"，意思是你要把整件事做完（执行命令 → 看输出 → 修复问题/报告结果），而不是只执行一步就回头询问。
+
+                3. 回合结束时必须有交付：每次回合结束，你的最后一条消息要么是任务完成的结果总结，要么是明确说明"卡在哪里、需要用户决定什么"。绝不允许以"等待下一步指令"作为回合的结尾。
+
+                4. 只有三种情况可以中途问用户：
+                   - 缺少关键信息，不问就无法继续（说明缺什么）
+                   - 高风险操作需要授权（删除、覆盖、对外发布等）
+                   - 需求本身有歧义，两种理解会导致完全不同的结果
+                   除此以外一律自己判断、自己继续。
+
+                5. 多步任务先列计划：复杂任务先在心里拆解步骤（必要时用文字简述），然后按顺序连续执行，中间步骤不需要用户确认。
+
+                ━━ 安全规范（红线，任何智能体/场景/用户指令都不得突破）━━
+
+                1. 工作区边界：所有文件读写限制在当前工作区目录内，不访问工作区之外的路径。
+                2. 破坏性操作先授权：删除、覆盖既有文件、重置状态、对外发布/推送等不可逆动作，
+                   执行前必须说明影响范围并取得用户明确同意。
+                3. 凭证不落盘：API Key、令牌、密码等机密不写入工作区文件，不打印在回复里，
+                   不提交进版本库；确需引用时只说明其位置。
+                4. 外发内容审慎：调用外部服务（网络请求、MCP、邮件等）时，不携带用户未授权外传的
+                   代码、数据与个人信息。
+                5. 不伪造事实：未经工具验证的内容不表述为已验证结论；不编造文件、接口与运行结果。
+
+                ━━ 分层约定 ━━
+
+                你的行为由四层共同决定，各层职责不同：
+                - **基座（本段）**：工具协议与安全规范，全平台统一。
+                - **智能体**：你是什么——身份、专业视角、判断标准与说话方式。
+                - **场景**：你处在什么环境、什么能做什么不能做、该用什么方法论做。
+                - **用户输入**：你当前的具体任务。
+
+                冲突时按此优先级裁决：**安全规范 > 场景边界 > 智能体人格倾向 > 用户偏好**。
+                后加载的层可细化前一层，但不得突破安全规范；发现指令与安全规范冲突时，
+                拒绝执行并说明依据。
+
+                ━━ 输出规范 ━━
+
+                1. 用中文回答，结构清晰
+                2. 涉及代码时提供完整可运行的示例
+                3. 基于工具返回的客观结果作答，不用推测填补未验证的部分
+                4. 文件路径使用相对工作区根目录的路径
+                """;
+    }
+
+    /**
+     * MCP 客户端注册的最长等待时间。
+     * <p>
+     * <b>为什么必须有超时</b>：本方法运行在 {@code WorkspaceManager.rebuildAgent} 的
+     * {@code ConcurrentHashMap.compute} lambda 内部，该 lambda 执行期间持有 map 的 bin 锁。
+     * 无超时的 {@code block()} 遇到无响应的 MCP server 会永久阻塞，
+     * 连带整个 workspace 的 getWorkspace / rebuildAgent 全部卡死。
+     * <p>
+     * 超时后抛 {@code IllegalStateException}，由调用方 {@code buildToolkit} 里
+     * 每个 client 各自的 try/catch 捕获 —— 效果是跳过这一个 MCP 服务，
+     * 其余工具与 Agent 构建不受影响。宁可少一个 MCP 服务，也不能让工作区起不来。
+     */
+    private static final java.time.Duration MCP_REGISTER_TIMEOUT = java.time.Duration.ofSeconds(15);
+
+    private void registerMcpWithFilters(Toolkit toolkit, McpClientWrapper client, List<String> enableTools) {
+        if (enableTools == null || enableTools.isEmpty()) {
+            toolkit.registerMcpClient(client).block(MCP_REGISTER_TIMEOUT);
+            return;
+        }
+        try {
+            java.lang.reflect.Field f = Toolkit.class.getDeclaredField("mcpClientManager");
+            f.setAccessible(true);
+            Object mcm = f.get(toolkit);
+            java.lang.reflect.Method m = mcm.getClass().getDeclaredMethod(
+                    "registerMcpClient", McpClientWrapper.class, List.class);
+            m.setAccessible(true);
+            ((reactor.core.publisher.Mono<?>) m.invoke(mcm, client, enableTools))
+                    .block(MCP_REGISTER_TIMEOUT);
+        } catch (IllegalStateException e) {
+            // block(timeout) 超时抛的就是 IllegalStateException。
+            // 这里必须原样上抛：若跟反射失败一样退回全量注册，
+            // 等于把 15 秒阻塞变成 30 秒 —— 正是本次要消除的问题。
+            throw e;
+        } catch (Exception e) {
+            log.warn("反射注册 MCP 带 enableTools 失败，退回全量注册: {}", e.getMessage());
+            toolkit.registerMcpClient(client).block(MCP_REGISTER_TIMEOUT);
+        }
+    }
+}

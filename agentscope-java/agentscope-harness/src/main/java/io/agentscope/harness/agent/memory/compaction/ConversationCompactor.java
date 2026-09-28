@@ -95,6 +95,24 @@ public class ConversationCompactor {
             CompactionConfig config,
             String agentId,
             String sessionId) {
+        return compactIfNeeded(rc, conversationMessages, config, agentId, sessionId, () -> {});
+    }
+
+    /**
+     * Same as {@link #compactIfNeeded(RuntimeContext, List, CompactionConfig, String, String)},
+     * additionally notifying {@code onCompactionStart} exactly once when compaction is actually
+     * about to run — i.e. after the threshold and cutoff checks have passed, but before memory
+     * flush, offload, and summarization begin. Never invoked when no compaction is needed.
+     *
+     * @param onCompactionStart callback invoked synchronously at compaction start; may be null
+     */
+    public Mono<Optional<List<Msg>>> compactIfNeeded(
+            RuntimeContext rc,
+            List<Msg> conversationMessages,
+            CompactionConfig config,
+            String agentId,
+            String sessionId,
+            Runnable onCompactionStart) {
 
         if (conversationMessages == null || conversationMessages.isEmpty()) {
             return Mono.just(Optional.empty());
@@ -116,6 +134,10 @@ public class ConversationCompactor {
         if (cutoff <= 0) {
             log.debug("Compaction triggered but safe cutoff is 0 — skipping");
             return Mono.just(Optional.empty());
+        }
+
+        if (onCompactionStart != null) {
+            onCompactionStart.run();
         }
 
         // Keep prior summaries in the summarization input so each compaction builds on the

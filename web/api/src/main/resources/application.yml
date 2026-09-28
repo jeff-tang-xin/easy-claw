@@ -1,0 +1,257 @@
+server:
+  port: 18080
+  error:
+    # ResponseStatusException 的 reason 返回给前端（默认 never 会吞成裸 Bad Request，无法诊断）
+    include-message: always
+  tomcat:
+    # 超限/出错时排干请求体再响应，否则 Tomcat 提前关连接，浏览器报 ERR_CONNECTION_ABORTED 且无错误信息
+    max-swallow-size: -1
+spring:
+  profiles:
+    active: dev-sqlite,local
+  application:
+    name: easy-claw
+  servlet:
+    multipart:
+      # 运维 SFTP 上传：包/日志/转储类文件普遍偏大；超限返回 413
+      max-file-size: 500MB
+      max-request-size: 500MB
+
+# ============================
+# 日志级别：AgentScope 内部噪音降为 WARN，业务日志保持 INFO
+# ============================
+logging:
+  level:
+    root: INFO
+    io.agentscope: INFO
+    com.xinl.easyclaw: INFO
+  charset:
+    console: UTF-8
+    file: UTF-8
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+
+# ============================
+# AgentScope 模型配置（公共骨架，所有模式共享）
+# ============================
+# 【配置分层】
+#   本文件          = 公共抽象：字段骨架 + 占位符 + 中立默认值 + 公共机制说明
+#   application-local.yml / application-cloud.yml = 两个模式的【供给模板】，
+#                     各自往同一组公共字段里填值（见各自文件头注释）
+#   运行层 ~/.easyClaw/application.yml = 用户真实值，覆盖优先；密钥只写这里或环境变量
+# 【模式切换】spring.profiles.active 中的 local ↔ cloud
+#   （启动参数 --spring.profiles.active=dev-sqlite,cloud，或改运行层 yml 同名键）
+# 【对 AgentScope 而言】local 与 cloud 都只是 provider（base-url + api-key + model-name
+#   三要素）的供给方，注册/解析/model-limits 走同一路径，模型 ID 形如 <provider>:<model>。
+agentscope:
+  model:
+    # 五个字段全部占位符化：值由模式文件（application-local.yml / application-cloud.yml）
+    # 顶层 model: 段供给；冒号后为中立默认值（= local 行为），无模式文件时兜底
+    provider: ${model.provider:zhipu}
+    temperature: ${model.temperature:0.3}
+    stream: ${model.stream:true}
+    # 单次响应最大输出 token：防止长 tool_call arguments（如 write_file 的大 content）
+    # 被服务端默认上限截断 → JSON 不合法 → 上游降级为 {} → 报「未找到 path/content 参数」
+    # 这里只是「全局兜底值」，取所有模型都能接受的保守值；
+    # 具体模型的真实上限在下方 model-limits 中按模型名覆盖（route 网关多模型必读）
+    max-tokens: ${model.max-tokens:16384}
+    # 并行 tool_call：开启后单轮可并发多个工具，吞吐更高。
+    # 代价是多路 arguments 的流式分片会交错到达，对上游累积器的分片归位要求更高；
+    # 若再次出现 JSON 不合法 / 参数串台，优先把这里改回 false 定位问题。
+    parallel-tool-calls:  ${model.parallel-tool-calls:true}
+  agent:
+    max-iters: 50
+    # 单次模型调用整体时限（含流式全程）× maxAttempts=2 = 挂起最长真空期。
+    # 原值 10min：记忆提取/长上下文调用一旦挂起，会话最长 20min 无任何反馈。
+    # 降为 3min 后真空期 ~6min 封顶。注意：本值是「整流完成时限」而非空闲超时——
+    # 极端长输出（逼近 max-tokens 16384）的合法生成可能触线，若观察到误杀可调回 5。
+    # 实况修正：Flux.timeout 语义是「相邻产出间隔」而非总时长——长对话上下文大时，
+    # 模型 prefill / 首 token 延迟（TTFT）常 >3min，导致刚发消息就被「Model request
+    # timeout after PT3M」误杀（用户实测）。故回抬到 10min 容忍大上下文 TTFT。
+    # 且超时触发时底层阻塞读线程已被 OkHttpTransport 的 onCancel 立刻释放（不再泄漏
+    # boundedElastic 线程 / 挂死连接，见 OkHttpTransport.stream），误杀/挂死后 6min 内
+    # 必然错误返回给前端，不会卡死整个 workspace。
+    model-timeout-minutes: ${AGENTSCOPE_MODEL_TIMEOUT_MINUTES:10}
+    # 下界受两个硬约束钳制，调低前务必确认：
+    #  1) agent_spawn 同步等待上限 600s（AgentSpawnTool.MAX_TIMEOUT_SECONDS），到点自行
+    #     「提升为后台任务」返回。本值必须 > 600s，否则外层工具超时先掐断 spawn，
+    #     多智能体编排的异步降级路径失效。原值 10min 与 600s 恰好相等 = 竞态，已修正。
+    #  2) 必须 > shell-timeout-seconds（当前 300s），否则 shell 自身超时永远不生效。
+    tool-timeout-minutes: 12
+    # 工具确认弹窗等待上限（分钟）：用户不响应则自动取消本轮，释放会话状态
+    confirm-timeout-minutes: ${AGENTSCOPE_CONFIRM_TIMEOUT_MINUTES:10}
+    # 单请求附件数量 / base64 总体积上限（防止超大附件直接打满堆）
+    max-attachments: 20
+    max-attachment-bytes: 33554432
+    # 循环护栏阈值（策略参数，原先硬编码在事件分发逻辑中）
+    max-same-subagent-calls: 3
+    # ============================
+    # 按智能体的模型覆盖（可选）
+    # ----------------------------
+    max-consecutive-tool-failures: 2
+    # Workspace Agent 缓存驱逐：每个 context 持有模型客户端/工具集/MCP 连接，需上限 + 空闲回收
+    max-cached-workspaces: ${AGENTSCOPE_MAX_CACHED_WORKSPACES:32}
+    workspace-idle-minutes: ${AGENTSCOPE_WORKSPACE_IDLE_MINUTES:120}
+    shell-timeout-seconds: 300
+    max-shell-output-bytes: 200000
+  # 为某个智能体单独指定模型：取消注释并填写对应字段。任一字段留空即向上回退：
+  #   agents.<id> 显式值 → agents.<id>.provider 指向的 providers.<provider> → 全局 model
+  # 可用智能体 id：main / coder / reviewer / planner / researcher / code-expert /
+  #   file-expert / general-purpose
+  # 注意：① 每个智能体要么整段注释、要么至少填一个字段，勿保留裸 key 行（如 "coder:" 后无字段）；
+  #       ② api-key 属于密钥，请勿写进本文件（本文件随源码进入版本库），
+  #         如需按智能体独立密钥，写到用户级配置 ~/.easyClaw/application.yml。
+  # ============================
+  # ⚠ 本段是【示例】，默认整段注释掉，不要裸留 key。
+  #   踩过的坑：曾经写成 `agents: coder: provider: openapi`（providers 表里并无此 key），
+  #   于是 providerCfg 解析为 null → 模型名静默回退到 Java 字段默认值 gpt-4o-mini
+  #   （AgentScopeProperties.Model.modelName）→ cloud 下等于绕过 hub_cloud 别名直发
+  #   真实模型名给 hub（被绑定面校验拒 404），local 下等于向当前 provider 发不存在的模型；
+  #   两种模式下该子 Agent 都不可用，且日志里看不出是配置笔误所致。
+  #   要按智能体指定模型：取消注释，并务必填 providers 表中真实存在的 key。
+  # agents:
+  #   coder:
+  #     provider: deepseek         # 必须是 providers 表中的 key
+  #     model-name:                # 覆盖模型名
+  #     base-url:                  # 覆盖 base-url（一般留空继承 provider）
+  #     api-key:                   # 覆盖 api-key（一般留空继承 provider；勿在此填真实密钥）
+  #     temperature:               # 覆盖采样温度
+  #     max-tokens:                # 覆盖单次最大输出 token
+  #     parallel-tool-calls:       # 覆盖是否允许并行 tool_call
+  # ---- providers 表：按模式拆分到 profile 文件（同一份公共结构，两个供给方）----
+  # local（默认）→ application-local.yml：本地多 provider 表 + 顶层 local:/model: 变量段
+  # cloud        → application-cloud.yml：hub 网关条目 + 顶层 cloud:/model: 变量段
+  # ============================
+  # 按模型名的输出上限覆盖表（公共机制：与供给方无关，local/cloud 共用）
+  # ----------------------------
+  # 场景：一个 base-url + api-key 后面挂着 kimi、豆包、deepseek、glm 等多个模型，
+  #       各家单次输出 token 上限差异极大：
+  #         - 统一取大值 → 上限低的模型服务端直接 400（max_tokens 超限）
+  #         - 统一取小值 → 大文件 write_file 的 arguments JSON 被截断 → 参数丢失
+  # 匹配优先级：provider:model 精确 > model 精确 > 前缀通配（xxx*，最长优先）> providers.*.max-tokens > model.max-tokens
+  # 说明：max-tokens-unsupported: true 表示该模型完全不接受 max_tokens 字段，届时不下发该参数。
+  #       max-completion-tokens-only: true 表示该模型只认新协议字段，改用 max_completion_tokens 下发。
+  #       注意 max_tokens 与 max_completion_tokens 互斥，代码保证只发其一；两者同时下发会被
+  #       严格校验的上游（如火山方舟）判为「cannot be set at the same time」直接 400。
+  #       本表只在 local 模式生效：cloud 模式由 application-cloud.yml 置
+  #       model-limits-enabled: false 整体关闭上限下发——真实模型由 hub 按 appkey 路由决定，
+  #       web 不感知真实模型，任何按模型名算出的上限都可能超其真实上限而触发 400。
+  # ============================
+  model-limits:
+    # —— DeepSeek ——（deepseek-chat 8K；reasoner 含思维链，上限更高）
+    deepseek-chat:
+      max-tokens: 8192
+    deepseek-reasoner:
+      max-tokens: 32768
+    deepseek-v3*:
+      max-tokens: 8192
+    # —— Kimi / Moonshot ——（8k 型号输出上限最小，必须单独压低）
+    moonshot-v1-8k:
+      max-tokens: 4096
+    moonshot-v1-32k:
+      max-tokens: 16384
+    moonshot-v1-128k:
+      max-tokens: 32768
+    kimi-k2*:
+      max-tokens: 32768
+    kimi-*:
+      max-tokens: 16384
+    # —— 智谱 GLM ——（glm-4-flash 输出上限 4095，最容易被踩）
+    glm-4-flash:
+      max-tokens: 4095
+    glm-4-plus:
+      max-tokens: 8192
+    glm-4.5*:
+      max-tokens: 32768
+    glm-*:
+      max-tokens: 8192
+    # —— 豆包 / 火山方舟 ——
+    doubao-*:
+      max-tokens: 16384
+    ark-code-latest:
+      max-tokens: 32768
+    # —— 通义千问 ——
+    qwen-plus:
+      max-tokens: 16384
+    qwen-max:
+      max-tokens: 8192
+    qwen*:
+      max-tokens: 8192
+
+
+# ============================
+# 界面品牌定制（侧边栏 logo / 浏览器标签页标题 / favicon）
+#   name     应用名：侧边栏标题 + 浏览器标签页后缀
+#   subtitle 侧边栏标题下方的小字
+#   icon     图标：支持 emoji（默认 🦞）或图片地址（站内 /xxx.png 或 http(s):// 外链），
+#            同时用作浏览器 favicon
+# 修改后重启后端生效；未配置时使用下列默认值
+# ============================
+easyclaw:
+  branding:
+    name: Easy-Claw
+    subtitle: AI 编程助手
+    icon: 🦞
+
+# ============================
+# 内置工具配置
+# ----------------------------
+# web_search 走 Google Custom Search（需自备凭据）：
+#   1. 在 Google Cloud 控制台启用 "Custom Search API" 并创建 API Key
+#   2. 在 https://programmablesearchengine.google.com/ 创建搜索引擎，取其「搜索引擎 ID」填入 cx
+# 留空则回退环境变量 GOOGLE_API_KEY / GOOGLE_SEARCH_CX；两者都缺则 web_search 返回未配置提示。
+# ============================
+tools:
+  web-search:
+    api-key: ${GOOGLE_API_KEY:}
+    cx: ${GOOGLE_SEARCH_CX:}
+
+# ============================
+# 记忆设置（上下文窗 / flush 沉淀策略 / 子 Agent flush）
+# ----------------------------
+# 不在本文件配置：走「系统管理 → 设置」页（GET/PUT /api/memory/settings），
+# 持久化于系统库 ai-assistant.db 的 memory_settings 表，按用户隔离。
+# 默认值：上下文窗 48000 tokens；flush 节流模式（最小间隔 30 分钟）；
+#         子 Agent flush 关闭（其产出经黑板协议归口主控记忆）。
+# 保存后自动重建全部 Workspace Agent，即时生效。
+# 历史说明：旧 ai.memory.*（命题记忆提取/打分召回）已随该体系整体移除，
+#           若旧版用户级 yml 中留有该段，删除即可（残留无害但不再生效）。
+# ============================
+
+# ============================
+# Workspace 安全配置
+# ============================
+ai:
+  workspace:
+    security:
+      forbidden-paths:
+        - .easyClaw
+        - .git
+        - .env
+        - .idea
+        - .vscode
+        # AgentScope harness 运行时数据目录（<workspace>/<userId>/agents），AI 工具不可访问
+        - default-user
+        - agents
+      max-file-size: 10485760
+
+# ============================
+# SQLite 系统元数据库（~/.easyClaw 目录，由启动类初始化）
+# 所有 Workspace 共用；Workspace 自身的状态/对话数据存放在其指定目录的 .easyClaw/agent/ 下
+# ============================
+
+---
+spring:
+  config:
+    activate:
+      on-profile: dev-sqlite
+  datasource:
+    url: jdbc:sqlite:${user.home}/.easyClaw/ai-assistant.db
+    driver-class-name: org.sqlite.JDBC
+  jpa:
+    database-platform: org.hibernate.community.dialect.SQLiteDialect
+    hibernate:
+      ddl-auto: update
+    show-sql: true
+
+

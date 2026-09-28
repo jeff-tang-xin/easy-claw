@@ -1,0 +1,67 @@
+# ============================
+# 本地模式（local profile）—— 模型配置值的【本地供给方】
+#
+# 公共模型配置（provider / base-url / api-key / model-name）对 local 与 cloud 只有一份
+# （application.yml 公共骨架，字段全部占位符化），区别只在值的供给方：
+#   local —— 由本文件供给：agentscope.providers 表（任意多个 OpenAI 兼容 provider）
+#            + 顶层 local: 段集中本模式的密钥输入变量（providers 条目以 ${local.*} 引用）
+#            + 顶层 model: 段供给主文件 ${model.*} 占位符（当前激活 provider 等）
+#   cloud —— 见 application-cloud.yml（顶层 cloud: 段 = hub-url + app-key 两个输入）
+#
+# 激活方式：application.yml 默认 spring.profiles.active: dev-sqlite,local（无需操作）。
+#
+# 模型 ID 形如 <provider>:<model-name>；model.provider 指定当前激活条目
+#（裸模型名经此 provider 解析）。
+# api-key 全部留空入库：真实密钥写运行层 ~/.easyClaw/application.yml 的顶层 local: 段
+# （同名键覆盖），或环境变量（由 local: 段默认值继承）；也可按旧习惯直接写运行层
+# agentscope.providers.<p>.api-key（同样覆盖生效）。密钥绝不写进本文件（随源码入库）。
+# 本模式无顶层 cloud: 段，完全不触网。
+# ============================
+agentscope:
+  # ---- 多 Provider 表：key 为 provider 名，模型 ID 形如 <provider>:<model> ----
+  providers:
+    zhipu:
+      api-key: ${local.zhipu-api-key:}
+      base-url: https://open.bigmodel.cn/api/paas/v4
+      model-name: glm-4.5-flash
+    deepseek:
+      api-key: ${local.deepseek-api-key:}
+      base-url:
+      model-name:
+    # 推理模型：支持 thinking（推理过程可视化），速度较慢
+    deepseek-reasoner:
+      api-key: ${local.deepseek-api-key:}
+      base-url: https://api.deepseek.com/v1
+      model-name: deepseek-reasoner
+    openai:
+      api-key: ${local.openai-api-key:}
+      base-url:
+      model-name: ark-code-latest
+    dashscope:
+      api-key: ${local.dashscope-api-key:}
+      base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+      model-name: qwen-plus
+    ollama:
+      api-key: ollama
+      base-url: http://localhost:11434/v1
+      model-name: qwen2.5:7b
+    moonshot:
+      api-key: ${local.moonshot-api-key:}
+      base-url: https://api.moonshot.cn/v1
+      model-name: moonshot-v1-8k
+
+# ---- 本模式的输入变量（密钥集中处）：运行层 yml 顶层 local: 段同名键覆盖 ----
+local:
+  zhipu-api-key: ${ZHIPU_API_KEY:}
+  deepseek-api-key: ${DEEPSEEK_API_KEY:}
+  openai-api-key: ${OPENAI_API_KEY:}
+  dashscope-api-key: ${DASHSCOPE_API_KEY:}
+  moonshot-api-key: ${MOONSHOT_API_KEY:}
+
+# ---- 供给主文件 agentscope.model 的 ${model.*} 占位符（当前激活的模型参数）----
+model:
+  provider: zhipu
+  temperature: 0.3
+  stream: true
+  max-tokens: 16384
+  parallel-tool-calls: true
