@@ -121,3 +121,37 @@ export interface CloudCredit {
 export function getCloudCredits(): Promise<CloudCredit[]> {
   return getJson<CloudCredit[]>('/api/manage/cloud/credits');
 }
+
+// ==================== 黑板（共享记录本，append-only） ====================
+
+/** 记录本（GET /api/blackboard/books 元素）：key + 条目数 + 最后修改时间；归档本带 archived/archivedAt */
+export interface BlackboardBook {
+  key: string;
+  entries: number;
+  lastModified: number;
+  archived: boolean;
+  archivedAt: number;
+}
+
+/**
+ * 记录本条目（GET /api/blackboard/entries 元素，按 seq 升序返回最近 N 条）。
+ * type: note / finding / risk / conclusion；author: main 或子 Agent sessionId 尾段。
+ */
+export interface BlackboardEntry {
+  seq: number;
+  ts: string;
+  author: string;
+  type: string;
+  content: string;
+}
+
+/** 列出工作区的记录本（含归档本，按修改时间倒序） */
+export function listBlackboardBooks(workspaceId: string): Promise<BlackboardBook[]> {
+  return getJson<BlackboardBook[]>(`/api/blackboard/books?workspaceId=${encodeURIComponent(workspaceId)}`);
+}
+
+/** 读取指定记录本的最近条目（limit 默认 30，最大 100） */
+export function listBlackboardEntries(workspaceId: string, key: string, limit = 30): Promise<BlackboardEntry[]> {
+  return getJson<BlackboardEntry[]>(
+    `/api/blackboard/entries?workspaceId=${encodeURIComponent(workspaceId)}&key=${encodeURIComponent(key)}&limit=${limit}`);
+}

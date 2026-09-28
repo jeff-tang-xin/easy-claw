@@ -7,8 +7,12 @@ import {
     getCloudCredits,
     getCloudProjects,
     getJson,
+    listBlackboardBooks,
+    listBlackboardEntries,
     postJson,
     putJson,
+    type BlackboardBook,
+    type BlackboardEntry,
     type CloudBinding,
     type CloudCredit,
     type CloudProject,
@@ -666,6 +670,30 @@ function fmtDuration(ms: number): string {
   return `${m}m${String(Math.floor(s % 60)).padStart(2, '0')}s`;
 }
 
+/** 积分面板：千分位（99952 → 99,952） */
+function fmtInt(n: number): string {
+  return n.toLocaleString('zh-CN');
+}
+
+/** 积分面板：大数压缩（5000000 → 500万，120000000 → 1.2亿），避免侧栏被长数字撑爆 */
+function fmtCompact(n: number): string {
+  const trim = (x: number) => {
+    const s = x.toFixed(1);
+    return s.endsWith('.0') ? s.slice(0, -2) : s;
+  };
+  if (n >= 1e8) return `${trim(n / 1e8)}亿`;
+  if (n >= 1e4) return `${trim(n / 1e4)}万`;
+  return n.toLocaleString('zh-CN');
+}
+
+/** 黑板时间显示：epoch ms 或 ISO-8601 → MM-dd HH:mm（无效值返回空串） */
+function fmtBbTime(v: number | string): string {
+  const d = new Date(v);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (x: number) => String(x).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /** 子 Agent 输出里的失败信号（后端 EXCEED_MAX_ITERS / 异常会带这些字样） */
 function subagentStateOf(seg: Segment): 'running' | 'error' | 'done' {
   if (seg.running) return 'running';
@@ -1034,7 +1062,7 @@ export default function ChatPage() {
   const [sessionId, setSessionId] = useState('');
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  const [tab, setTab] = useState<'sessions' | 'auth' | 'files' | 'tools'>('sessions');
+  const [tab, setTab] = useState<'sessions' | 'auth' | 'files' | 'blackboard'>('sessions');
   const [statusHint, setStatusHint] = useState('');
   const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
   const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string; requiresConfirm: boolean }[]>([]);
@@ -1612,6 +1640,32 @@ export default function ChatPage() {
     }
   };
 
+  // ---- 黑板（共享记录本）：主 Agent 与子 Agent 的共享任务账本 ----
+  const [bbBooks, setBbBooks] = useState<BlackboardBook[] | null>(null);
+  /** key → 条目列表；undefined = 未加载，null = 加载中 */
+  const [bbEntries, setBbEntries] = useState<Record<string, BlackboardEntry[] | null>>({});
+
+  const loadBlackboard = async () => {
+    if (!workspaceId) return;
+    try {
+      setBbBooks(await listBlackboardBooks(workspaceId));
+    } catch {
+      setBbBooks([]);
+    }
+    setBbEntries({}); // 换工作区/刷新后条目缓存一并失效（book key 跨工作区可能同名）
+  };
+
+  const loadBbEntries = async (key: string) => {
+    if (!workspaceId) return;
+    setBbEntries((m) => ({...m, [key]: null}));
+    try {
+      const list = await listBlackboardEntries(workspaceId, key, 50);
+      setBbEntries((m) => ({...m, [key]: list}));
+    } catch {
+      setBbEntries((m) => ({...m, [key]: []}));
+    }
+  };
+
   const loadSkills = async (wid: string) => {
     try {
       const all = await getJson<{ scope: string; name: string; description: string }[]>(
@@ -2130,60 +2184,60 @@ export default function ChatPage() {
     </div>
   );
 
-  // 工具目录分组显示名
-  const GROUP_LABEL: Record<string, string> = {
-    FILE: '📁 文件',
-    CODE: '🧑‍💻 代码',
-    WEB: '🌐 网络',
-    MEMORY: '🧠 记忆',
-    KNOWLEDGE: '📚 知识库',
-    SESSION: '💬 会话',
-    AGENT: '🤖 多Agent',
-    SHELL: '💻 Shell',
-    FRAMEWORK: '⚙️ 框架',
-    GENERAL: '🔧 通用',
+  // 黑板条目类型显示名
+  const BB_TYPE: Record<string, string> = {
+    note: '备注',
+    finding: '发现',
+    risk: '风险',
+    conclusion: '结论',
   };
 
-  // 侧栏：工具目录（分组展示全量工具 + 描述，供用户了解能力）
-  const toolsPanel = (
-    <div className="session-list tools-panel" style={{ padding: '4px 8px' }}>
+  // 侧栏：黑板（共享记录本——主 Agent 与子 Agent 协作时的结论/风险/进度账本，append-only）
+  const activeBooks = bbBooks?.filter((b) => !b.archived) ?? [];
+  const archivedBooks = bbBooks?.filter((b) => b.archived) ?? [];
+  const blackboardPanel = (
+    <div className="session-list bb-panel" style={{ padding: '4px 8px' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h4 style={{ margin: '0 0 8px' }}>🧰 工具目录 <span className="hint" style={{ fontWeight: 400 }}>（{toolCatalog.length}）</span></h4>
-        <button className="btn small" onClick={loadTools}>刷新</button>
+        <h4 style={{ margin: '0 0 8px' }}>📋 黑板 <span className="hint" style={{ fontWeight: 400 }}>（{bbBooks === null ? '…' : activeBooks.length}）</span></h4>
+        <button className="btn small" onClick={() => void loadBlackboard()}>刷新</button>
       </div>
-      {toolCatalog.length === 0 ? (
-        <div className="hint">暂无工具数据，点击「刷新」加载</div>
+      {bbBooks === null ? (
+        <div className="hint">加载中…</div>
+      ) : activeBooks.length === 0 && archivedBooks.length === 0 ? (
+        <div className="hint">黑板为空——Agent 协作任务时会把结论 / 风险 / 进度登记到这里。</div>
       ) : (
-        Array.from(new Set(toolCatalog.map((t) => t.group))).map((group) => (
-          <div key={group} className="tools-group">
-            <div className="tools-group-head">{GROUP_LABEL[group] || group}</div>
-            {toolCatalog.filter((t) => t.group === group).map((t) => (
-              <details key={t.name} className="tools-item">
-                <summary className="tools-item-head">
-                  <span className="tools-item-name">{t.name}</span>
-                  <span className="tools-item-display">{t.displayName}</span>
-                </summary>
-                <div className="tools-item-body">
-                  {t.description && <p className="tools-item-desc">{t.description}</p>}
-                  {t.params && t.params.length > 0 && (
-                    <div className="tools-item-params">
-                      {t.params.map((p) => (
-                        <div key={p.name} className="tools-item-param">
-                          <code>{p.name}</code>
-                          {p.required && <em className="req">必填</em>}
-                          <span>{p.description}</span>
-                        </div>
-                      ))}
+        [...activeBooks, ...archivedBooks].map((b) => {
+          const list = bbEntries[b.key];
+          return (
+            <details key={b.key} className="bb-book" onToggle={(e) => {
+              const d = e.target as HTMLDetailsElement;
+              if (d.open && list === undefined) void loadBbEntries(b.key);
+            }}>
+              <summary className="bb-book-head">
+                <span className="bb-book-name">{b.archived ? '🗂 ' : '📌 '}{b.key}</span>
+                <span className="bb-book-meta">{b.entries} 条 · {fmtBbTime(b.lastModified)}</span>
+              </summary>
+              {list === undefined || list === null ? (
+                <div className="hint" style={{ padding: '0 10px 8px' }}>加载中…</div>
+              ) : list.length === 0 ? (
+                <div className="hint" style={{ padding: '0 10px 8px' }}>空记录本</div>
+              ) : (
+                list.slice().reverse().map((e) => (
+                  <div key={e.seq} className={`bb-entry bb-${e.type}`}>
+                    <div className="bb-entry-head">
+                      <span className="bb-entry-type">{BB_TYPE[e.type] || e.type}</span>
+                      <span className="bb-entry-meta">#{e.seq} · {e.author} · {fmtBbTime(e.ts)}</span>
                     </div>
-                  )}
-                </div>
-              </details>
-            ))}
-          </div>
-        ))
+                    <div className="bb-entry-content">{e.content}</div>
+                  </div>
+                ))
+              )}
+            </details>
+          );
+        })
       )}
       <div className="hint" style={{ marginTop: 8, fontSize: 11 }}>
-        💡 工具会在 AI 需要时自动调用；写/执行类操作会先征询你确认
+        💡 黑板是 Agent 团队的共享记录本：结论 / 风险 / 进度，跨会话可见
       </div>
     </div>
   );
@@ -2575,21 +2629,36 @@ export default function ChatPage() {
         return (
           <>
             {cloudMode && cloudCredits.length > 0 && (
-              <div style={{ marginBottom: 8, fontSize: 12 }}>
-                {cloudCredits.map((c) => (
-                  <div key={c.providerId}
-                       style={{ display: 'flex', justifyContent: 'space-between', padding: '4px 8px',
-                                background: 'var(--bg-secondary, #f5f5f5)', borderRadius: 6, marginBottom: 4 }}
-                       title={c.remaining === null ? '该 provider 未启用积分池' : '积分池剩余（按过期时间先后消耗）'}>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {c.providerName || c.providerSlug || `provider #${c.providerId}`}
-                    </span>
-                    <span style={{ flexShrink: 0, marginLeft: 8 }}>
-                      {c.remaining !== null ? `⚡${c.remaining}` : '⚡—'}
-                      {c.dailyLimit !== null ? ` · ${c.usedToday ?? 0}/${c.dailyLimit}` : ''}
-                    </span>
-                  </div>
-                ))}
+              <div className="credit-panel">
+                {cloudCredits.map((c) => {
+                  const pct = c.dailyLimit !== null && c.dailyLimit > 0
+                    ? Math.min(100, Math.round(((c.usedToday ?? 0) / c.dailyLimit) * 100))
+                    : 0;
+                  return (
+                    <div key={c.providerId} className="credit-row"
+                         title={c.remaining === null ? '该 provider 未启用积分池' : '积分池剩余（按过期时间先后消耗）'}>
+                      <div className="credit-main">
+                        <span className="credit-name">
+                          {c.providerName || c.providerSlug || `provider #${c.providerId}`}
+                        </span>
+                        <span className="credit-balance">
+                          {c.remaining !== null ? `⚡ ${fmtInt(c.remaining)}` : '未启用'}
+                        </span>
+                      </div>
+                      {c.dailyLimit !== null && c.dailyLimit > 0 && (
+                        <div className="credit-quota">
+                          <div className="credit-quota-bar">
+                            <div className={`credit-quota-fill${pct >= 80 ? ' warn' : ''}`}
+                                 style={{width: `${pct}%`}} />
+                          </div>
+                          <span className="credit-quota-text">
+                            今日 {(c.usedToday ?? 0).toLocaleString('zh-CN')} / {fmtCompact(c.dailyLimit)}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             )}
             <button className="btn primary" style={{ width: '100%', marginBottom: 8 }} onClick={createSession}>＋ 新会话</button>
@@ -2644,8 +2713,8 @@ export default function ChatPage() {
         );
       case 'auth':
         return authPanel;
-      case 'tools':
-        return toolsPanel;
+      case 'blackboard':
+        return blackboardPanel;
       case 'files':
         return filePanel;
     }
@@ -2660,7 +2729,7 @@ export default function ChatPage() {
       <div className="chat-side" style={{ width: panelWidth }}>
         <div className="side-tabs">
           <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
-          <button className={`btn small ${tab === 'tools' ? 'primary' : ''}`} onClick={() => { if (toolCatalog.length === 0) loadTools(); setTab('tools'); }}>🧰 工具</button>
+          <button className={`btn small ${tab === 'blackboard' ? 'primary' : ''}`} onClick={() => { void loadBlackboard(); setTab('blackboard'); }}>📋 黑板</button>
           <button className={`btn small ${tab === 'auth' ? 'primary' : ''}`} onClick={() => setTab('auth')}>🔐 授权</button>
           <button className={`btn small ${tab === 'files' ? 'primary' : ''}`} onClick={() => setTab('files')}>📁 文件</button>
           {openFiles.length > 0 && (
