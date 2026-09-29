@@ -16,7 +16,7 @@ param(
     [string]$Version = "",
     [switch]$SkipFrontend,
     [switch]$RunTests,
-    [string]$JdkPath = "",
+    [string]$JdkPath = "C:\Users\xinl.tang\.vfox\cache\java\v-21.0.12-graal\java-21.0.12-graal",
     [int]$JdkVersion = 21
 )
 
@@ -57,6 +57,7 @@ Write-Host "[1/5] Version : $Version" -ForegroundColor Yellow
 $requiredMajor = $JdkVersion
 $candidates = @()
 if ($env:JAVA_HOME) { $candidates += $env:JAVA_HOME }
+$candidates += "C:\Users\xinl.tang\.vfox\cache\java\v-21.0.12-graal\java-21.0.12-graal"
 $candidates += "$env:USERPROFILE\.jdks\ms-21*"
 $candidates += "$env:USERPROFILE\.jdks\corretto-21*"
 $candidates += "$env:USERPROFILE\.jdks\*21*"
@@ -194,7 +195,7 @@ $runBat = @"
 @echo off
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
-java -Xmx2g -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
+java -Xmx2g -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
 pause
 "@
 $runBat | Out-File -FilePath (Join-Path $DistDir "run.bat") -Encoding ASCII
@@ -240,13 +241,13 @@ if ($Mode -ne "fatjar") {
 
     # Spring Boot 3.2+ fat jar entrypoint (reads MANIFEST's Start-Class)
     $mainClass = "org.springframework.boot.loader.launch.JarLauncher"
+    # Console charset: logback console output must match the Windows console code page (GBK on
+    # zh-CN systems). Forcing UTF-8 here garbles Chinese when the exe is launched directly.
+    # File logging stays UTF-8 (logging.charset.file in application.yml).
     $javaOpts = @(
         "-Xmx2g",
         "-Dfile.encoding=UTF-8",
-        "-Dstdout.encoding=UTF-8",
-        "-Dstderr.encoding=UTF-8",
-        "-Dsun.stdout.encoding=UTF-8",
-        "-Dsun.stderr.encoding=UTF-8",
+        "-Dlogging.charset.console=GBK",
         "-Dsun.jnu.encoding=UTF-8",
         "-Dspring.main.banner-mode=console"
     )
@@ -260,7 +261,8 @@ if ($Mode -ne "fatjar") {
         "--main-class", $mainClass,
         "--dest", $DistDir,
         "--description", "AgentScope 2.0 based AI work assistant",
-        "--vendor", "Easy Claw"
+        "--vendor", "Easy Claw",
+        "--icon", (Join-Path $PSScriptRoot "Easy-Claw.ico")
     )
     foreach ($opt in $javaOpts) { $jpArgs += "--java-options"; $jpArgs += $opt }
 
@@ -289,18 +291,18 @@ if ($Mode -ne "fatjar") {
 if ($pkgReady -and $Mode -eq "app-image") {
     $appDir = Join-Path $DistDir $AppName
 
-    # 1) Easy-Claw.bat wrapper: chcp 65001 for Chinese + log file + no-daemon
+    # 1) Easy-Claw.bat wrapper: log file + no-daemon
+    #    No chcp here: the packaged JVM logs in GBK (logging.charset.console=GBK in cfg) to match
+    #    the default zh-CN console. Forcing UTF-8 (chcp 65001) would garble it instead.
     #    Browser auto-open is handled by the JVM (BrowserLauncher.java), no hardcoded port here.
     $batContent = @"
 @echo off
 REM === Easy Claw Launcher ===
 REM This wrapper:
-REM   1. Switches console to UTF-8 (fixes Chinese garbled text)
-REM   2. Creates log directory under %USERPROFILE%\.easyClaw\logs
-REM   3. Runs Easy-Claw.exe in foreground (never as daemon)
-REM   4. Browser opens automatically when server is ready (BrowserLauncher.java)
-REM   5. Pauses so you can see startup errors
-chcp 65001 >nul 2>&1
+REM   1. Creates log directory under %USERPROFILE%\.easyClaw\logs
+REM   2. Runs Easy-Claw.exe in foreground (never as daemon)
+REM   3. Browser opens automatically when server is ready (BrowserLauncher.java)
+REM   4. Pauses so you can see startup errors
 cd /d "%~dp0"
 
 if not exist "%USERPROFILE%\.easyClaw\logs" mkdir "%USERPROFILE%\.easyClaw\logs"
@@ -332,7 +334,7 @@ if errorlevel 1 (
         }
     }
 
-    Write-Host "      + Easy-Claw.bat (UTF-8 + log + no-daemon)" -ForegroundColor Green
+    Write-Host "      + Easy-Claw.bat (log + no-daemon)" -ForegroundColor Green
 }
 
 # ---------- zip app-image ----------

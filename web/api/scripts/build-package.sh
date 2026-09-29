@@ -230,7 +230,7 @@ cp "$JAR_FILE" "$DIST_DIR/easy-claw.jar"
 cat > "$DIST_DIR/run.sh" << 'RUNEOF'
 #!/usr/bin/env bash
 cd "$(dirname "$0")"
-java -Xmx2g -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
+java -Xmx2g -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
 RUNEOF
 chmod +x "$DIST_DIR/run.sh"
 
@@ -273,13 +273,11 @@ if [[ "$MODE" != "fatjar" ]]; then
 
     # Spring Boot 3.2+ fat jar entrypoint (reads MANIFEST's Start-Class)
     MAIN_CLASS="org.springframework.boot.loader.launch.JarLauncher"
+    # No forced stdout/stderr encoding: the JVM follows the terminal (UTF-8 on Linux/macOS),
+    # and logback console charset defaults to UTF-8 via application.yml. File logging stays UTF-8.
     JAVA_OPTS=(
         "-Xmx2g"
         "-Dfile.encoding=UTF-8"
-        "-Dstdout.encoding=UTF-8"
-        "-Dstderr.encoding=UTF-8"
-        "-Dsun.stdout.encoding=UTF-8"
-        "-Dsun.stderr.encoding=UTF-8"
         "-Dsun.jnu.encoding=UTF-8"
         "-Dspring.main.banner-mode=console"
     )
@@ -294,6 +292,7 @@ if [[ "$MODE" != "fatjar" ]]; then
         --dest "$DIST_DIR"
         --description "AgentScope 2.0 based AI work assistant"
         --vendor "Easy Claw"
+        --icon "$SCRIPT_DIR/Easy-Claw.png"
     )
     for opt in "${JAVA_OPTS[@]}"; do
         jp_args+=(--java-options "$opt")
