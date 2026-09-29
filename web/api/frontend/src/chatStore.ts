@@ -80,7 +80,7 @@ export interface Segment {
 export interface ChatMessage {
   role: 'user' | 'ai';
   segments: Segment[];
-  attachments?: { name: string; mimeType: string }[];
+  attachments?: { name: string; mimeType: string; src?: string }[];
 }
 
 export interface PendingConfirm {

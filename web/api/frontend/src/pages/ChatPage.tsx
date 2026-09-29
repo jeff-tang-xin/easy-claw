@@ -970,7 +970,11 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
           {msg.attachments && msg.attachments.length > 0 && (
             <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
               {msg.attachments.map((a, i) => (
-                <span key={i} className="attach-chip">📎 {a.name}</span>
+                a.src && a.mimeType.startsWith('image/')
+                  ? <img key={i} src={a.src} alt={a.name}
+                         style={{ maxWidth: 220, maxHeight: 160, borderRadius: 8, display: 'block', cursor: 'zoom-in' }}
+                         onClick={(e) => window.open((e.target as HTMLImageElement).src, '_blank')} />
+                  : <span key={i} className="attach-chip">📎 {a.name}</span>
               ))}
             </div>
           )}
@@ -989,7 +993,7 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
   const pa = prev.msg.attachments || [], na = next.msg.attachments || [];
   if (pa.length !== na.length) return false;
   for (let i = 0; i < pa.length; i++) {
-    if (pa[i].name !== na[i].name) return false;
+    if (pa[i].name !== na[i].name || pa[i].src !== na[i].src) return false;
   }
   return true;
 });
@@ -1518,7 +1522,7 @@ export default function ChatPage() {
       for (const b of box) {
         if (b.type === 'USER') {
           cur = null;
-          msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png' })) });
+          msgs.push({ role: 'user', segments: [{ type: 'text', content: b.content }], attachments: (b.images || []).map((src) => ({ name: 'image', mimeType: 'image/png', src })) });
         } else if (b.type === 'AI_TEXT' || b.type === 'THINKING' || b.type === 'TOOL_CALL' || b.type === 'TOOL_RESULT' || b.type === 'SUBAGENT' || b.type === 'BLACKBOARD' || b.type === 'SYSTEM') {
           if (!cur) {
             cur = { role: 'ai', segments: [] };
@@ -2035,7 +2039,7 @@ export default function ChatPage() {
     if (!workspaceId || !sessionId) return;
     patchMsgs((prev) => [
       ...prev,
-      { role: 'user', segments: [{ type: 'text', content: text }], attachments: myAtts.map((a) => ({ name: a.name, mimeType: a.mimeType })) },
+      { role: 'user', segments: [{ type: 'text', content: text }], attachments: myAtts.map((a) => ({ name: a.name, mimeType: a.mimeType, src: a.base64Data ? `data:${a.mimeType};base64,${a.base64Data}` : undefined })) },
     ]);
     patch({ running: true, error: '', pending: null }); // 新对话开始：关闭可能残留的确认弹窗
     setStatusHint('');
@@ -2434,7 +2438,11 @@ export default function ChatPage() {
           <div className="attachment-bar">
             {attachments.map((a, i) => (
               <span key={i} className="attach-chip">
-                📎 {a.name}
+                {a.mimeType.startsWith('image/') && a.base64Data
+                  ? <img src={`data:${a.mimeType};base64,${a.base64Data}`} alt={a.name}
+                         style={{ width: 28, height: 28, objectFit: 'cover', borderRadius: 4, verticalAlign: 'middle', marginRight: 4 }} />
+                  : '📎'}
+                {' '}{a.name}
                 <button onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}>✕</button>
               </span>
             ))}
@@ -2803,11 +2811,12 @@ export default function ChatPage() {
               <input
                 type="radio" name="ns-mode" checked={nsMode === 'new'}
                 disabled={!!branchInfo && !branchInfo.current}
-                onChange={() => { setNsMode('new'); if (!nsBranch) setNsBranch(defaultBranchName()); }}
+                onChange={() => { setNsMode('new'); if (!nsBranch) setNsBranch(defaultBranchName()); setNsBase(branchInfo?.current || ''); }}
               /> 新建分支（独立 worktree，改动互不影响）
             </label>
             {nsMode === 'new' && (
               <div style={{ paddingLeft: 20, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)' }}>新分支名（留空自动生成）</label>
                 <input
                   className="session-rename-input"
                   placeholder={defaultBranchName()}
@@ -2815,13 +2824,17 @@ export default function ChatPage() {
                   maxLength={100}
                   onChange={(e) => setNsBranch(e.target.value)}
                 />
-                <input
+                <label style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 4 }}>基于分支（新分支从这里分出）</label>
+                <select
                   className="session-rename-input"
-                  placeholder={`基准分支（默认当前：${branchInfo?.current || 'HEAD'}）`}
                   value={nsBase}
-                  maxLength={100}
                   onChange={(e) => setNsBase(e.target.value)}
-                />
+                >
+                  <option value="">（当前 HEAD）</option>
+                  {(branchInfo?.branches || []).map((b) => (
+                    <option key={b} value={b}>{b}{branchInfo?.current === b ? '（当前）' : ''}</option>
+                  ))}
+                </select>
               </div>
             )}
             <label style={{ fontSize: 13, opacity: branchInfo && branchInfo.branches.length === 0 ? 0.5 : 1 }}>
