@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.tools;
 
+import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
 import org.slf4j.Logger;
@@ -51,12 +52,16 @@ public class CodeGenerationTools {
             【可用能力】Python 标准库（math、statistics、json、csv、re、datetime、decimal、\
             fractions、itertools、collections、hashlib、base64、textwrap、difflib、unicodedata 等）。\
             不支持 numpy/pandas 等第三方库，也没有网络访问。
-            【文件】默认无法读写磁盘。要处理文件内容，请先用 read_file 读出来，\
-            以字符串字面量的形式写进代码里。
+            【文件】可读写当前工作区内的文件：相对路径基于工作区根（cwd 即工作区根），\
+            工作区内绝对路径也可以；工作区外的文件无法访问。\
+            适合处理工作区内的数据文件：CSV/JSON 解析统计、日志分析、批量文本处理等。\
+            写文件务必用 with open 或显式 close()——本运行时基于 GraalPy，\
+            open(...).write(...) 不关闭时缓冲不保证落盘，立即读会读到空。
             【限制】执行超时 30 秒（死循环会被强制终止）；输出过长会被截断。
             【报错】语法或运行时错误会原样返回 Python traceback，可据此修正后重试。""")
     public String runPython(@ToolParam(name = "code",
-            description = "要执行的 Python 3 代码。记得用 print() 输出你想看到的结果。") String code) {
+            description = "要执行的 Python 3 代码。记得用 print() 输出你想看到的结果。") String code,
+            WorkspaceContext workspace) {
         if (code == null || code.isBlank()) {
             return "❌ 代码内容为空";
         }
@@ -66,8 +71,19 @@ public class CodeGenerationTools {
             return "❌ Python 执行环境不可用（当前 JVM 非 GraalVM）。请改用 execute 工具调用系统 python 命令。";
         }
 
-        com.xinl.easyclaw.python.PythonSandbox.Result result = pythonSandbox.execute(code, null, null);
-        return renderResult(result);
+        // 工作区根 = 沙箱唯一可读写目录（PythonSandbox 会把 cwd 同步设为它，相对路径直接可用）。
+        // 与 read_file/write_file 的 ROOTED 边界保持一致；无工作区上下文时保持全禁——
+        // 安全默认：宁可退化为纯计算，不可静默放开磁盘。
+        java.nio.file.Path allowedDir = workspace == null || workspace.getPath() == null
+                ? null
+                : workspace.getPath().toAbsolutePath().normalize();
+
+        com.xinl.easyclaw.python.PythonSandbox.Result result = pythonSandbox.execute(code, allowedDir, null);
+        String out = renderResult(result);
+        if (allowedDir == null) {
+            out += "\n⚠️ 本次调用未携带工作区上下文，文件访问已禁用（仅纯计算可用）。";
+        }
+        return out;
     }
 
     /**

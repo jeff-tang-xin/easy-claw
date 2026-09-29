@@ -1,14 +1,20 @@
 package com.xinl.easyclaw.tools;
 
 import static org.junit.jupiter.api.Assertions.assertAll;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.xinl.easyclaw.python.GraalPyEngine;
 import com.xinl.easyclaw.python.PythonSandbox;
+import com.xinl.easyclaw.workspace.WorkspaceContext;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * run_python 工具层用例。
@@ -16,11 +22,22 @@ import org.junit.jupiter.api.Test;
  * <p>关注点不是"Python 能不能跑"（那是 PythonSandboxTest 的事），而是
  * <b>返回给模型的文本是否让模型能正确决策</b>——尤其是失败与空输出这两种
  * 容易让模型陷入重试循环的情况。
+ *
+ * <p>文件能力（2026-09 修复）：工作区根作为沙箱唯一可读写目录；无工作区上下文
+ * 时保持全禁。三个文件用例分别覆盖「无上下文拒绝 / 区内可读写 / 越界拒绝」。
  */
 class RunPythonToolTest {
 
     private static CodeGenerationTools tools;
     private static boolean ready;
+
+    /** 每个测试类共享的临时工作区，充当 run_python 的 allowedDir。 */
+    @TempDir
+    static Path wsDir;
+
+    private static WorkspaceContext workspace() {
+        return WorkspaceContext.builder().path(wsDir).build();
+    }
 
     @BeforeAll
     static void setUp() {
@@ -35,7 +52,7 @@ class RunPythonToolTest {
     @DisplayName("正常计算：应返回 print 的输出")
     void runsComputation() {
         assumeTrue(ready, "需要 GraalVM");
-        String out = tools.runPython("import math\nprint(math.factorial(20))");
+        String out = tools.runPython("import math\nprint(math.factorial(20))", workspace());
         assertAll(
                 () -> assertTrue(out.contains("✅"), out),
                 () -> assertTrue(out.contains("2432902008176640000"), out));
@@ -44,7 +61,7 @@ class RunPythonToolTest {
     @Test
     @DisplayName("空输入应直接拒绝，不进解释器")
     void rejectsBlank() {
-        String out = tools.runPython("   ");
+        String out = tools.runPython("   ", workspace());
         assertTrue(out.contains("❌"), out);
     }
 
@@ -52,7 +69,7 @@ class RunPythonToolTest {
     @DisplayName("忘记 print 时必须明确提示，否则模型会反复空跑")
     void hintsMissingPrint() {
         assumeTrue(ready, "需要 GraalVM");
-        String out = tools.runPython("1 + 1");
+        String out = tools.runPython("1 + 1", workspace());
         assertAll(
                 () -> assertTrue(out.contains("没有任何输出"), out),
                 () -> assertTrue(out.contains("print()"), out));
@@ -62,7 +79,7 @@ class RunPythonToolTest {
     @DisplayName("运行时错误应带回 traceback 供模型自行修正")
     void reportsRuntimeError() {
         assumeTrue(ready, "需要 GraalVM");
-        String out = tools.runPython("print(1/0)");
+        String out = tools.runPython("print(1/0)", workspace());
         assertAll(
                 () -> assertTrue(out.contains("❌"), out),
                 () -> assertTrue(out.contains("ZeroDivisionError"), "应含异常类型: " + out));
@@ -72,7 +89,7 @@ class RunPythonToolTest {
     @DisplayName("失败前已产生的输出不能丢——那是定位问题的线索")
     void keepsPartialOutputOnFailure() {
         assumeTrue(ready, "需要 GraalVM");
-        String out = tools.runPython("print('STEP_ONE')\nraise ValueError('boom')");
+        String out = tools.runPython("print('STEP_ONE')\nraise ValueError('boom')", workspace());
         assertAll(
                 () -> assertTrue(out.contains("STEP_ONE"), "应保留失败前输出: " + out),
                 () -> assertTrue(out.contains("ValueError") || out.contains("boom"), out));
@@ -82,8 +99,8 @@ class RunPythonToolTest {
     @DisplayName("每次调用是全新解释器：上一次的变量不应残留")
     void executionsAreIsolated() {
         assumeTrue(ready, "需要 GraalVM");
-        tools.runPython("LEAKED = 'from_previous_call'");
-        String out = tools.runPython("print('LEAKED' in dir())");
+        tools.runPython("LEAKED = 'from_previous_call'", workspace());
+        String out = tools.runPython("print('LEAKED' in dir())", workspace());
         assertTrue(out.contains("False"), "状态不应跨调用泄漏: " + out);
     }
 
@@ -94,17 +111,54 @@ class RunPythonToolTest {
         String out = tools.runPython(
                 "import json, re, statistics, hashlib, datetime, itertools, base64, textwrap, decimal\n"
                         + "print(statistics.median([3,1,2]))\n"
-                        + "print(hashlib.md5(b'x').hexdigest()[:6])");
+                        + "print(hashlib.md5(b'x').hexdigest()[:6])",
+                workspace());
         assertAll(
                 () -> assertTrue(out.contains("✅"), "承诺的模块必须都能导入: " + out),
                 () -> assertTrue(out.contains("2"), out));
     }
 
     @Test
-    @DisplayName("文件写入应被拒绝（描述中声明了无磁盘访问）")
-    void fileWriteDenied() {
+    @DisplayName("无工作区上下文时应拒绝文件访问（安全默认）")
+    void deniesFileAccessWithoutWorkspace() {
         assumeTrue(ready, "需要 GraalVM");
-        String out = tools.runPython("open('x.txt','w').write('1')\nprint('WROTE')");
-        assertTrue(!out.contains("WROTE"), "不应能写文件: " + out);
+        String out = tools.runPython("open('x.txt','w').write('1')\nprint('WROTE')", null);
+        assertAll(
+                () -> assertTrue(!out.contains("WROTE"), "不应能写文件: " + out),
+                () -> assertTrue(out.contains("工作区上下文"), "应提示缺少工作区上下文: " + out));
+    }
+
+    @Test
+    @DisplayName("工作区内文件应可读写（cwd 即工作区根，相对路径直接可用）")
+    void canReadWriteInsideWorkspace() throws Exception {
+        assumeTrue(ready, "需要 GraalVM");
+        // 必须用 with open：GraalPy 靠 JVM GC 回收文件对象，open(...).write(...)
+        // 不 close 时缓冲不保证落盘，立即读会读到空（与 CPython 引用计数语义不同）
+        String out = tools.runPython(
+                "with open('demo.txt', 'w', encoding='utf-8') as f:\n"
+                        + "    f.write('hello-sandbox')\n"
+                        + "with open('demo.txt', encoding='utf-8') as f:\n"
+                        + "    print(f.read())",
+                workspace());
+        assertAll(
+                () -> assertTrue(out.contains("✅"), out),
+                () -> assertTrue(out.contains("hello-sandbox"), "应能写并读回工作区内文件: " + out));
+        assertTrue(Files.exists(wsDir.resolve("demo.txt")), "文件应真实落盘到工作区");
+        assertEquals("hello-sandbox", Files.readString(wsDir.resolve("demo.txt")).stripTrailing(),
+                "落盘内容应与写入一致");
+    }
+
+    @Test
+    @DisplayName("工作区外路径必须被拒绝（绝对路径越界）")
+    void cannotEscapeWorkspace() {
+        assumeTrue(ready, "需要 GraalVM");
+        Path outside = wsDir.getParent().resolve("run_python_escape_probe.txt");
+        String outsideUri = outside.toAbsolutePath().toString().replace('\\', '/');
+        String out = tools.runPython(
+                "open(r'" + outsideUri + "', 'w').write('1')\nprint('WROTE')",
+                workspace());
+        assertAll(
+                () -> assertTrue(!out.contains("WROTE"), "不应能写工作区外文件: " + out),
+                () -> assertFalse(Files.exists(outside), "工作区外不应产生文件"));
     }
 }
