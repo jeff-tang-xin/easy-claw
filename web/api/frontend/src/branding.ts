@@ -15,7 +15,7 @@ export interface Branding {
   icon: string;
 }
 
-const DEFAULT_BRANDING: Branding = {name: 'Easy-Claw', subtitle: 'AI 编程助手', icon: '🦞'};
+const DEFAULT_BRANDING: Branding = {name: 'Easy-Claw', subtitle: 'AI 编程助手', icon: '/Easy-Claw.png'};
 /** index.html 的静态 title，用于判断标签页标题是否还没被聊天页接管 */
 const DEFAULT_TITLE = `${DEFAULT_BRANDING.name} · ${DEFAULT_BRANDING.subtitle}`;
 

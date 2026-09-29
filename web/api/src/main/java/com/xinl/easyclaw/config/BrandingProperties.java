@@ -20,6 +20,6 @@ public class BrandingProperties {
     /** 侧边栏标题下方的小字 */
     private String subtitle = "AI 编程助手";
 
-    /** 图标：emoji（如 🦞）或图片地址（/xxx.png 或 http(s):// 外链），同时用作浏览器 favicon */
-    private String icon = "🦞";
+    /** 图标：emoji 或图片地址（默认 /Easy-Claw.png，站内路径或 http(s):// 外链），同时用作浏览器 favicon */
+    private String icon = "/Easy-Claw.png";
 }

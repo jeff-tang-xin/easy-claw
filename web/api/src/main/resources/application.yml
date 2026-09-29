@@ -191,7 +191,7 @@ easyclaw:
   branding:
     name: Easy-Claw
     subtitle: AI 编程助手
-    icon: 🦞
+    icon: "/Easy-Claw.png"
 
 # ============================
 # 内置工具配置
