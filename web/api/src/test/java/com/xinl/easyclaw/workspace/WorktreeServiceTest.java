@@ -81,6 +81,19 @@ class WorktreeServiceTest {
     }
 
     @Test
+    @DisplayName("create：基准分支不存在 → 可读报错，不产生半成品目录/分支")
+    void create_baseMissing() {
+        WorktreeService.WorktreeResult r =
+                service.create(repoDir, "session-base-miss", "easyclaw/feat-m", "no-such-base");
+        assertFalse(r.ok(), "基准分支不存在时应失败");
+        assertTrue(r.message().contains("基准分支不存在"), r.message());
+        assertFalse(Files.exists(service.worktreePathOf(repoDir, "session-base-miss")),
+                "失败时不应留下 worktree 目录");
+        assertFalse(service.listBranches(repoDir).contains("easyclaw/feat-m"),
+                "失败时不应创建新分支");
+    }
+
+    @Test
     @DisplayName("attach：挂载已有分支")
     void attach_existingBranch() throws Exception {
         git(repoDir, "branch", "feat-z");

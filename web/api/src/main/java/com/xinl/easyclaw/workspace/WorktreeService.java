@@ -104,6 +104,17 @@ public class WorktreeService {
         if (baseRef != null && !baseRef.isBlank()) {
             if (!"HEAD".equals(baseRef)) {
                 validateBranchName(baseRef);
+                // 预校验基准分支真实存在：git 原生报「fatal: invalid reference」不可读，
+                // 用户曾把想新建的分支名误填进基准框，对着 invalid reference 排查半天（2026-09-29）
+                GitResult check = runGit(workspacePath,
+                        List.of("show-ref", "--verify", "--quiet", "refs/heads/" + baseRef));
+                if (check.exitCode() == 1) {
+                    return WorktreeResult.fail("基准分支不存在: " + baseRef
+                            + "（请改用已有分支作为基准，或先在主工作区创建它）");
+                }
+                if (check.exitCode() != 0) {
+                    return WorktreeResult.fail("基准分支校验失败: " + check.output());
+                }
             }
             args.add(baseRef);
         }
