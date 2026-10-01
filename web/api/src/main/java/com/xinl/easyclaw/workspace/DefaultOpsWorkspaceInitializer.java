@@ -12,7 +12,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.nio.file.Files;
@@ -73,8 +72,11 @@ public class DefaultOpsWorkspaceInitializer {
         }
     }
 
-    /** 落库默认运维 workspace 行（已存在则只校正关键内置字段，不动 projectId 等用户态字段） */
-    @Transactional
+    /**
+     * 落库默认运维 workspace 行（已存在则只校正关键内置字段，不动 projectId 等用户态字段）。
+     * 不加 @Transactional：本方法仅由 {@link #init()}（@PostConstruct）自调用，Spring 代理
+     * 被绕过、注解本就不生效；各 save 独立自动提交，幂等启动语义也不需要跨语句原子性。
+     */
     public void upsertWorkspace(Path opsPath) {
         WorkspaceEntity entity = workspaceRepository
                 .findById(AppConstants.DEFAULT_OPS_WORKSPACE_ID)
@@ -91,8 +93,7 @@ public class DefaultOpsWorkspaceInitializer {
         workspaceRepository.save(entity);
     }
 
-    /** 绑定内置运维场景（已绑定则不重复写） */
-    @Transactional
+    /** 绑定内置运维场景（已绑定则不重复写）；事务口径同 {@link #upsertWorkspace}。 */
     public void bindOpsScenario() {
         if (workspaceScenarioRepository
                 .findByWorkspaceId(AppConstants.DEFAULT_OPS_WORKSPACE_ID).isPresent()) {

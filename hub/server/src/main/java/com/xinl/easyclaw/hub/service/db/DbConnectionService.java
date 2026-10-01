@@ -89,13 +89,16 @@ public class DbConnectionService implements SpokeResourceCatalog {
     @Override
     public List<SpokeResourceItem> listEnabledForSpoke(AppKeyContext ctx, Long projectId) {
         Instant now = Instant.now();
+        // 授权批查：一次取回该用户在本资源类型上的全部有效授权，内存过滤（替代逐行 exists N+1）
+        Set<Long> authorizedIds = grants
+                .findByResourceTypeAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
+                        RESOURCE_TYPE, ctx.userId(), now, now)
+                .stream().map(ResourceGrantEntity::getResourceId).collect(Collectors.toSet());
         return repo.findAllByEnabledTrueOrderBySortOrderAscIdAsc().stream()
                 .filter(e -> ctx.orgId() != null && ctx.orgId().equals(e.getOrgId()))
                 .filter(e -> projectId == null || e.getProjectId() == null || e.getProjectId() <= 0
                         || projectId.equals(e.getProjectId()))
-                .filter(e -> grants
-                        .existsByResourceTypeAndResourceIdAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
-                                RESOURCE_TYPE, e.getId(), ctx.userId(), now, now))
+                .filter(e -> authorizedIds.contains(e.getId()))
                 .map(e -> new SpokeResourceItem(
                         e.getServerKey(), e.getName(), RESOURCE_TYPE,
                         attributes(e),
@@ -121,20 +124,23 @@ public class DbConnectionService implements SpokeResourceCatalog {
 
     /**
      * spoke 活跃连接授权校验（POST /api/spoke/resources/db-connection/authorize-check）：
-     * 对传入 serverKey 逐个判定「归属当前 appkey 组织 + 当前用户存在未过期授权」，
+     * 对传入 serverKey 判定「归属当前 appkey 组织 + 当前用户存在未过期授权」，
      * 返回 serverKey → 是否仍授权。未知 serverKey 一律 false（撤销/删除后连接必须断开）。
+     * serverKey 批查一次完成（{@code findByServerKeyIn}），替代逐 key N+1 查询。
      */
     @Override
     public Map<String, Boolean> authorizeCheck(AppKeyContext ctx, List<String> serverKeys) {
+        List<String> distinctKeys = new LinkedHashSet<>(serverKeys).stream()
+                .filter(key -> key != null && !key.isBlank())
+                .toList();
         Map<String, Long> idByServerKey = new LinkedHashMap<>();
-        for (String key : new LinkedHashSet<>(serverKeys)) {
-            if (key == null || key.isBlank()) {
-                continue;
+        if (!distinctKeys.isEmpty()) {
+            for (DbConnectionEntity e : repo.findByServerKeyIn(distinctKeys)) {
+                if (ctx.orgId() != null && ctx.orgId().equals(e.getOrgId())
+                        && Boolean.TRUE.equals(e.getEnabled())) {
+                    idByServerKey.put(e.getServerKey(), e.getId());
+                }
             }
-            repo.findByServerKey(key)
-                    .filter(e -> ctx.orgId() != null && ctx.orgId().equals(e.getOrgId())
-                            && Boolean.TRUE.equals(e.getEnabled()))
-                    .ifPresent(e -> idByServerKey.put(key, e.getId()));
         }
         return grantService.authorizeCheck(
                 new ResourceGrantService.AppKeyCheckContext(ctx.userId(), ctx.orgId()),
@@ -164,6 +170,9 @@ public class DbConnectionService implements SpokeResourceCatalog {
         }
         Long orgId = requireOrgId(req.orgId());
         Long projectId = requireProjectId(orgId, req.projectId());
+        // dbType 校验与 update 同走 service 层（Bean Validation @Pattern 仍是第一道，
+        // 这里是唯一权威口径——两入口一套规则，避免「改了 update 漏了 create」类漂移）
+        requireDbType(req.dbType());
         DbConnectionEntity e = new DbConnectionEntity();
         e.setServerKey(serverKey);
         e.setName(req.name().trim());

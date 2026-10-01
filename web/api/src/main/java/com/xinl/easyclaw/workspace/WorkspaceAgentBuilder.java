@@ -2,6 +2,7 @@ package com.xinl.easyclaw.workspace;
 
 import com.xinl.easyclaw.agent.SessionRegistry;
 import com.xinl.easyclaw.agent.SubagentLoader;
+import com.xinl.easyclaw.base.BuiltinDbIds;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.SystemHomePaths;
@@ -256,16 +257,16 @@ public class WorkspaceAgentBuilder {
                         .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::modeId)
                         .orElse(null);
         boolean typeOps = "ops".equals(workspaceType);
-        boolean typeDb = "db".equals(workspaceType);
+        boolean typeDb = BuiltinDbIds.DB.equals(workspaceType);
         boolean opsMode = typeOps || "ops".equals(activeModeId);
-        boolean dbMode = typeDb || "db".equals(activeModeId);
+        boolean dbMode = typeDb || BuiltinDbIds.DB.equals(activeModeId);
         if (typeOps && !"ops".equals(activeModeId)) {
             log.warn("工作区 [{}] type=ops 但场景 mode 判定未命中 ops"
                             + "（scenario={}），已按工作区类型强制收缩 toolkit",
                     workspaceId,
                     activeScenario == null ? "无绑定" : activeScenario.getMode());
         }
-        if (typeDb && !"db".equals(activeModeId)) {
+        if (typeDb && !BuiltinDbIds.DB.equals(activeModeId)) {
             log.warn("工作区 [{}] type=db 但场景 mode 判定未命中 db"
                             + "（scenario={}），已按工作区类型强制收缩 toolkit",
                     workspaceId,

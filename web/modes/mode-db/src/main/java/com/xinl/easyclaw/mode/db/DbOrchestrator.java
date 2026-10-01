@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.mode.db;
 
+import com.xinl.easyclaw.base.BuiltinDbIds;
 import com.xinl.easyclaw.base.orchestration.AgentOrchestrator;
 import com.xinl.easyclaw.base.orchestration.ExecutionContext;
 import com.xinl.easyclaw.base.orchestration.OrchestrationPlan;
@@ -23,9 +24,9 @@ public final class DbOrchestrator implements AgentOrchestrator {
      * <p>
      * <b>红线</b>：本常量同时是工作区形态分类（WorkspaceManager.normalizeType 动态发现）、
      * 场景种子 mode（SystemDataSeeder）、前端 WS_TYPES 的对齐锚点；改名会多处失配。
-     * 后端代码引用本常量而非裸字符串，编译器保证不漂移。
+     * 后端代码引用 {@link BuiltinDbIds#DB}（base 契约层）而非裸字符串，编译器保证不漂移。
      */
-    public static final String MODE_ID = "db";
+    public static final String MODE_ID = BuiltinDbIds.DB;
 
     @Override
     public String modeId() {
@@ -46,9 +47,9 @@ public final class DbOrchestrator implements AgentOrchestrator {
      */
     @Override
     public String mainAgentId() {
-        // 与 agent-db 模块 DbAgent.AGENT_ID 对齐（mode-db 不依赖 agent-db，
-        // 以注释锚定；改名会同时失配 SPI 注册与场景种子）
-        return "db";
+        // 与 agent-db 模块 DbAgent.AGENT_ID 对齐——两者同引 base 契约层 BuiltinDbIds.DB
+        // （mode-db 不依赖 agent-db，靠公共常量保证不漂移；改名会同时失配 SPI 注册与场景种子）
+        return BuiltinDbIds.DB;
     }
 
     /**

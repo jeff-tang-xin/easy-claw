@@ -1,21 +1,13 @@
 package com.xinl.easyclaw.tools;
 
 import com.xinl.easyclaw.db.service.DbConnectionService;
-import com.xinl.easyclaw.db.service.DbQueryGuard;
-import com.xinl.easyclaw.db.service.DbQueryLogReporter;
-import com.xinl.easyclaw.db.service.DbResultSanitizer;
+import com.xinl.easyclaw.db.service.DbQueryExecutor;
 import com.xinl.easyclaw.db.service.DbSchemaRenderer;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.agent.RuntimeContext;
 import io.agentscope.core.tool.Tool;
 import io.agentscope.core.tool.ToolParam;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
-
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Statement;
 
 /**
  * 数据库场景工具（仅在激活「DB 工作区」场景的工作区装配，见 WorkspaceAgentBuilder）。
@@ -33,25 +25,20 @@ import java.sql.Statement;
  * <p>
  * 呈现双通道（设计定稿）：给 AI 的查询结果经 {@link DbResultSanitizer} 脱敏 + 三重截断；
  * 用户在确认弹窗看真实 SQL、在聊天流看渲染后的 Markdown。
+ * <p>
+ * V30.1：查询/表结构的编排序列（guard → 审计 → 执行 → 渲染）收口到
+ * {@link DbQueryExecutor} 单实现，本类只保留上下文解析与工具声明——与内置 MCP 通道
+ * （{@code DbMcpTools}）共享同一份编排，杜绝双份拷贝漂移。
  */
 @Component
 public class DbTools {
 
-    private static final Logger log = LoggerFactory.getLogger(DbTools.class);
-    /** 返回给模型的输出上限：超长输出截断，防止吃满上下文 */
-    private static final int MAX_OUTPUT_CHARS = 60_000;
-
     private final DbConnectionService db;
-    private final DbQueryGuard guard;
-    private final DbResultSanitizer sanitizer;
-    private final DbQueryLogReporter queryLogReporter;
+    private final DbQueryExecutor queryExecutor;
 
-    public DbTools(DbConnectionService db, DbQueryGuard guard, DbResultSanitizer sanitizer,
-                   DbQueryLogReporter queryLogReporter) {
+    public DbTools(DbConnectionService db, DbQueryExecutor queryExecutor) {
         this.db = db;
-        this.guard = guard;
-        this.sanitizer = sanitizer;
-        this.queryLogReporter = queryLogReporter;
+        this.queryExecutor = queryExecutor;
     }
 
     // ==================== db_status ====================
@@ -64,7 +51,7 @@ public class DbTools {
         if (session == null) {
             return notConnected();
         }
-        return banner(session) + "\n状态: 已连接"
+        return DbSchemaRenderer.banner(session) + "\n状态: 已连接"
                 + "\n只读提示: " + (session.readonlyHint() ? "是（连接配置标记为只读，请只执行查询）" : "未标记（仍请只执行查询，写操作由数据库账号权限兜底）");
     }
 
@@ -85,17 +72,7 @@ public class DbTools {
             return notConnected();
         }
         String targetDb = database == null || database.isBlank() ? session.database() : database.trim();
-        try {
-            String result = DbSchemaRenderer.renderSchema(session, targetDb, table);
-            if (result.length() > MAX_OUTPUT_CHARS) {
-                result = result.substring(0, MAX_OUTPUT_CHARS) + "\n...（表过多已截断，可用 table 参数缩小范围）";
-            }
-            return result;
-        } catch (SQLException e) {
-            log.warn("db_schema 失败: workspace={}, db={}, err={}",
-                    workspace == null ? null : workspace.getWorkspaceId(), targetDb, e.getMessage());
-            return "❌ 查询表结构失败: " + e.getMessage();
-        }
+        return queryExecutor.renderSchema(session, targetDb, table);
     }
 
     // ==================== db_query ====================
@@ -115,32 +92,7 @@ public class DbTools {
         if (session == null) {
             return notConnected();
         }
-        // 只读防线（行为层）：首词白名单 + 危险子句定位匹配；物理防线是 DB 只读账号
-        DbQueryGuard.Verdict verdict = guard.check(sql);
-        if (!verdict.allowed()) {
-            return "❌ " + verdict.reason();
-        }
-        // 审计：执行前入队（无论执行成败都记——记录的是「执行了什么」）
-        queryLogReporter.enqueue(session.serverKey(), session.serverName(), session.dbType(),
-                session.host(), session.database(), sql, "ai");
-        String banner = banner(session);
-        try (Statement st = session.connection().createStatement()) {
-            st.setQueryTimeout(30);
-            // 行数上限下沉到驱动层：否则 SELECT 大表会把全量结果先拉进内存，sanitizer 才截断。
-            // 多取 1 行用于探测「是否还有更多」，尾注据此如实标注 ≥（见 DbResultSanitizer）。
-            st.setMaxRows(DbResultSanitizer.MAX_ROWS + 1);
-            try (ResultSet rs = st.executeQuery(sql)) {
-                String rendered = sanitizer.render(banner, rs);
-                log.info("db_query 执行完成: workspace={}, serverKey={}, db={}",
-                        workspace == null ? null : workspace.getWorkspaceId(),
-                        session.serverKey(), session.database());
-                return rendered;
-            }
-        } catch (SQLException e) {
-            log.warn("db_query 执行失败: workspace={}, sql={}, err={}",
-                    workspace == null ? null : workspace.getWorkspaceId(), sql, e.getMessage());
-            return banner + "\n\n❌ 执行失败: " + e.getMessage();
-        }
+        return queryExecutor.executeQuery(session, sql, "ai");
     }
 
     // ==================== 会话解析与公共片段 ====================
@@ -158,10 +110,5 @@ public class DbTools {
 
     private static String notConnected() {
         return "❌ 尚未连接数据库：请让用户先在 DB 页面选择连接与库并点击「连接」，再重试。";
-    }
-
-    /** banner 委托共享渲染器（与 MCP 通道同一份实现） */
-    private static String banner(DbConnectionService.DbSession session) {
-        return DbSchemaRenderer.banner(session);
     }
 }

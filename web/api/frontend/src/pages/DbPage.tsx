@@ -390,11 +390,10 @@ export default function DbPage() {
         const publicKey = await getOpsPublicKey();
         encryptedPassword = await encryptPassword(publicKey, input);
       }
-      const q = encryptedPassword
-        ? `&encryptedPassword=${encodeURIComponent(encryptedPassword)}`
-        : '';
-      const r = await getJson<{ databases: string[]; defaultDatabase: string }>(
-        `/api/db/databases?serverKey=${encodeURIComponent(c.serverKey)}${q}`);
+      // 密文走 POST body：查询串会进访问日志/反向代理留存，URL 不携带密码（含密文）
+      const r = await postJson<{ databases: string[]; defaultDatabase: string }>(
+        '/api/db/databases',
+        {serverKey: c.serverKey, encryptedPassword: encryptedPassword || null});
       setPicker({
         serverKey: c.serverKey,
         loading: false,

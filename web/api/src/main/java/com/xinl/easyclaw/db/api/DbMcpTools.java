@@ -1,10 +1,7 @@
 package com.xinl.easyclaw.db.api;
 
 import com.xinl.easyclaw.db.service.DbConnectionService;
-import com.xinl.easyclaw.db.service.DbQueryGuard;
-import com.xinl.easyclaw.db.service.DbQueryLogReporter;
-import com.xinl.easyclaw.db.service.DbResultSanitizer;
-import com.xinl.easyclaw.db.service.DbSchemaRenderer;
+import com.xinl.easyclaw.db.service.DbQueryExecutor;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.message.ToolResultBlock;
 import io.agentscope.core.tool.AgentTool;
@@ -12,9 +9,8 @@ import io.agentscope.core.tool.ToolCallParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
-import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -22,9 +18,8 @@ import java.util.Map;
 /**
  * 内置 MCP 服务 {@code easyclaw-db} 的工具面（设计定稿 §4.0.1 双消费壳之二）。
  * <p>
- * 与 DB 工作区直注册通道（{@code DbTools}）共享第二层服务核心
- * （DbConnectionService / DbQueryGuard / DbResultSanitizer / 审计上报 / DbSchemaRenderer），
- * 仅适配层不同：
+ * 与 DB 工作区直注册通道（{@code DbTools}）共享第二层服务核心与查询编排器
+ * （{@link DbQueryExecutor}：guard/审计/执行/渲染单实现），仅适配层不同：
  * <ul>
  *   <li>MCP 通道没有 DB 页面的会话绑定 → {@code db_schema}/{@code db_query} 带
  *       {@code connKey} 参数（{@code serverKey/database}，与 DbConnectionService 注册表键一致），
@@ -41,19 +36,13 @@ import java.util.Map;
 public class DbMcpTools {
 
     private static final Logger log = LoggerFactory.getLogger(DbMcpTools.class);
-    private static final int MAX_OUTPUT_CHARS = 60_000;
 
     private final DbConnectionService db;
-    private final DbQueryGuard guard;
-    private final DbResultSanitizer sanitizer;
-    private final DbQueryLogReporter queryLogReporter;
+    private final DbQueryExecutor queryExecutor;
 
-    public DbMcpTools(DbConnectionService db, DbQueryGuard guard, DbResultSanitizer sanitizer,
-                      DbQueryLogReporter queryLogReporter) {
+    public DbMcpTools(DbConnectionService db, DbQueryExecutor queryExecutor) {
         this.db = db;
-        this.guard = guard;
-        this.sanitizer = sanitizer;
-        this.queryLogReporter = queryLogReporter;
+        this.queryExecutor = queryExecutor;
     }
 
     /** 三个内置 MCP 工具（McpConnectionServiceImpl connect 时装配） */
@@ -94,30 +83,30 @@ public class DbMcpTools {
         }
         @Override public Map<String, Object> getParameters() { return Map.of("type", "object", "properties", Map.of()); }
         @Override public boolean isReadOnly() { return true; }
-        @Override public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-            return reactor.core.publisher.Mono.fromCallable(() -> {
+        @Override public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.fromCallable(() -> {
                 String wid = workspaceId(param);
                 if (wid == null) {
                     return text("❌ 无法确定工作区上下文。");
                 }
-                List<Map<String, Object>> rows = db.status(wid);
+                List<DbConnectionService.DbConnectionStatus> rows = db.status(wid);
                 if (rows.isEmpty()) {
                     return text("当前没有活跃数据库连接。连接由平台下发授权驱动，"
                             + "请让用户在 DB 页面选择连接与库并点击「连接」。");
                 }
                 StringBuilder sb = new StringBuilder("活跃数据库连接（").append(rows.size()).append("）:\n");
-                for (Map<String, Object> row : rows) {
-                    sb.append("- ").append(row.get("connKey"))
-                            .append("  [").append(row.get("dbType")).append("]")
-                            .append(" 库=").append(row.get("database"))
-                            .append(" 版本=").append(row.get("version"))
-                            .append((Boolean.TRUE.equals(row.get("readonlyHint"))) ? "（只读）" : "")
+                for (DbConnectionService.DbConnectionStatus row : rows) {
+                    sb.append("- ").append(row.connKey())
+                            .append("  [").append(row.dbType()).append("]")
+                            .append(" 库=").append(row.database())
+                            .append(" 版本=").append(row.version())
+                            .append(row.readonlyHint() ? "（只读）" : "")
                             .append("\n");
                 }
                 return text(sb.toString());
             }).onErrorResume(ex -> {
                 log.error("db_status(MCP) 失败", ex);
-                return reactor.core.publisher.Mono.just(error("db_status 失败: " + ex.getMessage()));
+                return Mono.just(error("db_status 失败: " + ex.getMessage()));
             });
         }
     }
@@ -143,8 +132,8 @@ public class DbMcpTools {
             return schema;
         }
         @Override public boolean isReadOnly() { return true; }
-        @Override public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-            return reactor.core.publisher.Mono.fromCallable(() -> {
+        @Override public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.fromCallable(() -> {
                 String wid = workspaceId(param);
                 String connKey = str(param.getInput().get("connKey"));
                 String database = str(param.getInput().get("database"));
@@ -160,19 +149,10 @@ public class DbMcpTools {
                     return text("❌ 连接不存在或已断开: " + connKey + "。先调 db_status 查看可用连接。");
                 }
                 String targetDb = database == null || database.isBlank() ? session.database() : database.trim();
-                try {
-                    String result = DbSchemaRenderer.renderSchema(session, targetDb, table);
-                    if (result.length() > MAX_OUTPUT_CHARS) {
-                        result = result.substring(0, MAX_OUTPUT_CHARS) + "\n...（表过多已截断，可用 table 参数缩小范围）";
-                    }
-                    return text(result);
-                } catch (SQLException e) {
-                    log.warn("db_schema(MCP) 失败: workspace={}, connKey={}, err={}", wid, connKey, e.getMessage());
-                    return text("❌ 查询表结构失败: " + e.getMessage());
-                }
+                return text(queryExecutor.renderSchema(session, targetDb, table));
             }).onErrorResume(ex -> {
                 log.error("db_schema(MCP) 异常", ex);
-                return reactor.core.publisher.Mono.just(error("db_schema 失败: " + ex.getMessage()));
+                return Mono.just(error("db_schema 失败: " + ex.getMessage()));
             });
         }
     }
@@ -197,8 +177,8 @@ public class DbMcpTools {
             return schema;
         }
         @Override public boolean isReadOnly() { return false; }
-        @Override public reactor.core.publisher.Mono<ToolResultBlock> callAsync(ToolCallParam param) {
-            return reactor.core.publisher.Mono.fromCallable(() -> {
+        @Override public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.fromCallable(() -> {
                 String wid = workspaceId(param);
                 String connKey = str(param.getInput().get("connKey"));
                 String sql = str(param.getInput().get("sql"));
@@ -215,30 +195,11 @@ public class DbMcpTools {
                 if (session == null) {
                     return text("❌ 连接不存在或已断开: " + connKey + "。先调 db_status 查看可用连接。");
                 }
-                // 只读防线（行为层）与审计：与直注册通道同一份 Guard / Reporter
-                DbQueryGuard.Verdict verdict = guard.check(sql);
-                if (!verdict.allowed()) {
-                    return text("❌ " + verdict.reason());
-                }
-                queryLogReporter.enqueue(session.serverKey(), session.serverName(), session.dbType(),
-                        session.host(), session.database(), sql, "ai");
-                String banner = DbSchemaRenderer.banner(session);
-                try (Statement st = session.connection().createStatement()) {
-                    st.setQueryTimeout(30);
-                    // 与直注册通道同一策略：行数上限下沉到驱动层，多取 1 行用于探测是否还有更多
-                    st.setMaxRows(DbResultSanitizer.MAX_ROWS + 1);
-                    try (var rs = st.executeQuery(sql)) {
-                        String rendered = sanitizer.render(banner, rs);
-                        log.info("db_query(MCP) 执行完成: workspace={}, connKey={}", wid, connKey);
-                        return text(rendered);
-                    }
-                } catch (SQLException e) {
-                    log.warn("db_query(MCP) 执行失败: workspace={}, sql={}, err={}", wid, sql, e.getMessage());
-                    return text(banner + "\n\n❌ 执行失败: " + e.getMessage());
-                }
+                // 编排（guard/审计/执行/渲染）与直注册通道同一份 DbQueryExecutor
+                return text(queryExecutor.executeQuery(session, sql, "ai"));
             }).onErrorResume(ex -> {
                 log.error("db_query(MCP) 异常", ex);
-                return reactor.core.publisher.Mono.just(error("db_query 失败: " + ex.getMessage()));
+                return Mono.just(error("db_query 失败: " + ex.getMessage()));
             });
         }
     }

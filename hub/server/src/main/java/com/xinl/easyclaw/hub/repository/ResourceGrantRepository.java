@@ -16,4 +16,8 @@ public interface ResourceGrantRepository extends JpaRepository<ResourceGrantEnti
     /** 下发过滤：该用户在该资源上的有效授权（valid_from &lt;= now &lt;= valid_until）。 */
     boolean existsByResourceTypeAndResourceIdAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
             String resourceType, Long resourceId, Long userId, Instant nowFloor, Instant nowCeil);
+
+    /** 下发过滤批查：该用户在某资源类型上的全部有效授权（一次查询替代逐资源 exists N+1）。 */
+    List<ResourceGrantEntity> findByResourceTypeAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
+            String resourceType, Long userId, Instant nowFloor, Instant nowCeil);
 }

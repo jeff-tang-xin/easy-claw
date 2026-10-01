@@ -27,7 +27,8 @@ import java.util.Map;
  *   <li>{@code POST /api/db/connect}：只传 serverKey + database（+ 可选 RSA 加密密码），
  *       host/port/username/password 全部由后端按 serverKey 从下发快照解析——前端不持有
  *       数据库凭证，密码不明文过网（手输密码经 RSA-OAEP 加密，复用 {@link OpsCryptoService}）；</li>
- *   <li>{@code GET /api/db/databases}：该连接实例上可用的库/schema 清单（「库」二级选择器）；</li>
+ *   <li>{@code POST /api/db/databases}：该连接实例上可用的库/schema 清单（「库」二级选择器，
+ *       密文走 body 不进 URL）；</li>
  *   <li>{@code POST /api/db/disconnect} / {@code GET /api/db/status}：断开 / 活跃连接快照。</li>
  * </ul>
  * 每个连接实例的「库」是连接属性：每个 (serverKey, database) 组合 = 独立物理连接，
@@ -78,6 +79,9 @@ public class DbConnectionController {
         String connKey;
         try {
             connKey = db.connect(req.workspaceId(), req.serverKey(), database, password);
+        } catch (DbConnectionService.ConnectionLimitException ex) {
+            // 限流与建连失败语义不同：前者是配额问题（429），后者是目标库不可达（502）
+            throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage());
         } catch (IllegalStateException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
@@ -111,24 +115,31 @@ public class DbConnectionController {
     /**
      * 该连接实例上可用的库/schema 清单（「库」二级选择器数据源）。
      * 用目录默认库建临时连接查询，查完即关。password 解析同 connect。
+     * <p>
+     * V30.1 由 GET 改 POST：密码密文（RSA-OAEP，单次有效）不应进 URL——查询串会
+     * 被访问日志/反向代理留存，POST body 不落日志。
      */
-    @GetMapping("/databases")
-    public Map<String, Object> databases(@RequestParam String serverKey,
-                                         @RequestParam(required = false) String encryptedPassword) {
-        if (isBlank(serverKey)) {
+    @PostMapping("/databases")
+    public Map<String, Object> databases(@RequestBody DatabasesRequest req) {
+        if (req == null || isBlank(req.serverKey())) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "serverKey 不能为空");
         }
+        String serverKey = req.serverKey();
         SpokeDbConnectionView cfg = cloudBootstrap.findDbConnection(serverKey)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "serverKey 不存在或平台配置未就绪: " + serverKey));
         String password = resolvePassword(
-                new ConnectRequest(null, serverKey, null, encryptedPassword), cfg);
+                new ConnectRequest(null, serverKey, null, req.encryptedPassword()), cfg);
         try {
             List<String> list = db.databases(serverKey, password);
             return Map.of("databases", list, "defaultDatabase", cfg.databaseName());
         } catch (IllegalStateException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
+    }
+
+    /** 库清单请求体：serverKey 必填；encryptedPassword 为当次手输的 RSA-OAEP 密文（可空）。 */
+    public record DatabasesRequest(String serverKey, String encryptedPassword) {
     }
 
     /** 断开指定连接（connKey 必填）；返回剩余活跃连接列表 */

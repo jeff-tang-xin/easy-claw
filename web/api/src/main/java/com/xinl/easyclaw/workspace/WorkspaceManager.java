@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.base.BuiltinDbIds;
 import com.xinl.easyclaw.config.AgentFactory;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.AppConstants;
@@ -120,7 +121,7 @@ public class WorkspaceManager {
         if ("ops".equals(normalizedType)) {
             throw new IllegalArgumentException("运维工作区由系统内置，不支持创建");
         }
-        if ("db".equals(normalizedType)) {
+        if (BuiltinDbIds.DB.equals(normalizedType)) {
             throw new IllegalArgumentException("数据库工作区由系统内置，不支持创建");
         }
 

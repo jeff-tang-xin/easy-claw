@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.agent.db;
 
+import com.xinl.easyclaw.base.BuiltinDbIds;
 import com.xinl.easyclaw.base.agent.AgentContext;
 import com.xinl.easyclaw.base.agent.AgentProfile;
 import com.xinl.easyclaw.base.agent.DispatchPolicy;
@@ -34,8 +35,8 @@ import java.util.Map;
  */
 public final class DbAgent implements EasyClawAgent {
 
-    /** 与场景种子（SystemDataSeeder 的 db 场景）及 DbOrchestrator.mainAgentId 保持一致 */
-    public static final String AGENT_ID = "db";
+    /** 与场景种子（SystemDataSeeder 的 db 场景）及 DbOrchestrator.mainAgentId 保持一致（统一锚点 BuiltinDbIds.DB） */
+    public static final String AGENT_ID = BuiltinDbIds.DB;
 
     @Override
     public String agentId() {

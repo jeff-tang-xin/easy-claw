@@ -12,19 +12,25 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 数据库查询审计上报器（spoke → hub 异步批量转报，V30）。
  * <p>
  * AI（db_query 工具）与用户（DbPage 控制台）执行的查询统一经 {@link #enqueue} 入队，
- * 单后台守护线程每 500ms 批量 flush（单批最多 200 条），POST
- * {@code /api/spoke/db-query-logs}（appkey Bearer 由 {@link HubSpokeClient} 内置；
- * operator 由 hub 从 appkey 补全，spoke 不传）。
+ * 单后台守护线程阻塞等待队列（{@code poll(500ms)}），有记录即凑批（单批最多 200 条）
+ * 上报 POST {@code /api/spoke/db-query-logs}（appkey Bearer 由 {@link HubSpokeClient}
+ * 内置；operator 由 hub 从 appkey 补全，spoke 不传）。
  * <p>
  * 失败语义与 {@link com.xinl.easyclaw.ops.service.OpsCommandLogReporter} 一致：
- * 上报失败重试 1 次后丢弃并 warn——审计日志允许有损，绝不阻塞查询执行、
- * 不无限堆积（队列超 5000 条丢最旧）。local 模式（hubUrl/appKey 缺失）入队即静默丢弃。
+ * 上报失败重试 1 次后丢弃并 warn——审计日志允许有损，绝不阻塞查询执行、不无限堆积
+ * （队列超 5000 条丢最旧）。local 模式（hubUrl/appKey 缺失）入队即静默丢弃。
+ * <p>
+ * V30.1：以 {@link BlockingQueue}（容量 = 队列上限）替代 ConcurrentLinkedQueue +
+ * sleep 轮询——事件驱动、关停即时响应；「队列满丢最旧」由 offer/poll 单循环完成，
+ * 消除原 {@code size() >= MAX} check-then-act 微竞态；{@code size()} O(n) 扫描随之消失。
  */
 @Component
 public class DbQueryLogReporter {
@@ -36,7 +42,7 @@ public class DbQueryLogReporter {
     private static final int MAX_BATCH = 200;
     /** 队列上限：超过即丢最旧（hub 不可达时不无限堆积） */
     private static final int MAX_QUEUE = 5000;
-    /** flush 间隔（毫秒） */
+    /** 队列空转等待时长（毫秒）：有记录即时凑批，无记录每 500ms 醒一次检查关停 */
     private static final long FLUSH_INTERVAL_MS = 500;
 
     /** 单条待上报查询日志（executedAt = 入队时刻，ISO-8601） */
@@ -46,7 +52,7 @@ public class DbQueryLogReporter {
 
     private final HubSpokeClient hub;
     private final CloudProperties cloudProperties;
-    private final ConcurrentLinkedQueue<PendingLog> queue = new ConcurrentLinkedQueue<>();
+    private final BlockingQueue<PendingLog> queue = new ArrayBlockingQueue<>(MAX_QUEUE);
     private final Thread worker;
 
     public DbQueryLogReporter(HubSpokeClient hub, CloudProperties cloudProperties) {
@@ -67,39 +73,39 @@ public class DbQueryLogReporter {
         if (!cloudConfigured()) {
             return; // local 模式无 hub 可报，静默丢弃
         }
-        if (queue.size() >= MAX_QUEUE) {
-            queue.poll(); // 丢最旧，保新
+        PendingLog entry = new PendingLog(nvl(serverKey), nvl(serverName), nvl(dbType), nvl(host),
+                nvl(databaseName), nvl(sqlText), nvl(source), Instant.now().toString());
+        while (!queue.offer(entry)) {
+            if (queue.poll() == null) {
+                break; // 并发下队列恰好被取空，下一轮 offer 必成功
+            }
         }
-        queue.add(new PendingLog(nvl(serverKey), nvl(serverName), nvl(dbType), nvl(host),
-                nvl(databaseName), nvl(sqlText), nvl(source), Instant.now().toString()));
     }
 
-    /** 后台循环：定时批量 flush；中断即退出（@PreDestroy 先 flush 残留） */
+    /** 后台循环：阻塞等首条 → 凑一批（≤MAX_BATCH）上报；中断即退出（@PreDestroy 先 flush 残留） */
     private void runLoop() {
         while (true) {
             try {
-                Thread.sleep(FLUSH_INTERVAL_MS);
-                flushOnce();
+                PendingLog first = queue.poll(FLUSH_INTERVAL_MS, TimeUnit.MILLISECONDS);
+                if (first == null) {
+                    continue;
+                }
+                List<PendingLog> batch = new ArrayList<>();
+                batch.add(first);
+                queue.drainTo(batch, MAX_BATCH - 1);
+                flush(batch);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 return;
             } catch (Exception e) {
-                // flushOnce 内部已兜底捕获，此处防御意外异常导致线程静默退出
+                // flush 内部已兜底捕获，此处防御意外异常导致线程静默退出
                 log.warn("db 查询上报线程异常（继续运行）: {}", e.getMessage());
             }
         }
     }
 
-    /** 取一批（≤MAX_BATCH）上报；失败重试 1 次后丢弃并 warn */
-    private void flushOnce() {
-        List<PendingLog> batch = new ArrayList<>();
-        PendingLog p;
-        while (batch.size() < MAX_BATCH && (p = queue.poll()) != null) {
-            batch.add(p);
-        }
-        if (batch.isEmpty()) {
-            return;
-        }
+    /** 上报一批；失败重试 1 次后丢弃并 warn */
+    private void flush(List<PendingLog> batch) {
         try {
             hub.post(REPORT_PATH, Map.of("logs", toBody(batch)));
         } catch (Exception first) {
@@ -121,10 +127,7 @@ public class DbQueryLogReporter {
             Thread.currentThread().interrupt();
         }
         List<PendingLog> rest = new ArrayList<>();
-        PendingLog p;
-        while ((p = queue.poll()) != null) {
-            rest.add(p);
-        }
+        queue.drainTo(rest);
         if (rest.isEmpty()) {
             return;
         }

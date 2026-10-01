@@ -31,13 +31,19 @@ public class DbResultSanitizer {
     /** 渲染后总字符上限（含表头与尾注） */
     public static final int MAX_TOTAL_CHARS = 60_000;
 
-    /** 敏感列名模式（词根匹配，大小写不敏感）：凭据/密钥/证书类 */
+    /** 敏感列名模式（词根匹配，大小写不敏感）：凭据/密钥/证书类。
+     *  V30.1 收紧 {@code auth} 词根：要求后随分隔符/结尾或明确后缀（token/key/code/secret），
+     *  避免 author 类列名误脱敏；authorization 显式列出。其余词根保持宽松（宁可误脱敏）。 */
     private static final Pattern SENSITIVE_COLUMN = Pattern.compile(
             ".*(password|passwd|pwd|secret|token|api[_-]?key|apikey|access[_-]?key|"
-                    + "private[_-]?key|credential|auth).*",
+                    + "private[_-]?key|credential|authorization|"
+                    + "auth([_-]?(token|key|code|secret))?([^-a-z]|$)).*",
             Pattern.CASE_INSENSITIVE);
 
     private static final String MASK = "***";
+
+    /** 渲染预算中为尾注预留的字符数（行数统计 + 截断说明）。 */
+    private static final int FOOTER_RESERVE_CHARS = 64;
 
     /**
      * 执行结果 → 给 AI 的 Markdown 文本（banner + 表格 + 行数尾注）。
@@ -109,7 +115,8 @@ public class DbResultSanitizer {
             sb.append("--- | ");
         }
         sb.append("\n");
-        int budget = MAX_TOTAL_CHARS - banner.length() - 64;
+        // 64 = 尾注（行数统计 + 截断说明）的字符预留，避免尾注把总长顶破上限
+        int budget = MAX_TOTAL_CHARS - banner.length() - FOOTER_RESERVE_CHARS;
         for (String[] row : rows) {
             sb.append("| ");
             for (String cell : row) {
