@@ -91,13 +91,16 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private final com.xinl.easyclaw.config.CloudFeatureGate featureGate;
     /** 运维场景 SSH 连接运行时（终端消息 term_* 使用；无连接时这些消息直接报错返回） */
     private final SshConnectionService ssh;
+    /** 数据库场景连接运行时（V30）：chat 消息携带 connKey 时绑定会话→连接 */
+    private final com.xinl.easyclaw.db.service.DbConnectionService dbConnections;
 
     public ChatWebSocketHandler(AgentService agentService, WorkspaceManager workspaceManager,
                                 com.xinl.easyclaw.api.WorkspaceAccessGuard accessGuard,
                                 com.xinl.easyclaw.api.ToolConfirmValidator toolConfirmValidator,
                                 com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
                                 com.xinl.easyclaw.config.CloudFeatureGate featureGate,
-                                SshConnectionService ssh) {
+                                SshConnectionService ssh,
+                                com.xinl.easyclaw.db.service.DbConnectionService dbConnections) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
         this.accessGuard = accessGuard;
@@ -105,6 +108,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.agentScopeProperties = agentScopeProperties;
         this.featureGate = featureGate;
         this.ssh = ssh;
+        this.dbConnections = dbConnections;
     }
 
     /**
@@ -354,9 +358,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         bindSession(sessionId, connectionId);
         String workspaceId = root.path("workspaceId").asText("");
         long connId = root.path("connId").asLong(0);
+        String connKey = root.path("connKey").asText("");
         if (connId > 0 && !workspaceId.isBlank()) {
             // WS 重连后 register 恢复会话→连接绑定（断连时已解绑；多连接下缺绑定会回退 primary 连接）
             ssh.bindSession(sessionId, workspaceId, connId);
+        }
+        if (!connKey.isBlank() && !workspaceId.isBlank()) {
+            // WS 重连后恢复数据库会话→连接绑定（V30，同 ops 语义）
+            dbConnections.bindSession(sessionId, workspaceId, connKey);
         }
         if (!workspaceId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
@@ -450,12 +459,17 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
     private void handleChat(JsonNode root, String sessionId) {
         String workspaceId = root.path("workspaceId").asText("");
         long connId = root.path("connId").asLong(0);
+        String connKey = root.path("connKey").asText("");
         if (!workspaceId.isBlank()) {
             sessionWorkspaceIds.put(sessionId, workspaceId);
         }
         if (connId > 0 && !workspaceId.isBlank()) {
             // 运维多 tab：一个连接一个会话，该会话的 remote_shell 固定作用于这条连接
             ssh.bindSession(sessionId, workspaceId, connId);
+        }
+        if (!connKey.isBlank() && !workspaceId.isBlank()) {
+            // 数据库多 tab（V30）：一个 (连接, 库) 一个会话，该会话的 db_query 固定作用于这条连接
+            dbConnections.bindSession(sessionId, workspaceId, connKey);
         }
         String msg = root.path("message").asText("");
         String skillName = root.path("skillName").asText("");
@@ -695,6 +709,7 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         // （前端重连后靠 pendingEvents 缓冲续看），不能无条件 dispose 订阅
         for (String sid : orphaned) {
             ssh.unbindSession(sid);
+            dbConnections.unbindSession(sid);
             agentService.releaseSessionIfIdle(sid);
         }
     }

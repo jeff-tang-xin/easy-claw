@@ -41,14 +41,15 @@ class SpiIntegrationTest {
     }
 
     @Test
-    @DisplayName("SPI 发现 4 种编排模式，含单智能体必备模式 single")
+    @DisplayName("SPI 发现 5 种编排模式，含单智能体必备模式 single")
     void spiDiscoversAllModes() {
-        assertEquals(4, registry.size(), "实际发现: " + registry.modeIds());
+        assertEquals(5, registry.size(), "实际发现: " + registry.modeIds());
         assertTrue(registry.find("single").isPresent(),
                 "缺少 single 模式，应用启动就会在 @PostConstruct 阶段抛异常");
         assertTrue(registry.find("team").isPresent());
         assertTrue(registry.find("schedule").isPresent());
         assertTrue(registry.find("ops").isPresent());
+        assertTrue(registry.find("db").isPresent());
     }
 
     @Test

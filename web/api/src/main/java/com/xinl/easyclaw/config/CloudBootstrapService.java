@@ -115,6 +115,7 @@ public class CloudBootstrapService {
             List<SpokeMenuNodeView> menus;
             List<SpokeOpsServerView> opsServers;
             List<SpokeShellCommandView> shellCommands;
+            List<SpokeDbConnectionView> dbConnections;
             try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
                 CompletableFuture<List<SpokeMenuNodeView>> menusFuture =
                         CompletableFuture.supplyAsync(() -> fetchMenus(hubUrl, appKey.trim()), executor);
@@ -122,17 +123,22 @@ public class CloudBootstrapService {
                         CompletableFuture.supplyAsync(() -> fetchOpsServers(hubUrl, appKey.trim()), executor);
                 CompletableFuture<List<SpokeShellCommandView>> shellFuture =
                         CompletableFuture.supplyAsync(() -> fetchShellCommands(hubUrl, appKey.trim()), executor);
+                CompletableFuture<List<SpokeDbConnectionView>> dbFuture =
+                        CompletableFuture.supplyAsync(() -> fetchDbConnections(hubUrl, appKey.trim()), executor);
                 menus = menusFuture.join();
                 opsServers = opsFuture.join();
                 shellCommands = shellFuture.join();
+                dbConnections = dbFuture.join();
             }
-            snapshot = parse(response.body(), flags, disabledTools, menus, opsServers, shellCommands);
+            snapshot = parse(response.body(), flags, disabledTools, menus, opsServers, shellCommands,
+                    dbConnections);
             lastError = null;
             log.info("cloud bootstrap 成功：org={}，可用模型 {} 个，权限 {} 个，flags {} 个，禁用工具 {} 个，"
-                            + "菜单 {} 个，运维服务器 {} 个，shell 白名单 {} 条",
+                            + "菜单 {} 个，运维服务器 {} 个，shell 白名单 {} 条，数据库连接 {} 个",
                     snapshot.orgName(), snapshot.models().size(), snapshot.permissions().size(),
                     snapshot.flags().size(), snapshot.disabledTools().size(),
-                    snapshot.menus().size(), snapshot.opsServers().size(), snapshot.shellCommands().size());
+                    snapshot.menus().size(), snapshot.opsServers().size(), snapshot.shellCommands().size(),
+                    snapshot.dbConnections().size());
         } catch (Exception e) {
             lastError = "hub 不可达：" + e.getClass().getSimpleName() + " " + e.getMessage();
             log.warn("cloud bootstrap 失败：{}", lastError);
@@ -196,12 +202,34 @@ public class CloudBootstrapService {
                                 o.username(), o.description(), o.projectId(), null, o.hasPassword(),
                                 o.osType(), o.category()))
                         .toList();
+        // 数据库连接（V30）：同 ops 口径——明文不下发浏览器，仅 hasPassword 布尔
+        List<SpokeDbConnectionView> dbConns = s == null ? List.of()
+                : s.dbConnections().stream()
+                        .map(c -> new SpokeDbConnectionView(c.serverKey(), c.name(), c.dbType(),
+                                c.host(), c.port(), c.databaseName(), c.username(), c.description(),
+                                c.readonlyHint(), c.projectId(), null, c.hasPassword()))
+                        .toList();
         return new CloudConfigView(
                 available,
                 available,
                 s == null ? List.of() : s.menus(),
                 servers,
-                s == null ? List.of() : s.shellCommands());
+                s == null ? List.of() : s.shellCommands(),
+                dbConns);
+    }
+
+    /**
+     * 按 serverKey 查 hub 下发的数据库连接（connect 用，V30）。
+     * host/port/username/password 全部以快照为准——前端只传 serverKey，不采信其传参。
+     */
+    public java.util.Optional<SpokeDbConnectionView> findDbConnection(String serverKey) {
+        CloudSnapshot s = snapshot;
+        if (s == null || serverKey == null || serverKey.isBlank()) {
+            return java.util.Optional.empty();
+        }
+        return s.dbConnections().stream()
+                .filter(c -> serverKey.equals(c.serverKey()))
+                .findFirst();
     }
 
     /**
@@ -242,7 +270,8 @@ public class CloudBootstrapService {
 
     private static CloudSnapshot parse(String body, Map<String, Boolean> flags, Set<String> disabledTools,
                                        List<SpokeMenuNodeView> menus, List<SpokeOpsServerView> opsServers,
-                                       List<SpokeShellCommandView> shellCommands)
+                                       List<SpokeShellCommandView> shellCommands,
+                                       List<SpokeDbConnectionView> dbConnections)
             throws Exception {
         JsonNode root = MAPPER.readTree(body);
         String orgName = root.path("org").path("name").asText("");
@@ -262,7 +291,7 @@ public class CloudBootstrapService {
             }
         }
         return new CloudSnapshot(orgName, orgSlug, List.copyOf(models), List.copyOf(permissions),
-                flags, disabledTools, menus, opsServers, shellCommands, Instant.now());
+                flags, disabledTools, menus, opsServers, shellCommands, dbConnections, Instant.now());
     }
 
     /** 拉取生效态 feature flags（flagKey → enabled）；任何失败返回空表（缺省放行语义） */
@@ -351,6 +380,39 @@ public class CloudBootstrapService {
             return List.copyOf(out);
         } catch (Exception e) {
             log.warn("cloud ops-servers 拉取失败（运维服务器置空）：{}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 拉取 hub 下发的数据库连接清单（通用资源信封 type=db-connection）；任何失败返回空表 */
+    private List<SpokeDbConnectionView> fetchDbConnections(String hubUrl, String appKey) {
+        try {
+            String body = fetchJson(hubUrl, appKey, "/api/spoke/resources/db-connection");
+            if (body == null) {
+                return List.of();
+            }
+            List<SpokeDbConnectionView> out = new ArrayList<>();
+            for (JsonNode n : MAPPER.readTree(body)) {
+                // 通用信封：类型特有字段在 attributes 里（dbType/host/port/databaseName/username/...）
+                JsonNode attrs = n.path("attributes");
+                out.add(new SpokeDbConnectionView(
+                        n.path("serverKey").asText(""),
+                        n.path("name").asText(""),
+                        attrs.path("dbType").asText(""),
+                        attrs.path("host").asText(""),
+                        attrs.path("port").asInt(0),
+                        attrs.path("databaseName").asText(""),
+                        attrs.path("username").asText(""),
+                        attrs.path("description").asText(""),
+                        attrs.path("readonlyHint").asBoolean(true),
+                        attrs.hasNonNull("projectId") ? attrs.path("projectId").asLong() : null,
+                        // V30：hub 解密后随目录下发；未设置/旧 hub 下发时保持 null
+                        n.hasNonNull("password") ? n.path("password").asText() : null,
+                        attrs.path("hasPassword").asBoolean(false)));
+            }
+            return List.copyOf(out);
+        } catch (Exception e) {
+            log.warn("cloud db-connections 拉取失败（数据库连接置空）：{}", e.getMessage());
             return List.of();
         }
     }
@@ -451,20 +513,22 @@ public class CloudBootstrapService {
     /**
      * bootstrap 快照（不可变；整体替换发布）。
      * flags=生效态功能开关；disabledTools=生效态为否的工具 key；
-     * menus/opsServers/shellCommands=hub 下发的配置面（S5 配置下发，失败维度为空表）。
+     * menus/opsServers/shellCommands/dbConnections=hub 下发的配置面（失败维度为空表）。
      */
     public record CloudSnapshot(String orgName, String orgSlug, List<String> models,
                                 List<String> permissions, Map<String, Boolean> flags,
                                 Set<String> disabledTools, List<SpokeMenuNodeView> menus,
                                 List<SpokeOpsServerView> opsServers,
-                                List<SpokeShellCommandView> shellCommands, Instant fetchedAt) {
+                                List<SpokeShellCommandView> shellCommands,
+                                List<SpokeDbConnectionView> dbConnections, Instant fetchedAt) {
     }
 
-    /** cloud-config 端点响应（menu/opsServers/shellCommands 在本地模式下恒为空数组） */
+    /** cloud-config 端点响应（menu/opsServers/shellCommands/dbConnections 在本地模式下恒为空数组） */
     public record CloudConfigView(boolean cloudMode, boolean available,
                                   List<SpokeMenuNodeView> menu,
                                   List<SpokeOpsServerView> opsServers,
-                                  List<SpokeShellCommandView> shellCommands) {
+                                  List<SpokeShellCommandView> shellCommands,
+                                  List<SpokeDbConnectionView> dbConnections) {
     }
 
     /** 设置页状态视图（attachmentsAllowed 供前端隐藏附件入口，spec §4.5） */

@@ -11,7 +11,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 /**
  * {@link BrandingController} 品牌下发接口测试。
- * 守两条：① 默认值必须与旧版硬编码一致（未配置 yml 的用户界面零变化）；
+ * 守两条：① 默认值必须与 {@link BrandingProperties} 声明的产品默认一致
+ *（未配置 yml 时行为可预期，icon 默认 /Easy-Claw.png）；
  * ② 自定义配置原样下发。
  */
 class BrandingControllerTest {
@@ -21,13 +22,13 @@ class BrandingControllerTest {
     }
 
     @Test
-    void 默认值与旧版硬编码一致() throws Exception {
+    void 默认值与产品当前默认一致() throws Exception {
         mvcWith(new BrandingProperties())
                 .perform(get("/api/branding"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name").value("Easy-Claw"))
                 .andExpect(jsonPath("$.subtitle").value("AI 编程助手"))
-                .andExpect(jsonPath("$.icon").value("🦞"));
+                .andExpect(jsonPath("$.icon").value("/Easy-Claw.png"));
     }
 
     @Test

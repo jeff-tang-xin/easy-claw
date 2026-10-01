@@ -544,3 +544,72 @@ export interface OpsCommandLogPage {
   page: number;
   size: number;
 }
+
+// ============ 数据库连接目录（V30：platformAdmin 维护，归属组织/项目后下发给 spoke 供 DB 工作区使用） ============
+
+/** 数据库连接目录项视图（platformAdmin）：password 永不回显，只出 passwordSet 布尔位 */
+export interface DbConnectionDto {
+  id: number;
+  /** spoke 侧稳定标识（全局唯一，创建后不可改） */
+  serverKey: string;
+  name: string;
+  /** mysql | postgresql | sqlserver | oracle */
+  dbType: string;
+  host: string;
+  port: number;
+  /** 目标库名（连接后默认库 / 会话绑定库） */
+  databaseName: string;
+  username: string;
+  description: string;
+  /** 只读提示（勾选提示「请使用只读账号，物理防线」） */
+  readonlyHint: boolean;
+  sortOrder: number;
+  enabled: boolean;
+  /** 归属组织 id（组织必须，>0） */
+  orgId: number;
+  /** 归属项目 id；0=不限定项目 */
+  projectId: number;
+  /** 是否已设置登录密码（hub 加密保存、随目录下发 spoke；回显仅此布尔位，不含明文） */
+  passwordSet: boolean;
+}
+
+/** 数据库连接用户时效授权（一人一连接一条，重复提交=续期；过期行保留作历史） */
+export interface DbConnectionGrantDto {
+  id: number;
+  connectionId: number;
+  userId: number;
+  /** 授权用户名（后端已解析，供展示） */
+  userName: string;
+  /** ISO-8601 时间字符串 */
+  validFrom: string;
+  validUntil: string;
+  /** 操作人（platformAdmin）用户 id */
+  grantedBy: number;
+  /** 服务端判定：validUntil 已过=true */
+  expired: boolean;
+}
+
+/** 数据库查询审计记录（spoke 上报 hub 落库；operator 由 hub 按 appkey 身份补全） */
+export interface DbQueryLogDto {
+  id: number;
+  serverKey: string;
+  serverName: string;
+  dbType: string;
+  host: string;
+  databaseName: string;
+  sqlText: string;
+  /** ai | user */
+  source: string;
+  operator: string;
+  /** ISO-8601 时间字符串 */
+  executedAt: string;
+}
+
+/** 查询审计分页（后端 DbQueryLogDto.PageResponse：content/totalElements/page/size，按 executed_at 倒序） */
+export interface DbQueryLogPage {
+  content: DbQueryLogDto[];
+  totalElements: number;
+  /** 当前页码（0 起） */
+  page: number;
+  size: number;
+}

@@ -1,0 +1,235 @@
+/* 数据库工作台（DbPage）专属样式：骨架布局复用 ops.css（ops-page/ops-main/ops-side/ops-tabs/
+   ops-curtain/ops-confirm），这里只补 DB 页新增的块——消息流、版本徽标、库选择器、SQL 确认卡。 */
+
+/* 主列：tab 条 + 消息流 + 幕布，纵向排布（ops-main 是横向 flex，这里包一层） */
+.db-main-col {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 顶栏版本徽标：mysql 8.0.36 @ …（只读） */
+.db-version-badge {
+  font-size: 0.82em;
+  padding: 2px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #2a2d35);
+  color: var(--text-secondary, #9aa3af);
+  white-space: nowrap;
+}
+
+/* tab 上的运行中徽标 */
+.db-tab-busy {
+  font-size: 0.72em;
+  color: #f59e0b;
+}
+
+/* 消息流：可滚动区域，占满 tab 条与幕布之间 */
+.db-stream {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.db-msg {
+  max-width: 92%;
+  font-size: 0.92em;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.db-msg-user {
+  align-self: flex-end;
+  background: var(--accent-weak, #1e2a3a);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px 10px 2px 10px;
+  padding: 8px 12px;
+}
+
+.db-msg-info {
+  align-self: center;
+  font-size: 0.82em;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.db-msg-error {
+  align-self: flex-start;
+  color: #f87171;
+  border: 1px solid #f8717155;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.db-msg-reasoning {
+  align-self: flex-start;
+  color: var(--text-tertiary, #6b7280);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+}
+
+/* AI 回复：Markdown 渲染（表格 = db_query 结果） */
+.db-msg-text {
+  align-self: flex-start;
+  background: var(--panel, #16181d);
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 10px 10px 10px 2px;
+  padding: 10px 14px;
+}
+
+.db-msg-text > :first-child { margin-top: 0; }
+.db-msg-text > :last-child { margin-bottom: 0; }
+
+.db-msg-text table {
+  border-collapse: collapse;
+  font-size: 0.88em;
+  margin: 8px 0;
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+.db-msg-text th,
+.db-msg-text td {
+  border: 1px solid var(--border, #2a2d35);
+  padding: 4px 10px;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.db-msg-text th {
+  background: rgba(255, 255, 255, 0.04);
+  position: sticky;
+  top: 0;
+}
+
+.db-msg-text code {
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+.db-msg-text pre code {
+  display: block;
+  padding: 8px 10px;
+  overflow-x: auto;
+}
+
+/* 工具调用轨迹：折叠卡片 */
+.db-msg-tool {
+  align-self: flex-start;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.85em;
+  color: var(--text-secondary, #9aa3af);
+  max-width: 92%;
+}
+
+.db-msg-tool.running {
+  border-color: #f59e0b66;
+}
+
+.db-tool-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.db-tool-args {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 420px;
+  font-size: 0.92em;
+}
+
+.db-tool-result {
+  margin: 6px 0 0;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  max-height: 180px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-size: 0.92em;
+}
+
+/* 确认卡：真实 SQL 展示（db_query 的 sql 参数） */
+.db-confirm {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  max-width: 720px;
+}
+
+.db-confirm-body strong {
+  display: block;
+  margin-bottom: 4px;
+}
+
+.db-confirm-sql {
+  margin: 4px 0;
+  padding: 8px 10px;
+  background: rgba(250, 204, 21, 0.06);
+  border: 1px solid #facc1533;
+  border-radius: 6px;
+  font-size: 0.88em;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.db-confirm .ops-confirm-allow,
+.db-confirm .ops-confirm-deny {
+  align-self: flex-end;
+}
+
+/* 右侧栏连接项：可点击行 + 展开的库选择器 */
+.db-conn-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.db-conn-row .ops-conn-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.db-picker-arrow {
+  flex: none;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.db-picker {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--border, #2a2d35);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.db-picker-label {
+  font-size: 0.8em;
+  color: var(--text-tertiary, #6b7280);
+}
+
+.db-picker-select {
+  width: 100%;
+}
+
+.db-picker-connect {
+  width: 100%;
+}

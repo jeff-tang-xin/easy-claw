@@ -7,6 +7,13 @@ server:
     # 超限/出错时排干请求体再响应，否则 Tomcat 提前关连接，浏览器报 ERR_CONNECTION_ABORTED 且无错误信息
     max-swallow-size: -1
 spring:
+  main:
+    # 关闭 Spring Boot 的 headless 默认值：它会在启动时强制 -Djava.awt.headless=true，
+    # 导致「新建工作区 → 📁 浏览」的 JFileChooser 与自动打开浏览器（Desktop.browse）双双失效，
+    # 表现为按钮点击后静默无反应（/api/system/choose-dir 返回 null body）。
+    # 无图形界面的部署（Linux 无 X）不受影响：SystemController.hasGui 会探测并降级，
+    # 前端据此禁用浏览按钮并提示手动输入路径。
+    headless: false
   profiles:
     active: dev-sqlite,local
   application:

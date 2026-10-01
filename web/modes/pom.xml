@@ -33,5 +33,6 @@
         <module>mode-team</module>
         <module>mode-schedule</module>
         <module>mode-ops</module>
+        <module>mode-db</module>
     </modules>
 </project>

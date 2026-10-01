@@ -242,28 +242,34 @@ public class WorkspaceAgentBuilder {
         com.xinl.easyclaw.scenario.entity.ScenarioEntity activeScenario =
                 scenarioResolver.activeScenario(workspaceId);
         ScenarioBinding binding = ScenarioBinding.from(activeScenario);
-        // 运维场景：能力边界由模式自声明（AgentOrchestrator.minimalToolkit，SPI 发现）——
-        // toolkit 收缩为仅 remote_shell（见 createOpsToolkit）。
+        // 专属模式（运维/数据库）判定：按 modeId 分流（V30 修正）——
+        // 旧实现只问 minimalToolkit()（「是否最小集」）不问「哪个模式」，db 模式加入后
+        // 会被误判进 ops 分支装配 remote_shell。现在解析出 modeId 再按值分流。
         // mode 依赖是 runtime scope，web/api 不静态耦合 mode 实现，经注册表查询。
-        // <b>双保险</b>：工作区 type=ops（创建后不可变的硬约束）直接判定为运维形态，
+        // <b>双保险</b>：工作区 type=ops/db（创建后不可变的硬约束）直接判定为对应形态，
         // 不依赖场景绑定与 SPI 发现——SPI 静默降级（如重启后 classpath 缺 mode 模块）时，
-        // 场景 mode 判定会失效，若只依赖它，运维工作区会被装配出完整 toolkit（含本地文件工具），
-        // 造成运维智能体触碰本地文件系统的事故。type 与场景判定任一命中即收缩 toolkit：
+        // 场景 mode 判定会失效，若只依赖它，专属工作区会被装配出完整 toolkit（含本地文件工具），
+        // 造成专属智能体触碰本地文件系统的事故。type 与场景判定任一命中即收缩 toolkit：
         // 宁可少给工具，不可多给。
-        boolean scenarioOps = activeScenario != null
-                && com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(activeScenario.getMode())
-                        .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::minimalToolkit)
-                        .orElse(false);
+        String activeModeId = activeScenario == null ? null
+                : com.xinl.easyclaw.base.orchestration.OrchestrationModes.find(activeScenario.getMode())
+                        .map(com.xinl.easyclaw.base.orchestration.AgentOrchestrator::modeId)
+                        .orElse(null);
         boolean typeOps = "ops".equals(workspaceType);
-        boolean opsMode = typeOps || scenarioOps;
-        if (typeOps && !scenarioOps) {
-            log.warn("工作区 [{}] type=ops 但场景 mode 判定未命中最小 toolkit"
-                            + "（scenario={}, SPI 发现={}），已按工作区类型强制收缩 toolkit",
+        boolean typeDb = "db".equals(workspaceType);
+        boolean opsMode = typeOps || "ops".equals(activeModeId);
+        boolean dbMode = typeDb || "db".equals(activeModeId);
+        if (typeOps && !"ops".equals(activeModeId)) {
+            log.warn("工作区 [{}] type=ops 但场景 mode 判定未命中 ops"
+                            + "（scenario={}），已按工作区类型强制收缩 toolkit",
                     workspaceId,
-                    activeScenario == null ? "无绑定" : activeScenario.getMode(),
-                    activeScenario == null ? "-"
-                            : com.xinl.easyclaw.base.orchestration.OrchestrationModes
-                                    .find(activeScenario.getMode()).isPresent());
+                    activeScenario == null ? "无绑定" : activeScenario.getMode());
+        }
+        if (typeDb && !"db".equals(activeModeId)) {
+            log.warn("工作区 [{}] type=db 但场景 mode 判定未命中 db"
+                            + "（scenario={}），已按工作区类型强制收缩 toolkit",
+                    workspaceId,
+                    activeScenario == null ? "无绑定" : activeScenario.getMode());
         }
         // 把绑定的 MCP 服务名展开成工具名，供子 Agent 工具白名单使用。
         // 必须在 loadMerged 之前完成：白名单一刀切，只有档位工具 ∪ MCP 工具并起来才完整。
@@ -308,12 +314,14 @@ public class WorkspaceAgentBuilder {
                 .model(agentModel)
                 .toolkit(opsMode
                         ? agentFactory.createOpsToolkit()
-                        : agentFactory.createWorkspaceToolkit(
-                                binding.hasMcpBinding() ? binding.mcpServices() : null))
+                        : dbMode
+                                ? agentFactory.createDbToolkit()
+                                : agentFactory.createWorkspaceToolkit(
+                                        binding.hasMcpBinding() ? binding.mcpServices() : null))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
                 .workspace(agentRoot)
                 .filesystem(fsSpec)
-                .permissionContext(buildPermissionContext(workspaceId, !opsMode))
+                .permissionContext(buildPermissionContext(workspaceId, !(opsMode || dbMode)))
                 .stateStore(new JsonFileAgentStateStore(stateDir(agentRoot, agentId)))
                 .projectGlobalSkillsDir(globalSkillsDir)
                 // 禁用 harness 自带的会话文件持久化（.easyClaw/agent/<userId>/agents/...jsonl），

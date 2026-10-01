@@ -6,6 +6,7 @@ import com.xinl.easyclaw.api.WorkspaceAccessGuard;
 import com.xinl.easyclaw.config.AgentScopeProperties;
 import com.xinl.easyclaw.config.CloudBootstrapService;
 import com.xinl.easyclaw.config.CloudFeatureGate;
+import com.xinl.easyclaw.db.service.DbConnectionService;
 import com.xinl.easyclaw.ops.service.SshConnectionService;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
 import org.junit.jupiter.api.BeforeEach;
@@ -58,7 +59,8 @@ class ChatWebSocketHandlerTest {
                 mock(ToolConfirmValidator.class),
                 new AgentScopeProperties(),
                 new CloudFeatureGate(cloudBootstrap),
-                mock(SshConnectionService.class));
+                mock(SshConnectionService.class),
+                mock(DbConnectionService.class));
         connection = mock(WebSocketSession.class);
         when(connection.getId()).thenReturn("conn-1");
         when(connection.isOpen()).thenReturn(true);
@@ -110,6 +112,6 @@ class ChatWebSocketHandlerTest {
 
     private static CloudBootstrapService.CloudSnapshot snapshot(Map<String, Boolean> flags) {
         return new CloudBootstrapService.CloudSnapshot("Acme", "acme", List.of(), List.of(),
-                flags, Set.of(), List.of(), List.of(), List.of(), Instant.now());
+                flags, Set.of(), List.of(), List.of(), List.of(), List.of(), Instant.now());
     }
 }

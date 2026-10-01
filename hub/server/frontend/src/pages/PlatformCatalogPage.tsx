@@ -1,16 +1,23 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {
   adminListUsers,
+  createDbConnection,
+  createDbConnectionGrant,
   createOpsServer,
   createOpsServerCategory,
   createOpsServerGrant,
   createPlatformFlag,
   createPlatformMenu,
+  deleteDbConnection,
+  deleteDbConnectionGrant,
   deleteOpsGrant,
   deleteOpsServer,
   deleteOpsServerCategory,
   deletePlatformFlag,
   deletePlatformMenu,
+  listDbConnectionGrants,
+  listDbConnections,
+  listDbQueryLogs,
   listOpsServerCommandLogs,
   listOpsServerCategories,
   listOpsServerGrants,
@@ -21,6 +28,7 @@ import {
   listPlatformTools,
   listProjects,
   setPlatformToolEnabled,
+  updateDbConnection,
   updateOpsServer,
   updateOpsServerCategory,
   updatePlatformFlag,
@@ -28,6 +36,10 @@ import {
 } from '../api';
 import Modal from '../components/Modal';
 import type {
+  DbConnectionDto,
+  DbConnectionGrantDto,
+  DbQueryLogDto,
+  DbQueryLogPage,
   FeatureFlagDto,
   MenuItemDto,
   OpsCommandLogDto,
@@ -46,13 +58,14 @@ interface Props {
   platformAdmin: boolean;
 }
 
-type TabKey = 'menus' | 'flags' | 'tools' | 'ops';
+type TabKey = 'menus' | 'flags' | 'tools' | 'ops' | 'db';
 
 const TABS: {key: TabKey; label: string}[] = [
   {key: 'menus', label: '菜单'},
   {key: 'flags', label: '功能开关'},
   {key: 'tools', label: '工具'},
   {key: 'ops', label: '运维服务器'},
+  {key: 'db', label: '数据库连接'},
 ];
 
 /**
@@ -103,6 +116,7 @@ export default function PlatformCatalogPage({platformAdmin}: Props) {
       {tab === 'flags' && <PlatformFlagsTab />}
       {tab === 'tools' && <PlatformToolsTab />}
       {tab === 'ops' && <PlatformOpsServersTab />}
+      {tab === 'db' && <PlatformDbConnectionsTab />}
     </div>
   );
 }
@@ -1840,6 +1854,808 @@ function OpsCommandLogsModal({server, onClose}: {server: OpsServerDto; onClose: 
           <div className="page-head" style={{marginTop: 8}}>
             <span className="muted">
               第 {data.page + 1} / {totalPages} 页 · 共 {data.total} 条
+            </span>
+            <div className="page-head-right">
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void load(page - 1)}
+                disabled={page <= 0 || loading}
+              >
+                ← 上一页
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm"
+                onClick={() => void load(page + 1)}
+                disabled={page + 1 >= totalPages || loading}
+              >
+                下一页 →
+              </button>
+            </div>
+          </div>
+        </>
+      )}
+    </Modal>
+  );
+}
+
+// ============ 数据库连接 tab（V30）：列表 + 新建/编辑 + 授权 + 查询审计 ============
+
+/** 数据库类型下拉选项 */
+const DB_TYPES: {value: string; label: string}[] = [
+  {value: 'mysql', label: 'MySQL'},
+  {value: 'postgresql', label: 'PostgreSQL'},
+  {value: 'sqlserver', label: 'SQL Server'},
+  {value: 'oracle', label: 'Oracle'},
+];
+
+const DB_TYPE_LABEL: Record<string, string> = {
+  mysql: 'MySQL',
+  postgresql: 'PostgreSQL',
+  sqlserver: 'SQL Server',
+  oracle: 'Oracle',
+};
+
+interface DbConnectionForm {
+  serverKey: string;
+  name: string;
+  dbType: string;
+  host: string;
+  port: number;
+  databaseName: string;
+  username: string;
+  description: string;
+  readonlyHint: boolean;
+  sortOrder: number;
+  enabled: boolean;
+  orgId: number;
+  projectId: number;
+  password: string;
+}
+
+const emptyDbConnectionForm = (): DbConnectionForm => ({
+  serverKey: '',
+  name: '',
+  dbType: 'mysql',
+  host: '',
+  port: 3306,
+  databaseName: '',
+  username: '',
+  description: '',
+  readonlyHint: true,
+  sortOrder: 0,
+  enabled: true,
+  orgId: 0,
+  projectId: 0,
+  password: '',
+});
+
+/** 数据库连接目录：归属组织/项目后按归属下发给 spoke 供 DB 工作区使用；未归属（orgId=0）不下发。 */
+function PlatformDbConnectionsTab() {
+  const [conns, setConns] = useState<DbConnectionDto[] | null>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [modal, setModal] = useState<null | {mode: 'create'} | {mode: 'edit'; item: DbConnectionDto}>(null);
+  const [grantsFor, setGrantsFor] = useState<DbConnectionDto | null>(null);
+  const [logsFor, setLogsFor] = useState<DbConnectionDto | null>(null);
+  // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量；项目按组织逐个拉，失败降级为空
+  const [orgNames, setOrgNames] = useState<Map<number, string>>(new Map());
+  const [projectNames, setProjectNames] = useState<Map<number, string>>(new Map());
+
+  const reload = useCallback(async () => {
+    try {
+      const list = await listDbConnections();
+      setConns(list);
+      setError('');
+      const orgIds = [...new Set(list.map((c) => c.orgId).filter((id) => id > 0))];
+      const [orgOpts, projectLists] = await Promise.all([
+        listOrgOptions().catch(() => [] as OrgOptionDto[]),
+        Promise.all(orgIds.map((orgId) => listProjects(orgId).catch(() => [] as ProjectDto[]))),
+      ]);
+      setOrgNames(new Map(orgOpts.map((o) => [o.id, o.name])));
+      const pMap = new Map<number, string>();
+      for (const projects of projectLists) {
+        for (const p of projects) pMap.set(p.id, p.name);
+      }
+      setProjectNames(pMap);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载数据库连接目录失败');
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const onToggle = async (c: DbConnectionDto) => {
+    setBusy(true);
+    setError('');
+    try {
+      await updateDbConnection(c.id, {enabled: !c.enabled});
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const onDelete = async (c: DbConnectionDto) => {
+    if (!window.confirm(`确定删除数据库连接「${c.name}」？该操作不可恢复。`)) return;
+    setBusy(true);
+    setError('');
+    try {
+      await deleteDbConnection(c.id);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '删除失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      {error && <div className="form-error">{error}</div>}
+      {conns == null && !error && <div className="empty-hint">加载中…</div>}
+
+      {conns != null && (
+        <div className="card">
+          <div className="page-head" style={{marginBottom: 8}}>
+            <span className="muted">共 {conns.length} 个连接</span>
+            <div className="page-head-right">
+              <button type="button" className="btn btn-primary" onClick={() => setModal({mode: 'create'})}>
+                ＋ 新增数据库连接
+              </button>
+            </div>
+          </div>
+          {conns.length === 0 ? (
+            <div className="empty-state">
+              <h3>暂无数据库连接</h3>
+              <p>新增连接并归属组织/项目后，spoke 侧 DB 工作区即可看到。</p>
+            </div>
+          ) : (
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>连接</th>
+                  <th>类型</th>
+                  <th>地址</th>
+                  <th>库名</th>
+                  <th>账号</th>
+                  <th>只读</th>
+                  <th>组织 / 项目</th>
+                  <th>排序</th>
+                  <th>状态</th>
+                  <th>操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                {conns.map((c) => (
+                  <tr key={c.id} className={c.enabled ? '' : 'menu-row-disabled'}>
+                    <td>
+                      <div className="menu-label">
+                        <span>{c.name}</span>
+                      </div>
+                      <code className="muted menu-key">{c.serverKey}</code>
+                    </td>
+                    <td style={{whiteSpace: 'nowrap'}}>{DB_TYPE_LABEL[c.dbType] ?? c.dbType}</td>
+                    <td style={{whiteSpace: 'nowrap'}}>
+                      {c.host}:{c.port}
+                    </td>
+                    <td>{c.databaseName || '—'}</td>
+                    <td>{c.username || '—'}</td>
+                    <td>
+                      {c.readonlyHint ? (
+                        <span className="badge audit-ok" title="只读提示：请使用只读账号，物理防线">
+                          只读
+                        </span>
+                      ) : (
+                        <span className="muted">—</span>
+                      )}
+                    </td>
+                    <td>
+                      {c.orgId > 0 ? (
+                        <>
+                          {orgNames.get(c.orgId) ?? `#${c.orgId}`}
+                          {c.projectId > 0 && <> / {projectNames.get(c.projectId) ?? `#${c.projectId}`}</>}
+                        </>
+                      ) : (
+                        <span className="badge badge-archived">未归属</span>
+                      )}
+                    </td>
+                    <td>{c.sortOrder}</td>
+                    <td>
+                      <button
+                        type="button"
+                        className={c.enabled ? 'menu-toggle on' : 'menu-toggle off'}
+                        onClick={() => onToggle(c)}
+                        disabled={busy}
+                        title={c.enabled ? '点击停用' : '点击启用'}
+                      >
+                        {c.enabled ? '启用' : '停用'}
+                      </button>
+                    </td>
+                    <td className="col-actions">
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setLogsFor(c)}>
+                        查询审计
+                      </button>
+                      <button type="button" className="btn btn-ghost btn-sm" onClick={() => setGrantsFor(c)}>
+                        授权
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm"
+                        onClick={() => setModal({mode: 'edit', item: c})}
+                      >
+                        编辑
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-sm menu-del"
+                        onClick={() => onDelete(c)}
+                        disabled={busy}
+                      >
+                        删除
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {modal && (
+        <DbConnectionFormModal
+          mode={modal.mode}
+          item={modal.mode === 'edit' ? modal.item : null}
+          onClose={() => setModal(null)}
+          onSaved={() => {
+            setModal(null);
+            void reload();
+          }}
+        />
+      )}
+      {grantsFor && (
+        <DbConnectionGrantsModal
+          connection={grantsFor}
+          onClose={() => {
+            setGrantsFor(null);
+            void reload();
+          }}
+        />
+      )}
+      {logsFor && <DbQueryLogsModal connection={logsFor} onClose={() => setLogsFor(null)} />}
+    </>
+  );
+}
+
+/** 新增/编辑数据库连接弹窗：组织下拉 → 联动项目下拉（仅 active）；编辑回显归属。
+ *  dbType 下拉四选；readonlyHint 勾选框带提示「请使用只读账号，物理防线」。 */
+function DbConnectionFormModal({
+  mode,
+  item,
+  onClose,
+  onSaved,
+}: {
+  mode: 'create' | 'edit';
+  item: DbConnectionDto | null;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const [form, setForm] = useState<DbConnectionForm>(() =>
+    item
+      ? {
+          serverKey: item.serverKey,
+          name: item.name,
+          dbType: item.dbType,
+          host: item.host,
+          port: item.port,
+          databaseName: item.databaseName,
+          username: item.username,
+          description: item.description,
+          readonlyHint: item.readonlyHint,
+          sortOrder: item.sortOrder,
+          enabled: item.enabled,
+          orgId: item.orgId,
+          projectId: item.projectId,
+          password: '',
+        }
+      : emptyDbConnectionForm(),
+  );
+  const [orgOptions, setOrgOptions] = useState<OrgOptionDto[]>([]);
+  const [projects, setProjects] = useState<ProjectDto[]>([]);
+  const [projectsLoading, setProjectsLoading] = useState(false);
+  const [projectsError, setProjectsError] = useState('');
+  const [formError, setFormError] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  // 组织下拉一次拉全量；失败降级为空（仍可保存其余字段，归属可后补）
+  useEffect(() => {
+    listOrgOptions()
+      .then(setOrgOptions)
+      .catch(() => setOrgOptions([]));
+  }, []);
+
+  const loadProjects = useCallback(async (orgId: number, keepProjectId = 0) => {
+    setProjects([]);
+    setProjectsError('');
+    if (orgId <= 0) return;
+    setProjectsLoading(true);
+    try {
+      const list = await listProjects(orgId);
+      // 仅 active 项目可选；编辑回显时当前项目即使已归档也要保留在选项里，否则 select 显示不出来
+      setProjects(list.filter((p) => p.status === 'active' || p.id === keepProjectId));
+    } catch (err) {
+      // platformAdmin 可能不是该组织成员（后端 403）：降级为空列表并提示，不阻塞表单
+      setProjectsError(err instanceof Error ? err.message : '项目列表加载失败');
+    } finally {
+      setProjectsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (item && item.orgId > 0) void loadProjects(item.orgId, item.projectId);
+  }, [item, loadProjects]);
+
+  const setField = <K extends keyof DbConnectionForm>(key: K, value: DbConnectionForm[K]) =>
+    setForm((f) => ({...f, [key]: value}));
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    const name = form.name.trim();
+    const host = form.host.trim();
+    if (!name) {
+      setFormError('请填写名称');
+      return;
+    }
+    if (!host) {
+      setFormError('请填写主机地址');
+      return;
+    }
+    if (!Number.isInteger(form.port) || form.port < 1 || form.port > 65535) {
+      setFormError('端口需为 1-65535 的整数');
+      return;
+    }
+    if (!form.databaseName.trim()) {
+      setFormError('请填写数据库名');
+      return;
+    }
+    if (!form.username.trim()) {
+      setFormError('请填写登录账号');
+      return;
+    }
+    const serverKey = form.serverKey.trim();
+    if (mode === 'create' && serverKey && !/^[a-z0-9_-]+$/.test(serverKey)) {
+      setFormError('连接标识仅允许小写字母、数字、下划线与连字符');
+      return;
+    }
+    if (form.orgId <= 0) {
+      setFormError('请选择归属组织');
+      return;
+    }
+    setBusy(true);
+    try {
+      if (mode === 'create') {
+        await createDbConnection({
+          serverKey: serverKey || undefined,
+          name,
+          dbType: form.dbType,
+          host,
+          port: form.port,
+          databaseName: form.databaseName.trim(),
+          username: form.username.trim(),
+          description: form.description.trim() || undefined,
+          readonlyHint: form.readonlyHint,
+          sortOrder: form.sortOrder,
+          enabled: form.enabled,
+          orgId: form.orgId,
+          projectId: form.projectId,
+          password: form.password || undefined,
+        });
+      } else if (item) {
+        await updateDbConnection(item.id, {
+          name,
+          dbType: form.dbType,
+          host,
+          port: form.port,
+          databaseName: form.databaseName.trim(),
+          username: form.username.trim(),
+          description: form.description.trim(),
+          readonlyHint: form.readonlyHint,
+          sortOrder: form.sortOrder,
+          enabled: form.enabled,
+          orgId: form.orgId,
+          projectId: form.projectId,
+          // 编辑留空 = 不传该字段 = 保持原密码（服务端 null 语义）；填了才覆盖
+          password: form.password || undefined,
+        });
+      }
+      onSaved();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal title={mode === 'create' ? '新增数据库连接' : '编辑数据库连接'} onClose={onClose}>
+      <form className="modal-form" onSubmit={(e) => void submit(e)}>
+        <label>
+          名称 *
+          <input
+            value={form.name}
+            onChange={(e) => setField('name', e.target.value)}
+            placeholder="如：生产 MySQL 主库"
+            autoFocus
+          />
+        </label>
+        <label>
+          连接标识
+          {mode === 'create' ? (
+            <input
+              value={form.serverKey}
+              onChange={(e) => setField('serverKey', e.target.value)}
+              placeholder="留空则按名称自动生成；仅小写字母/数字/_/-，创建后不可改"
+            />
+          ) : (
+            <input value={form.serverKey} disabled />
+          )}
+        </label>
+        <label>
+          数据库类型 *
+          <select value={form.dbType} onChange={(e) => setField('dbType', e.target.value)}>
+            {DB_TYPES.map((t) => (
+              <option key={t.value} value={t.value}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          主机地址 *
+          <input value={form.host} onChange={(e) => setField('host', e.target.value)} placeholder="IP 或域名" />
+        </label>
+        <label>
+          端口 *
+          <input
+            type="number"
+            value={form.port}
+            onChange={(e) => setField('port', Number(e.target.value))}
+            placeholder="如 3306 / 5432 / 1433 / 1521"
+          />
+        </label>
+        <label>
+          数据库名 *
+          <input
+            value={form.databaseName}
+            onChange={(e) => setField('databaseName', e.target.value)}
+            placeholder="连接后默认库 / 会话绑定库"
+          />
+        </label>
+        <label>
+          登录账号 *
+          <input value={form.username} onChange={(e) => setField('username', e.target.value)} />
+        </label>
+        <label>
+          登录密码
+          <input
+            type="password"
+            value={form.password}
+            onChange={(e) => setField('password', e.target.value)}
+            placeholder={mode === 'edit' ? '留空保持原密码' : '连接数据库用'}
+          />
+        </label>
+        <label>
+          描述
+          <input value={form.description} onChange={(e) => setField('description', e.target.value)} />
+        </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={form.readonlyHint}
+            onChange={(e) => setField('readonlyHint', e.target.checked)}
+          />
+          只读提示
+          <span className="field-hint">请使用只读账号，物理防线</span>
+        </label>
+        <label>
+          排序
+          <input
+            type="number"
+            value={form.sortOrder}
+            onChange={(e) => setField('sortOrder', Number(e.target.value))}
+          />
+        </label>
+        <label>
+          归属组织 *
+          <select
+            value={form.orgId}
+            onChange={(e) => {
+              const orgId = Number(e.target.value);
+              setField('orgId', orgId);
+              setField('projectId', 0);
+              void loadProjects(orgId);
+            }}
+          >
+            <option value={0}>选择组织…</option>
+            {orgOptions.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          归属项目
+          <select
+            value={form.projectId}
+            onChange={(e) => setField('projectId', Number(e.target.value))}
+            disabled={form.orgId <= 0 || projectsLoading}
+          >
+            <option value={0}>不限定项目</option>
+            {projects.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+          {projectsError && <span className="field-hint">{projectsError}</span>}
+        </label>
+        <label className="checkbox-label">
+          <input
+            type="checkbox"
+            checked={form.enabled}
+            onChange={(e) => setField('enabled', e.target.checked)}
+          />
+          启用
+        </label>
+        {formError && <div className="form-error">{formError}</div>}
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose}>
+            取消
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? '保存中…' : '保存'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** 数据库连接授权管理弹窗：用户时效授权（一人一连接一条，重复提交=续期）。 */
+function DbConnectionGrantsModal({
+  connection,
+  onClose,
+}: {
+  connection: DbConnectionDto;
+  onClose: () => void;
+}) {
+  const [grants, setGrants] = useState<DbConnectionGrantDto[] | null>(null);
+  const [users, setUsers] = useState<UserDto[]>([]);
+  const [error, setError] = useState('');
+  const [formError, setFormError] = useState('');
+  const [userId, setUserId] = useState('');
+  const [validUntil, setValidUntil] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [revokingId, setRevokingId] = useState<number | null>(null);
+
+  const reload = useCallback(async () => {
+    try {
+      setGrants(await listDbConnectionGrants(connection.id));
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载授权清单失败');
+    }
+  }, [connection.id]);
+
+  useEffect(() => {
+    void reload();
+    // 用户下拉：platformAdmin 全量用户清单；失败降级为空（提交时服务端仍会校验）
+    adminListUsers()
+      .then(setUsers)
+      .catch(() => setUsers([]));
+  }, [reload]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError('');
+    if (!userId) {
+      setFormError('请选择用户');
+      return;
+    }
+    if (!validUntil) {
+      setFormError('请选择有效期至');
+      return;
+    }
+    setBusy(true);
+    try {
+      // datetime-local 值按本地时区解析，转 ISO-8601 提交
+      await createDbConnectionGrant(connection.id, Number(userId), new Date(validUntil).toISOString());
+      setUserId('');
+      setValidUntil('');
+      await reload();
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '授权失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const revoke = async (g: DbConnectionGrantDto) => {
+    if (!window.confirm(`确定撤销用户 ${g.userName} 对「${connection.name}」的授权？`)) return;
+    setRevokingId(g.id);
+    setError('');
+    try {
+      await deleteDbConnectionGrant(g.id);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '撤销失败');
+    } finally {
+      setRevokingId(null);
+    }
+  };
+
+  return (
+    <Modal
+      title={`授权管理 · ${connection.name}`}
+      subtitle={`${connection.serverKey} · ${connection.host}:${connection.port}/${connection.databaseName}`}
+      onClose={onClose}
+      width={680}
+    >
+      {error && <div className="form-error">{error}</div>}
+      {grants == null && !error && <div className="empty-hint">加载中…</div>}
+      {grants != null &&
+        (grants.length === 0 ? (
+          <div className="empty-hint">暂无授权记录</div>
+        ) : (
+          <table className="data-table" style={{marginBottom: 16}}>
+            <thead>
+              <tr>
+                <th>用户</th>
+                <th>有效期</th>
+                <th>状态</th>
+                <th>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {grants.map((g) => (
+                <tr key={g.id} className={g.expired ? 'menu-row-disabled' : ''}>
+                  <td>{g.userName}</td>
+                  <td style={{whiteSpace: 'nowrap'}}>
+                    {formatGrantTime(g.validFrom)} ~ {formatGrantTime(g.validUntil)}
+                  </td>
+                  <td>
+                    <span className={g.expired ? 'badge audit-fail' : 'badge audit-ok'}>
+                      {g.expired ? '已过期' : '有效'}
+                    </span>
+                  </td>
+                  <td className="col-actions">
+                    <button
+                      type="button"
+                      className="btn btn-ghost btn-sm menu-del"
+                      onClick={() => void revoke(g)}
+                      disabled={busy || revokingId === g.id}
+                    >
+                      撤销
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ))}
+
+      <form className="modal-form" onSubmit={(e) => void submit(e)}>
+        <label>
+          用户
+          <select value={userId} onChange={(e) => setUserId(e.target.value)}>
+            <option value="">选择用户…</option>
+            {users.map((u) => (
+              <option key={u.id} value={u.id}>
+                {u.displayName ? `${u.displayName}（${u.username}）` : u.username}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          有效期至 *
+          <input type="datetime-local" value={validUntil} onChange={(e) => setValidUntil(e.target.value)} />
+          <span className="field-hint">同一用户重复提交=续期（更新有效期）</span>
+        </label>
+        {formError && <div className="form-error">{formError}</div>}
+        <div className="modal-actions">
+          <button type="button" className="btn" onClick={onClose}>
+            关闭
+          </button>
+          <button type="submit" className="btn btn-primary" disabled={busy}>
+            {busy ? '提交中…' : '授权'}
+          </button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+/** 查询审计记录弹窗：按执行时间倒序分页（Spring Page 形状），AI/用户来源徽标区分。 */
+function DbQueryLogsModal({connection, onClose}: {connection: DbConnectionDto; onClose: () => void}) {
+  const PAGE_SIZE = 50;
+  const [page, setPage] = useState(0);
+  const [data, setData] = useState<DbQueryLogPage | null>(null);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async (p: number) => {
+    setLoading(true);
+    setError('');
+    try {
+      const result = await listDbQueryLogs(connection.id, p, PAGE_SIZE);
+      setData(result);
+      setPage(p);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '加载查询审计失败');
+    } finally {
+      setLoading(false);
+    }
+  }, [connection.id]);
+
+  useEffect(() => {
+    void load(0);
+  }, [load]);
+
+  const totalPages = data ? Math.max(1, Math.ceil(data.totalElements / data.size)) : 1;
+
+  return (
+    <Modal
+      title={`查询审计 — ${connection.name}`}
+      subtitle={connection.serverKey}
+      onClose={onClose}
+      width={760}
+    >
+      {error && <div className="form-error">{error}</div>}
+      {loading && <div className="empty-hint">加载中…</div>}
+      {!loading && !error && data && data.content.length === 0 && (
+        <div className="empty-hint">暂无查询审计记录</div>
+      )}
+      {!loading && !error && data && data.content.length > 0 && (
+        <>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>时间</th>
+                <th>操作人</th>
+                <th>类型</th>
+                <th>SQL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.content.map((log) => (
+                <tr key={log.id}>
+                  <td style={{whiteSpace: 'nowrap'}}>{new Date(log.executedAt).toLocaleString()}</td>
+                  <td>{log.operator || '—'}</td>
+                  <td>
+                    {log.source === 'ai' ? (
+                      <span className="badge audit-ok">AI</span>
+                    ) : (
+                      <span className="badge audit-fail">用户</span>
+                    )}
+                  </td>
+                  <td>
+                    <code className="audit-action">{log.sqlText}</code>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="page-head" style={{marginTop: 8}}>
+            <span className="muted">
+              第 {data.page + 1} / {totalPages} 页 · 共 {data.totalElements} 条
             </span>
             <div className="page-head-right">
               <button

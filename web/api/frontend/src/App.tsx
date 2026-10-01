@@ -6,6 +6,7 @@ import {CloudMenuItem, loadCloudConfig, startCloudConfigPolling, useCloudConfig}
 import WorkspacesPage from './pages/WorkspacesPage';
 import ChatPage from './pages/ChatPage';
 import OpsPage from './pages/OpsPage';
+import DbPage from './pages/DbPage';
 import SkillsPage from './pages/SkillsPage';
 import ScenariosPage from './pages/ScenariosPage';
 import ToolsPage from './pages/ToolsPage';
@@ -158,10 +159,16 @@ export default function App() {
           <Route path="/workspaces" element={<Navigate to="/workspaces/single" replace />} />
           {/* 旧运维菜单 path 兜底：运维已改为固定内置 workspace，入口是无参 /ops */}
           <Route path="/workspaces/ops" element={<Navigate to="/ops" replace />} />
+          {/* DB 工作区 path 兜底（V30）：同 ops，入口是无参 /db */}
+          <Route path="/workspaces/db" element={<Navigate to="/db" replace />} />
           <Route path="/workspaces/:wsType" element={<WorkspacesPage />} />
           <Route path="/chat/:workspaceId" element={<ChatPage />} />
           <Route path="/ops" element={<OpsPage />} />
           <Route path="/ops/:workspaceId" element={<OpsPage />} />
+          {/* DB 工作区（V30）：固定内置工作区，入口是无参 /db（同 ops 模式，本地菜单不展示，
+              cloud 模式由 hub 下发菜单树决定） */}
+          <Route path="/db" element={<DbPage />} />
+          <Route path="/db/:workspaceId" element={<DbPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/tools" element={<ToolsPage />} />

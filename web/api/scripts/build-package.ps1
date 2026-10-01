@@ -16,7 +16,7 @@ param(
     [string]$Version = "",
     [switch]$SkipFrontend,
     [switch]$RunTests,
-    [string]$JdkPath = "C:\Users\xinl.tang\.vfox\cache\java\v-21.0.12-graal\java-21.0.12-graal",
+    [string]$JdkPath = "C:\Users\m1820\.vfox\cache\java\v-21.0.12-graal\java-21.0.12-graal",
     [int]$JdkVersion = 21
 )
 

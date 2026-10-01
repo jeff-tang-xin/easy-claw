@@ -54,10 +54,37 @@ public class SystemDataSeeder {
         seedDingtalkTemplate();
         seedFeishuTemplate();
         seedWecomTemplate();
+        seedBuiltinDbService();
         seedBuiltinSubagents();
         seedScenarios();
         backfillWorkspaceType();
         log.info("系统内置数据播种完成");
+    }
+
+    /**
+     * 播种内置数据库 MCP 服务 {@code easyclaw-db}（设计定稿 §4.0.1 双消费壳之二）。
+     * <p>
+     * 与 HTTP_TOOL 模板不同：它不是「可复制模板」而是直接可用的 SYSTEM 服务——
+     * transport=BUILTIN，connect 时由 McpConnectionServiceImpl 进程内装配 DbMcpTools
+     * 的三个工具（db_status/db_schema/db_query），工具实现委托 db 服务层，
+     * 连接数据来自 hub 下发快照（授权闭环由 DbConnectionGuard 兜底）。
+     */
+    private void seedBuiltinDbService() {
+        Optional<McpServiceEntity> existing = mcpRepo.findByNameAndScope("easyclaw-db", "SYSTEM");
+        if (existing.isPresent()) {
+            return;
+        }
+        McpServiceEntity entity = McpServiceEntity.builder()
+                .name("easyclaw-db")
+                .description("【内置】数据库查询服务：db_status / db_schema / db_query。"
+                        + "连接来自平台下发的授权数据库（DB 页面建立连接后可用），仅允许只读查询，"
+                        + "所有 AI 查询都会上报平台审计。")
+                .transport("BUILTIN")
+                .scope("SYSTEM")
+                .isConnected(false)
+                .build();
+        mcpRepo.save(entity);
+        log.info("播种内置数据库 MCP 服务: easyclaw-db");
     }
 
     /**
@@ -353,6 +380,16 @@ public class SystemDataSeeder {
                         3. 高危操作（删除、重启、改配置、杀进程）先用一句话提示风险并给可回滚方案；其余直接执行。
                         4. 不确定服务器状态时先用只读命令确认（ps、df、free、systemctl status 等），再动手。
                         5. 用户在终端直敲的命令不经过你；中文英文提问都正常处理。""", null);
+        upsertScenario("db", "数据库助手", "🗄️",
+                "你通过只读 SQL 协助用户查询数据库：查数据、看结构、分析问题。"
+                        + "你从不直接改动数据库——写操作只产出脚本交人工执行。",
+                "db", """
+                        方法论：数据库协助——你通过 db_query 执行只读 SQL，结果以表格返回。
+                        1. 回复克制：给结论和下一步，不复述流程、不抄结果表。
+                        2. 只读红线：仅 SELECT/WITH；写操作只产出脚本并说明风险与回滚，绝不尝试执行。
+                        3. 先结构后数据：不确定表结构先 db_schema；大表先 LIMIT 采样，禁止 SELECT * 无界查询。
+                        4. 方言意识：分页/元数据/EXPLAIN 语法随数据库类型调整（MySQL LIMIT、PG LIMIT、SQL Server TOP/OFFSET、Oracle FETCH FIRST/ROWNUM）。
+                        5. 生产库意识：EXPLAIN 优先于直接跑重查询；结果含敏感数据时引用须脱敏。""", null);
     }
 
     private void upsertScenario(String name, String displayName, String icon, String description,

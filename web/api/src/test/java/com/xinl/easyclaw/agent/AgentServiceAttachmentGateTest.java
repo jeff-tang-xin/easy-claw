@@ -38,7 +38,7 @@ class AgentServiceAttachmentGateTest {
         when(bootstrap.snapshot()).thenReturn(new CloudBootstrapService.CloudSnapshot(
                 "Acme", "acme", List.of(), List.of(),
                 Map.of("allow_attachments", false), java.util.Set.of(),
-                List.of(), List.of(), List.of(), Instant.now()));
+                List.of(), List.of(), List.of(), List.of(), Instant.now()));
         AgentService service = new AgentService(
                 mock(WorkspaceManager.class),
                 mock(AgentFactory.class),

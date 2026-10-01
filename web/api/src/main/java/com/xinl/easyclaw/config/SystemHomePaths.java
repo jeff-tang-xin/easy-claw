@@ -33,6 +33,11 @@ public final class SystemHomePaths {
         return systemHome().resolve("ops");
     }
 
+    /** 数据库工作区根目录（type=db 工作区的默认工作空间，V30，与 ops 同构） */
+    public static Path dbWorkspaceRoot() {
+        return systemHome().resolve("db");
+    }
+
     /** 系统元数据库 */
     public static Path databaseFile() {
         return systemHome().resolve("ai-assistant.db");

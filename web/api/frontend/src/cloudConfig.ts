@@ -46,12 +46,31 @@ export interface CloudShellCommand {
   subcommands: string[];
 }
 
+/** 平台下发的数据库连接（V30，同 ops 口径：凭证不下发浏览器，hasPassword 预判一键连接） */
+export interface CloudDbConnection {
+  serverKey: string;
+  name: string;
+  /** 数据库类型：mysql / postgresql / sqlserver / oracle */
+  dbType: string;
+  host: string;
+  port: number;
+  /** 目录默认库（连接时预选） */
+  databaseName: string;
+  username: string;
+  description: string;
+  /** hub 侧只读标记（行为层提示；物理防线是 DB 只读账号） */
+  readonlyHint: boolean;
+  projectId: number | null;
+  hasPassword?: boolean;
+}
+
 export interface CloudConfig {
   cloudMode: boolean;
   available: boolean;
   menu: CloudMenuItem[];
   opsServers: CloudOpsServer[];
   shellCommands: CloudShellCommand[];
+  dbConnections: CloudDbConnection[];
 }
 
 const DEFAULT_CONFIG: CloudConfig = {
@@ -60,6 +79,7 @@ const DEFAULT_CONFIG: CloudConfig = {
   menu: [],
   opsServers: [],
   shellCommands: [],
+  dbConnections: [],
 };
 
 let current: CloudConfig = DEFAULT_CONFIG;

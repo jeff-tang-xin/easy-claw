@@ -36,6 +36,9 @@ import type {
   CreditBalanceDto,
   CreditUsageDto,
   CreditGrantSummaryDto,
+  DbConnectionDto,
+  DbConnectionGrantDto,
+  DbQueryLogPage,
   RoleMatrixResponse,
   TokenResponse,
   UserDto,
@@ -638,4 +641,76 @@ export const listOpsServerCommandLogs = (serverId: number, page: number, size: n
   params.set('page', String(page));
   params.set('size', String(size));
   return request<OpsCommandLogPage>('GET', `/api/platform/ops-servers/${serverId}/command-logs?${params.toString()}`);
+};
+
+// ============ 数据库连接目录（V30：platformAdmin 维护，归属组织/项目后下发给 spoke 供 DB 工作区使用） ============
+export const listDbConnections = () => request<DbConnectionDto[]>('GET', '/api/platform/db-connections');
+
+export interface CreateDbConnectionBody {
+  /** 连接标识；留空则后端按名称自动生成（仅小写字母/数字/_/-，创建后不可改） */
+  serverKey?: string;
+  name: string;
+  /** mysql | postgresql | sqlserver | oracle */
+  dbType: string;
+  host: string;
+  port: number;
+  databaseName: string;
+  username: string;
+  description?: string;
+  /** 只读提示（勾选提示「请使用只读账号，物理防线」） */
+  readonlyHint?: boolean;
+  sortOrder?: number;
+  enabled?: boolean;
+  /** 归属组织 id：必填（组织必须，>0） */
+  orgId: number;
+  /** 归属项目 id：可选标记（0 = 不限定项目） */
+  projectId: number;
+  /** 登录密码（可空；非空则加密落库并随目录下发 spoke 供 DB 工作区连接） */
+  password?: string;
+}
+
+export const createDbConnection = (body: CreateDbConnectionBody) =>
+  request<DbConnectionDto>('POST', '/api/platform/db-connections', body);
+
+/** 部分更新：serverKey 创建后不可改（不提交）；orgId/projectId 不传不改（组织必须，orgId 传 0 会被服务端拒绝；projectId 传 0=清除项目归属/不限定）；password 不传=保持原密码 */
+export interface UpdateDbConnectionBody {
+  name?: string;
+  dbType?: string;
+  host?: string;
+  port?: number;
+  databaseName?: string;
+  username?: string;
+  description?: string;
+  readonlyHint?: boolean;
+  sortOrder?: number;
+  enabled?: boolean;
+  orgId?: number;
+  projectId?: number;
+  /** 登录密码：不传 = 保持原密码；空串 = 清除（spoke 回退本地录入凭证） */
+  password?: string;
+}
+
+export const updateDbConnection = (id: number, body: UpdateDbConnectionBody) =>
+  request<DbConnectionDto>('PUT', `/api/platform/db-connections/${id}`, body);
+
+export const deleteDbConnection = (id: number) => request<void>('DELETE', `/api/platform/db-connections/${id}`);
+
+/** 连接用户时效授权清单（含已过期历史行） */
+export const listDbConnectionGrants = (connectionId: number) =>
+  request<DbConnectionGrantDto[]>('GET', `/api/platform/db-connections/${connectionId}/grants`);
+
+/** 新增/续期授权：同用户重复提交=续期（服务端按 connectionId+userId upsert） */
+export const createDbConnectionGrant = (connectionId: number, userId: number, validUntil: string) =>
+  request<DbConnectionGrantDto>('POST', `/api/platform/db-connections/${connectionId}/grants`, {userId, validUntil});
+
+/** 撤销授权 */
+export const deleteDbConnectionGrant = (grantId: number) =>
+  request<void>('DELETE', `/api/platform/db-connections/grants/${grantId}`);
+
+/** 连接查询审计记录分页查询（按 executedAt 倒序；content/totalElements/page/size 形状） */
+export const listDbQueryLogs = (connectionId: number, page: number, size: number) => {
+  const params = new URLSearchParams();
+  params.set('page', String(page));
+  params.set('size', String(size));
+  return request<DbQueryLogPage>('GET', `/api/platform/db-connections/${connectionId}/query-logs?${params.toString()}`);
 };

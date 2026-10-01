@@ -81,6 +81,9 @@ export default function WorkspacesPage() {
   // 删除确认弹窗状态
   const [deleting, setDeleting] = useState<WorkspaceSummary | null>(null);
   const [removing, setRemoving] = useState(false);
+  // 后端运行环境是否有图形界面：决定「📁 浏览」能否弹出系统目录选择器。
+  // 探测失败按「可用」处理（不打扰正常用户）；真正的失败会在点击后以错误提示呈现。
+  const [guiAvailable, setGuiAvailable] = useState(true);
 
   const load = async () => {
     try {
@@ -96,6 +99,11 @@ export default function WorkspacesPage() {
   useEffect(() => {
     // 工作区列表全量拉取一次，前端按路由类型过滤（数据量小，避免三个分类各发一次请求）
     load();
+    // GUI 能力探测：后端跑在无桌面会话的环境时 JFileChooser 弹不出来，
+    // 按钮不禁用就会表现为「点了没反应」，这里提前降级为手动输入路径。
+    getJson<boolean>('/api/system/has-gui')
+      .then((ok) => setGuiAvailable(ok !== false))
+      .catch(() => setGuiAvailable(true));
     // 场景列表只在挂载时拉一次：新建/编辑弹窗都要用，且变动频率极低
     getJson<ScenarioOption[]>('/api/scenarios')
       .then((list) => {
@@ -292,10 +300,22 @@ export default function WorkspacesPage() {
                 placeholder="如：F:\rust\Easy-Copy"
                 style={{ flex: 1 }}
               />
-              <button className="btn" onClick={browseDir}>
+              <button
+                className="btn"
+                onClick={browseDir}
+                disabled={!guiAvailable}
+                title={guiAvailable
+                  ? '选择项目目录'
+                  : '后端运行环境没有图形界面，无法弹出目录选择窗口（请手动输入完整路径）'}
+              >
                 📁 浏览
               </button>
             </div>
+            {!guiAvailable && (
+              <div className="hint" style={{ marginTop: 6 }}>
+                当前服务运行环境无图形界面，无法弹出目录选择窗口，请在上方直接输入完整路径。
+              </div>
+            )}
           </div>
           <div className="field">
             <label>场景（必须是「{typeMeta.label}」类型，决定 AI 在此工作区能做什么、怎么做）</label>

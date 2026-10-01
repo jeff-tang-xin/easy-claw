@@ -13,6 +13,7 @@ import com.xinl.easyclaw.hub.contract.spoke.SpokeMenuNode;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsCommandLogReport;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsServer;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsServerAuthorizeCheck;
+import com.xinl.easyclaw.hub.contract.spoke.SpokeDbQueryLogReport;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeProjectInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeCreditInfo;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeShellCommand;
@@ -42,13 +43,16 @@ public class SpokeController {
     private final OpsCommandLogService commandLogs;
     private final OpsServerService opsServers;
     private final ProviderGrantService grantService;
+    private final com.xinl.easyclaw.hub.service.db.DbQueryLogService dbQueryLogs;
 
     public SpokeController(SpokeService spokeService, OpsCommandLogService commandLogs,
-                           OpsServerService opsServers, ProviderGrantService grantService) {
+                           OpsServerService opsServers, ProviderGrantService grantService,
+                           com.xinl.easyclaw.hub.service.db.DbQueryLogService dbQueryLogs) {
         this.spokeService = spokeService;
         this.commandLogs = commandLogs;
         this.opsServers = opsServers;
         this.grantService = grantService;
+        this.dbQueryLogs = dbQueryLogs;
     }
 
     /** bootstrap：spoke 启动/刷新时拉取自身配置快照（身份、组织、可用模型面、服务权限）。 */
@@ -99,6 +103,14 @@ public class SpokeController {
     @PostMapping("/api/spoke/ops-servers/authorize-check")
     public Map<String, Boolean> authorizeCheck(@Valid @RequestBody SpokeOpsServerAuthorizeCheck req) {
         return opsServers.authorizeCheck(AppKeyContextHolder.require(), req.serverKeys());
+    }
+
+    // ---- 数据库查询记录上报（V30）----
+
+    /** 数据库查询记录批量上报（追加型审计日志；单批 ≤200 条，source 仅 ai|user，org/operator 取 appkey 上下文）。 */
+    @PostMapping("/api/spoke/db-query-logs")
+    public void reportDbQueryLogs(@Valid @RequestBody SpokeDbQueryLogReport req) {
+        dbQueryLogs.report(AppKeyContextHolder.require(), req.logs());
     }
 
     // ---- 项目与工作区绑定（V18）----

@@ -34,5 +34,6 @@
         <module>agent-code-expert</module>
         <module>agent-file-expert</module>
         <module>agent-ops</module>
+        <module>agent-db</module>
     </modules>
 </project>

@@ -2,6 +2,7 @@ package com.xinl.easyclaw.mcp.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.xinl.easyclaw.db.api.DbMcpTools;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.repository.McpServiceRepository;
 import com.xinl.easyclaw.tools.http.HttpAgentTool;
@@ -35,15 +36,22 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration DEFAULT_INIT_TIMEOUT = Duration.ofSeconds(60);
+    /** 内置数据库 MCP 服务名（SYSTEM scope 播种，进程内直调 DbMcpTools） */
+    private static final String BUILTIN_DB_SERVICE = "easyclaw-db";
 
     private final McpServiceRepository repository;
     /** 已建立连接的外部 MCP 客户端缓存 */
     private final Map<Long, McpClientWrapper> clientCache = new ConcurrentHashMap<>();
     /** 已激活的 HTTP_TOOL 桥接工具缓存（Easy-Claw 内部构建，不走 MCP 协议） */
     private final Map<Long, AgentTool> httpToolCache = new ConcurrentHashMap<>();
+    /** 内置 MCP 服务（easyclaw-db 等）的进程内工具缓存：一个服务对应多个工具 */
+    private final Map<Long, List<AgentTool>> builtinToolsCache = new ConcurrentHashMap<>();
 
-    public McpConnectionServiceImpl(McpServiceRepository repository) {
+    private final DbMcpTools dbMcpTools;
+
+    public McpConnectionServiceImpl(McpServiceRepository repository, DbMcpTools dbMcpTools) {
         this.repository = repository;
+        this.dbMcpTools = dbMcpTools;
     }
 
     @Override
@@ -156,6 +164,9 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                 .map(existing -> {
                     String transport = existing.resolveTransport();
                     try {
+                        if (BUILTIN_DB_SERVICE.equals(existing.getName())) {
+                            return connectBuiltinDb(existing);
+                        }
                         if ("HTTP_TOOL".equals(transport)) {
                             return connectHttpTool(existing);
                         }
@@ -168,6 +179,36 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                     }
                 })
                 .orElseThrow(() -> new IllegalArgumentException("MCP 服务不存在: id=" + id));
+    }
+
+    /**
+     * 激活内置数据库 MCP 服务（设计定稿 §4.0.1 双消费壳之二）：
+     * 不发起网络连接，把 DbMcpTools 的三个工具（db_status/db_schema/db_query）装配进
+     * 进程内工具缓存——通用场景 mcpServices 绑定即用，走现有 MCP 白名单 / CapabilityTier 联动。
+     */
+    private McpServiceEntity connectBuiltinDb(McpServiceEntity entity) throws Exception {
+        List<AgentTool> tools = dbMcpTools.tools();
+        builtinToolsCache.put(entity.getId(), tools);
+        entity.setIsConnected(true);
+        entity.setLastConnected(Instant.now());
+        entity.setServerName(entity.getName());
+        entity.setServerVersion("builtin-db-bridge");
+        entity.setServerInstructions(entity.getDescription());
+        // 把工具 schema 存到 availableTools 里方便展示
+        List<Map<String, Object>> schemas = new ArrayList<>();
+        for (AgentTool tool : tools) {
+            Map<String, Object> schema = new LinkedHashMap<>();
+            schema.put("name", tool.getName());
+            schema.put("description", tool.getDescription());
+            schema.put("parameters", tool.getParameters());
+            schemas.add(schema);
+        }
+        entity.setAvailableTools(mapper.writeValueAsString(schemas));
+
+        McpServiceEntity updated = repository.save(entity);
+        log.info("激活内置数据库 MCP 服务: id={}, tools={}", entity.getId(),
+                tools.stream().map(AgentTool::getName).toList());
+        return updated;
     }
 
     /** 连接外部 MCP Server（STDIO / STREAMABLE_HTTP / SSE） */
@@ -224,6 +265,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                 .map(existing -> {
                     closeClient(id);
                     httpToolCache.remove(id);
+                    builtinToolsCache.remove(id);
                     existing.setIsConnected(false);
                     McpServiceEntity updated = repository.save(existing);
                     log.info("断开 MCP 服务: id={}, name={}", id, existing.getName());
@@ -234,7 +276,9 @@ public class McpConnectionServiceImpl implements McpConnectionService {
 
     @Override
     public List<AgentTool> getHttpTools() {
-        return new ArrayList<>(httpToolCache.values());
+        List<AgentTool> all = new ArrayList<>(httpToolCache.values());
+        builtinToolsCache.values().forEach(all::addAll);
+        return all;
     }
 
     @Override

@@ -24,6 +24,13 @@ public final class AppConstants {
      */
     public static final String DEFAULT_OPS_WORKSPACE_ID = "default-ops";
 
+    /**
+     * 默认数据库工作区固定 ID（前端写死使用，不允许用户创建/删除，V30）。
+     * <p>对应唯一的数据库 workspace：路径 {@code ~/.easyClaw/db}、type=db、
+     * 默认绑定内置数据库场景（db），由后端启动时自动初始化。
+     */
+    public static final String DEFAULT_DB_WORKSPACE_ID = "default-db";
+
     private AppConstants() {
     }
 }
