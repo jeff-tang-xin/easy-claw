@@ -7,6 +7,16 @@
   --panel-hover: #f1f5f9;
   --border: #e2e8f0;
   --border-strong: #cbd5e1;
+
+  /* 语义色 token（AntD 功能色体系）：文字/徽章/状态点统一取用，改主题只动这里；
+     图形强调色（警示渐变/进度条）语义独立，保留字面量 */
+  --success: #059669;
+  --success-bg: rgba(5, 150, 105, 0.1);
+  --warning: #b45309;
+  --warning-bg: rgba(245, 158, 11, 0.12);
+  --danger: #dc2626;
+  --danger-bg: rgba(220, 38, 38, 0.1);
+
   --text: #1e293b;
   --text-secondary: #475569;
   --text-tertiary: #64748b;
@@ -159,7 +169,7 @@ button { font-family: inherit; }
 }
 
 /* ============ 页面通用 ============ */
-.page { padding: 28px 32px; overflow: auto; flex: 1; }
+.page { padding: 28px 32px; overflow: auto; flex: 1; width: 100%; max-width: 1200px; margin: 0 auto; }
 .page-title { font-size: 1.35em; font-weight: 700; margin: 0 0 20px; letter-spacing: -0.01em; }
 .card {
   background: var(--panel);
@@ -188,8 +198,8 @@ button { font-family: inherit; }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
 .btn.primary:hover:not(:disabled) { background: var(--accent-dark); border-color: var(--accent-dark); color: #fff; box-shadow: 0 2px 8px var(--accent-glow); }
-.btn.danger { color: #dc2626; border-color: #fecaca; }
-.btn.danger:hover:not(:disabled) { border-color: #dc2626; color: #fff; background: #dc2626; }
+.btn.danger { color: var(--danger); border-color: #fecaca; }
+.btn.danger:hover:not(:disabled) { border-color: var(--danger); color: #fff; background: var(--danger); }
 .btn.intervene-btn {
   color: #fff;
   background: linear-gradient(135deg, #f59e0b, #ef4444);
@@ -261,8 +271,8 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
   line-height: 1.6;
   letter-spacing: 0.01em;
 }
-.badge.green { background: rgba(16,185,129,0.1); color: #059669; }
-.badge.red { background: rgba(239,68,68,0.1); color: #dc2626; }
+.badge.green { background: var(--success-bg); color: var(--success); }
+.badge.red { background: var(--danger-bg); color: var(--danger); }
 .badge.blue { background: rgba(22,119,255,0.1); color: var(--accent-dark); }
 .badge.gray { background: rgba(100,116,139,0.1); color: var(--text-secondary); }
 
@@ -272,7 +282,7 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
 .error-box {
   background: rgba(239,68,68,0.06);
   border: 1px solid rgba(239,68,68,0.2);
-  color: #dc2626;
+  color: var(--danger);
   border-radius: 8px;
   padding: 10px 14px;
   font-size: 13px;
@@ -367,7 +377,7 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
   padding: 0 3px; border-radius: 3px;
   flex-shrink: 0;
 }
-.file-tab-close:hover { background: rgba(220,38,38,0.12); color: #dc2626; }
+.file-tab-close:hover { background: rgba(220,38,38,0.12); color: var(--danger); }
 
 .file-tab-content { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; }
 .file-markdown-body {
@@ -465,7 +475,7 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
 .bb-entry-content { font-size: 12px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
 .bb-note .bb-entry-type { color: var(--text-secondary); background: rgba(100, 116, 139, 0.12); }
 .bb-finding .bb-entry-type { color: #7c3aed; background: rgba(139, 92, 246, 0.12); }
-.bb-risk .bb-entry-type { color: #b45309; background: rgba(245, 158, 11, 0.15); }
+.bb-risk .bb-entry-type { color: var(--warning); background: rgba(245, 158, 11, 0.15); }
 .bb-conclusion .bb-entry-type { color: var(--accent-dark); background: rgba(22, 119, 255, 0.10); }
 
 .session-list { flex: 1; overflow: auto; padding: 4px 8px 12px; }
@@ -485,7 +495,7 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
 .session-branch { flex-shrink: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; font-weight: 400; color: var(--text-tertiary); background: rgba(22,119,255,0.08); border-radius: 4px; padding: 1px 5px; }
 .session-del { opacity: 0; border: none; background: none; cursor: pointer; color: var(--text-tertiary); padding: 2px; border-radius: 4px; transition: all 0.12s; }
 .session-item:hover .session-del { opacity: 1; }
-.session-del:hover { color: #dc2626; background: rgba(220, 38, 38, 0.08); }
+.session-del:hover { color: var(--danger); background: rgba(220, 38, 38, 0.08); }
 .session-rename { opacity: 0; border: none; background: none; cursor: pointer; color: var(--text-tertiary); padding: 2px; border-radius: 4px; transition: all 0.12s; font-size: 13px; }
 .session-item:hover .session-rename { opacity: 1; }
 .session-rename:hover { color: var(--accent); background: rgba(22, 119, 255, 0.08); }
@@ -549,7 +559,7 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
   font-size: 11px; color: var(--text); background: var(--panel-hover);
   padding: 1px 5px; border-radius: 4px;
 }
-.tools-item-param .req { color: #dc2626; font-size: 10px; font-style: normal; flex-shrink: 0; }
+.tools-item-param .req { color: var(--danger); font-size: 10px; font-style: normal; flex-shrink: 0; }
 
 .chat-main { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; }
 .chat-topbar {
@@ -754,7 +764,7 @@ details.fold.subagent .fold-body { max-height: 340px; color: var(--text-secondar
   border-radius: 8px;
   border: 1px dashed rgba(245,158,11,0.4);
   background: rgba(245,158,11,0.06);
-  color: #b45309;
+  color: var(--warning);
   font-size: 12.5px;
   line-height: 1.5;
 }
@@ -769,7 +779,7 @@ details.fold.subagent .fold-body { max-height: 340px; color: var(--text-secondar
 }
 .blackboard-card.bb-finding { border-left-color: #0ea5e9; background: rgba(14,165,233,0.05); }
 .blackboard-card.bb-risk    { border-left-color: #f59e0b; background: rgba(245,158,11,0.06); }
-.blackboard-card.bb-conclusion { border-left-color: #10b981; background: rgba(16,185,129,0.05); }
+.blackboard-card.bb-conclusion { border-left-color: var(--success); background: rgba(5,150,105,0.05); }
 .bb-head {
   display: flex; align-items: center; gap: 8px;
   padding: 7px 12px 3px;
@@ -816,14 +826,14 @@ details.fold.subagent .fold-body { max-height: 340px; color: var(--text-secondar
   padding: 2px 9px; border-radius: 999px; white-space: nowrap;
 }
 .tool-badge.done { color: var(--text-secondary); background: rgba(100,116,139,0.12); }
-.tool-badge.success { color: #16a34a; background: rgba(22,163,74,0.12); }
-.tool-badge.error { color: #dc2626; background: rgba(220,38,38,0.12); }
-.tool-badge.empty { color: #b45309; background: rgba(245,158,11,0.12); }
+.tool-badge.success { color: var(--success); background: var(--success-bg); }
+.tool-badge.error { color: var(--danger); background: var(--danger-bg); }
+.tool-badge.empty { color: var(--warning); background: var(--warning-bg); }
 .tool-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: var(--text-tertiary); }
-.tool-dot.done { background: #16a34a; }
-.tool-dot.success { background: #16a34a; }
-.tool-dot.error { background: #dc2626; }
-.tool-dot.empty { background: #b45309; }
+.tool-dot.done { background: var(--success); }
+.tool-dot.success { background: var(--success); }
+.tool-dot.error { background: var(--danger); }
+.tool-dot.empty { background: var(--warning); }
 .tool-section { border-top: 1px solid rgba(100,116,139,0.14); }
 .tool-section-head {
   padding: 4px 12px; font-size: 11px; font-weight: 600;
@@ -1043,7 +1053,7 @@ details.fold .fold-body.md-content pre {
 }
 .status-badge.tool {
   background: rgba(245, 158, 11, 0.1);
-  color: #b45309;
+  color: var(--warning);
   border: 1px solid rgba(245, 158, 11, 0.25);
 }
 
@@ -1095,7 +1105,7 @@ details.fold.loading summary::before {
   transition: background 0.2s;
 }
 .toggle.on {
-  background: #10b981;
+  background: var(--success);
 }
 .toggle-thumb {
   position: absolute;
@@ -1153,7 +1163,7 @@ details.fold.loading summary::before {
   font-weight: 600;
 }
 .queue-item.next .queue-num {
-  background: #10b981;
+  background: var(--success);
 }
 .queue-text {
   flex: 1;
@@ -1407,8 +1417,8 @@ details.fold.loading summary::before {
 
 /* ============ 设置页 ============ */
 .settings-page .toast-ok {
-  background: rgba(34, 197, 94, 0.12);
-  color: #15803d;
+  background: var(--success-bg);
+  color: var(--success);
   padding: 6px 12px;
   border-radius: var(--radius-sm);
   font-size: 12.5px;
@@ -1464,8 +1474,8 @@ details.fold.loading summary::before {
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 .mcp-card.connected {
-  border-color: #4caf50;
-  box-shadow: 0 0 0 1px rgba(76, 175, 80, 0.2);
+  border-color: var(--success);
+  box-shadow: 0 0 0 1px rgba(5, 150, 105, 0.2);
 }
 .mcp-card-header {
   display: flex;
@@ -1480,8 +1490,8 @@ details.fold.loading summary::before {
   flex-shrink: 0;
 }
 .mcp-status-dot.on {
-  background: #4caf50;
-  box-shadow: 0 0 6px rgba(76, 175, 80, 0.5);
+  background: var(--success);
+  box-shadow: 0 0 6px rgba(5, 150, 105, 0.5);
 }
 .mcp-status-dot.off {
   background: #bbb;
@@ -1577,8 +1587,8 @@ details.fold.loading summary::before {
   animation: sa-pulse 1.5s infinite;
 }
 .sa-node.done::before {
-  border-color: #22c55e;
-  background: #22c55e;
+  border-color: var(--success);
+  background: var(--success);
 }
 .sa-node.error::before {
   border-color: #ef4444;

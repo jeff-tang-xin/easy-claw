@@ -1,16 +1,16 @@
-/* hub 控制台样式：与主前端（spoke）同一设计语言——深青侧边栏 + blue accent + slate 文本 + 白面板 */
+/* hub 控制台样式：与主前端（spoke）同一设计语言——深色侧边栏 + AntD 主色 #1677ff + slate 文本 + 白面板 */
 :root {
-  --accent: #3b82f6;
-  --accent-dark: #2563eb;
-  --accent-glow: rgba(59, 130, 246, 0.35);
+  --accent: #1677ff;
+  --accent-dark: #0958d9;
+  --accent-glow: rgba(22, 119, 255, 0.35);
   --bg: #f8fafc;
   --panel: #ffffff;
   --panel-hover: #f1f5f9;
   --border: #e2e8f0;
   --border-strong: #cbd5e1;
   --text: #1e293b;
-  --text-secondary: #64748b;
-  --text-tertiary: #94a3b8;
+  --text-secondary: #475569;
+  --text-tertiary: #64748b;
   --danger: #dc2626;
   --danger-bg: #fef2f2;
   --success: #15803d;
@@ -21,6 +21,7 @@
   --radius-sm: 6px;
   --radius: 10px;
   --radius-lg: 14px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
   --shadow: 0 1px 4px rgba(15, 23, 42, 0.06), 0 2px 8px rgba(15, 23, 42, 0.04);
   --shadow-md: 0 4px 16px rgba(15, 23, 42, 0.08), 0 2px 4px rgba(15, 23, 42, 0.04);
   --shadow-lg: 0 20px 60px rgba(15, 23, 42, 0.2);
@@ -66,7 +67,7 @@ button { font-family: inherit; }
   user-select: none;
   line-height: 1.4;
 }
-.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(59, 130, 246, 0.04); }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: rgba(22, 119, 255, 0.04); }
 .btn:active:not(:disabled) { transform: translateY(1px); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -98,7 +99,7 @@ input[type="checkbox"], input[type="radio"] {
 }
 input:not([type="checkbox"]):not([type="radio"]):focus, textarea:focus, select:focus {
   border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+  box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12);
 }
 textarea { resize: vertical; line-height: 1.55; min-height: 64px; }
 label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; color: var(--text-secondary); font-weight: 600; }
@@ -139,7 +140,7 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
   color: #92400e;
   border-radius: 10px;
   padding: 10px 14px;
-  margin: 4px 0 16px;
+  margin: 12px 32px 16px;
   font-size: 0.88em;
 }
 .pwd-expiry-actions { display: inline-flex; gap: 8px; flex-shrink: 0; }
@@ -426,7 +427,7 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
   display: flex; flex-direction: column; gap: 8px;
 }
 .org-card:hover { border-color: var(--border-strong); box-shadow: var(--shadow-md); }
-.org-card.current { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12); }
+.org-card.current { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(22, 119, 255, 0.12); }
 .org-card-head { display: flex; align-items: center; gap: 8px; }
 .org-name { font-weight: 700; font-size: 1.02em; }
 .org-slug { color: var(--text-tertiary); font-size: 0.8em; }
@@ -540,7 +541,7 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 /* 顶部全局/空间面包屑补充样式 */
 .crumb-text { color: var(--text-secondary); }
 .top-breadcrumb {
-  display: flex; align-items: center; gap: 6px; margin-bottom: 14px;
+  display: flex; align-items: center; gap: 6px; padding: 14px 32px 0; margin-bottom: 0;
   font-size: 0.9em; color: var(--text-tertiary);
 }
 .crumb-link {
@@ -690,3 +691,33 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 .menu-del:hover:not(:disabled) { color: #fff; background: var(--danger); border-color: var(--danger); }
 .menu-form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .menu-enabled-check { flex-direction: row !important; align-items: center; gap: 8px; font-weight: 500; }
+
+/* ============================================================
+   Modern Polish 层——与主前端（spoke）同款的现代化增强（追加式覆盖，便于整体回滚）
+   原则：只动观感不动布局；文本对比度 ≥ 4.5:1（AA）；键盘焦点可见
+   ============================================================ */
+
+/* ---- 选区与键盘焦点（A11y：所有交互元素 Tab 可达且有可见焦点环） ---- */
+::selection { background: rgba(22, 119, 255, 0.22); }
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+input:focus-visible, textarea:focus-visible, select:focus-visible { outline: none; }
+
+/* ---- 滚动条：overlay 细条风格，hover 加深（与主前端一致） ---- */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: rgba(100, 116, 139, 0.3);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover { background-color: rgba(100, 116, 139, 0.5); }
+.app-sidebar ::-webkit-scrollbar-thumb { background-color: rgba(255, 255, 255, 0.18); }
+.app-sidebar ::-webkit-scrollbar-thumb:hover { background-color: rgba(255, 255, 255, 0.32); }
+
+/* ---- 输入控件 hover 边框反馈（AntD 惯例：hover 加深、focus 主色光环） ---- */
+input:hover, textarea:hover, select:hover { border-color: var(--border-strong); }
