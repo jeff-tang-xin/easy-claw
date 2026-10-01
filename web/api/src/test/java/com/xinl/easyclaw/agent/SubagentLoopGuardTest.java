@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -16,6 +17,7 @@ import com.xinl.easyclaw.permission.service.PermissionRuleService;
 import com.xinl.easyclaw.workspace.ScenarioResolver;
 import com.xinl.easyclaw.workspace.WorkspaceFileLayout;
 import com.xinl.easyclaw.workspace.WorkspaceManager;
+import io.agentscope.core.ReActAgent;
 import io.agentscope.core.event.AgentEvent;
 import io.agentscope.core.event.ToolCallDeltaEvent;
 import io.agentscope.core.event.ToolCallEndEvent;
@@ -46,11 +48,13 @@ class SubagentLoopGuardTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
     private static final String SESSION_ID = "session-loop";
+    private static final String USER_ID = "u-loop";
 
     private AgentService service;
     private Method handleEvent;
     private Object trace;
     private HarnessAgent agent;
+    private ReActAgent delegate;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -58,6 +62,9 @@ class SubagentLoopGuardTest {
         // 阈值调到 1，用最短事件序列即可跨过告警线（默认 3 需要更多轮派发）
         props.getAgent().setMaxSameSubagentCalls(1);
         agent = mock(HarnessAgent.class);
+        // 防护经 agent.getDelegate() 拿到驱动 ReAct 循环的实例再精确中断
+        delegate = mock(ReActAgent.class);
+        when(agent.getDelegate()).thenReturn(delegate);
 
         service = new AgentService(
                 mock(WorkspaceManager.class),
@@ -107,7 +114,8 @@ class SubagentLoopGuardTest {
         Class<?> cls = Class.forName("com.xinl.easyclaw.agent.AgentService$SessionSideEffects");
         Constructor<?> c = cls.getDeclaredConstructors()[0];
         c.setAccessible(true);
-        return c.newInstance(service, SESSION_ID, agent, sink);
+        // SessionSideEffects 新增 userId：防护触发时按 (userId, sessionId) 精确中断本会话槽
+        return c.newInstance(service, SESSION_ID, agent, sink, USER_ID);
     }
 
     /**
@@ -177,7 +185,9 @@ class SubagentLoopGuardTest {
         assertEquals("reviewer", w.path("subagent").asText(), "告警应指名具体子 Agent");
         assertEquals(2, w.path("count").asInt(), "count 应为已记录的重派次数");
         assertTrue(w.path("message").asText().contains("reviewer"), "message 应含子 Agent 名");
-        verify(agent).interrupt();
+        // 防护改为按 (userId, sessionId) 精确中断本会话槽：无参 interrupt() 打默认槽命中不了本会话
+        verify(delegate).interrupt(USER_ID, SESSION_ID);
+        verify(agent, never()).interrupt();
     }
 
     @Test

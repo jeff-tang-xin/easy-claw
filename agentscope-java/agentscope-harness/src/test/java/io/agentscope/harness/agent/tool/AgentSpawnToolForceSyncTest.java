@@ -272,7 +272,8 @@ class AgentSpawnToolForceSyncTest {
                 "TaskRepository.putTask must not be called under force_sync timeout");
 
         // Dispose → CANCEL → interruptAgent
-        verify(agentSpy, atLeastOnce()).interrupt(any(RuntimeContext.class));
+        // interruptAgent now targets the child's own slot via interrupt(userId, childSessionId).
+        verify(agentSpy, atLeastOnce()).interrupt(any(String.class), any(String.class));
     }
 
     private static final class CapturingTaskRepository implements TaskRepository {

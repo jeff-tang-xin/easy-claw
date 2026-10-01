@@ -939,8 +939,20 @@ public class AgentSpawnTool {
                                                                 // would be a no-op on the
                                                                 // already-cancelled sink.
                                                                 if (signal == SignalType.CANCEL) {
+                                                                    // Interrupt by the CHILD's
+                                                                    // (userId, sessionId) slot —
+                                                                    // the same identity
+                                                                    // DefaultAgentManager
+                                                                    // .invokeAgent stamps on the
+                                                                    // child RuntimeContext. The
+                                                                    // parent's runtimeContext
+                                                                    // would resolve to the
+                                                                    // parent's AgentState slot and
+                                                                    // silently miss the child.
                                                                     interruptAgent(
-                                                                            agent, runtimeContext);
+                                                                            agent,
+                                                                            userId,
+                                                                            spawned.sessionId());
                                                                 }
                                                             });
 
@@ -991,22 +1003,66 @@ public class AgentSpawnTool {
 
     /**
      * Interrupts the sub-agent's reasoning loop when its parent tool-call subscription is
-     * cancelled. Mirrors the fix in core {@code SubAgentTool.interruptAgent} (commit
-     * {@code 029cc55e}, issue #1783) — see issue #2062 for the harness-side equivalent.
+     * cancelled or the force-sync wait times out. Mirrors the fix in core
+     * {@code SubAgentTool.interruptAgent} (commit {@code 029cc55e}, issue #1783) — see issue
+     * #2062 for the harness-side equivalent.
      *
-     * <p>Only {@link ReActAgent} exposes {@code interrupt(RuntimeContext)}. Other {@link Agent}
-     * implementations are no-ops here; their inner execution will still be disposed by the caller's
-     * {@code sink.onCancel(innerSub::dispose)}, which is enough for non-looping agents.
+     * <p><b>Why {@link HarnessAgent} must be unwrapped:</b> subagents materialized by
+     * {@code HarnessAgentBuilderSupport.buildDeclaredFactory} are {@link HarnessAgent} instances,
+     * which implement {@link Agent} but are <em>not</em> {@link ReActAgent} subclasses. A plain
+     * {@code instanceof ReActAgent} check therefore never matched, and the interrupt silently
+     * degraded to a no-op: disposing the subscription stopped event forwarding, but the child's
+     * ReAct loop kept running as an orphan — still calling the model, still executing tools,
+     * still writing to the shared blackboard — with no way for the parent to observe or stop it.
+     * {@link HarnessAgent#getDelegate()} exposes the wrapped {@link ReActAgent} whose per-session
+     * {@code InterruptControl} actually drives that loop.
+     *
+     * <p><b>Why an explicit (userId, sessionId) pair instead of a {@link RuntimeContext}:</b> the
+     * interrupt flag lives on the {@code AgentState} bucket keyed by {@code slotKey(userId,
+     * sessionId)}. The child runs under its own session id (stamped by
+     * {@code DefaultAgentManager.invokeAgent}), so passing the parent's context would trigger the
+     * parent's slot — or materialize an unrelated one — and never reach the child's loop.
+     *
+     * <p>Agents that are neither {@link ReActAgent} nor {@link HarnessAgent} remain no-ops here;
+     * their inner execution is still disposed by the caller's {@code sink.onCancel(innerSub)},
+     * which is sufficient for non-looping agents.
+     *
+     * @param agent the sub-agent instance to interrupt
+     * @param userId the user id the child was invoked with (may be {@code null})
+     * @param childSessionId the child's own session id — never the parent's
      */
-    private void interruptAgent(Agent agent, RuntimeContext ctx) {
-        if (agent instanceof ReActAgent ra) {
-            ra.interrupt(ctx);
-            log.warn(
-                    "Sub-agent '{}' (id={}) was interrupted because its parent tool call"
-                            + " subscription was cancelled.",
-                    ra.getName(),
-                    ra.getAgentId());
+    private void interruptAgent(Agent agent, String userId, String childSessionId) {
+        ReActAgent target = unwrapReActAgent(agent);
+        if (target == null) {
+            log.debug(
+                    "Sub-agent '{}' (type={}) exposes no interruptible ReActAgent;"
+                            + " relying on subscription dispose only.",
+                    agent != null ? agent.getName() : "unknown",
+                    agent != null ? agent.getClass().getSimpleName() : "null");
+            return;
         }
+        target.interrupt(userId, childSessionId);
+        log.warn(
+                "Sub-agent '{}' (id={}, session={}) was interrupted because its parent tool call"
+                        + " subscription was cancelled or timed out.",
+                target.getName(),
+                target.getAgentId(),
+                childSessionId);
+    }
+
+    /**
+     * Resolves the {@link ReActAgent} that actually drives the reasoning loop for {@code agent},
+     * unwrapping {@link HarnessAgent} — the concrete type produced for declared subagents.
+     * Returns {@code null} when the agent has no interruptible loop.
+     */
+    private static ReActAgent unwrapReActAgent(Agent agent) {
+        if (agent instanceof ReActAgent react) {
+            return react;
+        }
+        if (agent instanceof HarnessAgent harness) {
+            return harness.getDelegate();
+        }
+        return null;
     }
 
     /**

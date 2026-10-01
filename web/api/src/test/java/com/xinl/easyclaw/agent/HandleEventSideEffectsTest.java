@@ -106,7 +106,8 @@ class HandleEventSideEffectsTest {
         Class<?> cls = Class.forName("com.xinl.easyclaw.agent.AgentService$SessionSideEffects");
         Constructor<?> c = cls.getDeclaredConstructors()[0];
         c.setAccessible(true);
-        return c.newInstance(service, "session-1", null, sink);
+        // SessionSideEffects 新增 userId（循环防护精确中断本会话槽用）；HITL 分支不使用它
+        return c.newInstance(service, "session-1", null, sink, "u-test");
     }
 
     private static RequireUserConfirmEvent confirmEvent() {

@@ -257,7 +257,8 @@ class AgentSpawnToolOrphanCancelTest {
         // ===== Proof #1: interrupt() was called on the slow agent after parent cancel =====
         // Pre-fix: this fails — interrupt is never called because the inner subscription is never
         // disposed.
-        verify(slowSpy, atLeastOnce()).interrupt(any(RuntimeContext.class));
+        // interruptAgent now targets the child's own slot via interrupt(userId, childSessionId).
+        verify(slowSpy, atLeastOnce()).interrupt(any(String.class), any(String.class));
 
         // ===== Proof #2: file did not keep growing after parent cancel =====
         // Pre-fix: this fails — orphan loop writes many more lines during the 4s window.

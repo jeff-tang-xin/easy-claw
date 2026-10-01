@@ -217,7 +217,10 @@ class AgentSpawnToolPromotionTest {
         // ===== Proof #4: interrupt() was never called on the agent =====
         // Promotion is supposed to keep the agent running, not kill it. If the orphan-cancel
         // fix accidentally fires on the promotion path, interrupt() would be invoked here.
+        // Both overloads are checked: interruptAgent now uses interrupt(userId, childSessionId),
+        // so a never-check on the RuntimeContext overload alone would be vacuous.
         verify(agentSpy, never()).interrupt(any(RuntimeContext.class));
+        verify(agentSpy, never()).interrupt(any(String.class), any(String.class));
     }
 
     /** Captures the {@link TaskRunSpec} submitted to {@code putTask} so the test can inspect it. */

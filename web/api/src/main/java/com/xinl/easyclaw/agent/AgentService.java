@@ -1613,7 +1613,10 @@ public class AgentService {
 
         // 副作用出口：与事件翻译正交的会话级业务状态驱动（循环防护 / 交付登记 / HITL 登记）。
         // 单独构造而非内联到 handleEvent，是为了让 Phase 3b 替换协议层时这条线不受影响。
-        SideEffectSink sideEffects = new SessionSideEffects(sessionId, agent, eventSink);
+        // userId 供循环防护精确中断本会话槽：无参 interrupt() 打默认槽命中不了本会话
+        //（与 stopChat 同理），防护会形同虚设，见 guardSubagentLoop。
+        String userId = context.getUserId() != null ? context.getUserId() : AppConstants.DEFAULT_USER_ID;
+        SideEffectSink sideEffects = new SessionSideEffects(sessionId, agent, eventSink, userId);
 
         // 本流订阅句柄占位：java 局部变量不能在自身初始化式的 lambda（doFinally）里被引用，
         // 故借 AtomicReference 在订阅建立后回填；doFinally 据此判断「当前登记句柄是否仍是本流」。
@@ -1757,16 +1760,19 @@ public class AgentService {
         private final String sessionId;
         private final HarnessAgent agent;
         private final Consumer<StreamEvent> onEvent;
+        private final String userId;
 
-        SessionSideEffects(String sessionId, HarnessAgent agent, Consumer<StreamEvent> onEvent) {
+        SessionSideEffects(String sessionId, HarnessAgent agent, Consumer<StreamEvent> onEvent,
+                           String userId) {
             this.sessionId = sessionId;
             this.agent = agent;
             this.onEvent = onEvent;
+            this.userId = userId;
         }
 
         @Override
         public void onSubagentDispatched(String target) {
-            guardSubagentLoop(sessionId, target, onEvent, agent);
+            guardSubagentLoop(sessionId, userId, target, onEvent, agent);
         }
 
         @Override
@@ -2511,12 +2517,18 @@ public class AgentService {
      * 只有 {@link SessionRegistry#hasSubagentDelivered} 为真（说明上一次已拿到结果）
      * 才追责，从而把「并行批次」与「串行死循环」区分开。
      * <p>
-     * 触发后必须走 {@code agent.interrupt()}：{@link StreamEvent#context} 只是推给前端
+     * 触发后必须走 {@code interrupt}：{@link StreamEvent#context} 只是推给前端
      * 渲染的单向通道，<b>模型读不到</b>，仅注入告警等于没有防护。
-     * 注意 interrupt 只中断编排者的 ReAct 循环，已 spawn 的子 Agent 仍在后台运行
-     * （其结果将无人接收），这是当前实现的已知缺口，见 TODO。
+     * <p>
+     * <b>必须按 (userId, sessionId) 精确中断</b>：无参 {@code agent.interrupt()} 等价于
+     * {@code interrupt(null, defaultSessionId)}，打到的是默认槽，命中不了本会话的槽
+     * （与 {@link #stopChat} 同理）——防护触发后编排者循环不会退出，会继续派发，
+     * 防护形同虚设。中断编排者后其 Flux 被 cancel，会传播到已 spawn 子 Agent 的
+     * {@code doFinally(CANCEL)} → {@code AgentSpawnTool.interruptAgent}，子 Agent 一并停止
+     * （该链路修复前 interruptAgent 对 HarnessAgent 是 no-op，子 Agent 会成为孤儿，
+     * 现已通过 unwrap delegate + 子 session 身份中断修复）。
      */
-    private void guardSubagentLoop(String sessionId, String subName,
+    private void guardSubagentLoop(String sessionId, String userId, String subName,
                                    Consumer<StreamEvent> onEvent, HarnessAgent agent) {
         int maxSameSubagent = agentScopeProperties.getAgent().getMaxSameSubagentCalls();
         if (maxSameSubagent <= 0) {
@@ -2530,11 +2542,10 @@ public class AgentService {
         if (count > maxSameSubagent) {
             log.warn("检测到子 Agent 循环调度: session={}, subagent={}, count={}",
                     sessionId, subName, count);
-            // TODO 已 spawn 的子 Agent 任务此处未被取消，仍会在后台跑完（结果无人接收）。
-            //  彻底止损需拿到本会话的 spawned task 句柄并逐个 task_cancel，
-            //  当前 AgentService 无该句柄通道，需后续接入。
             try {
-                agent.interrupt();
+                // 精确中断本会话槽（理由见方法 Javadoc）：getDelegate() 拿到驱动
+                // ReAct 循环的 ReActAgent，HarnessAgent.interrupt() 无参版会打默认槽。
+                agent.getDelegate().interrupt(userId, sessionId);
             } catch (Exception ignored) {
                 // 打断失败不影响后续
             }
