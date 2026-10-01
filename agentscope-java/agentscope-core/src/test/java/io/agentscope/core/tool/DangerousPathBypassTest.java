@@ -24,6 +24,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import reactor.core.publisher.Mono;
@@ -97,8 +98,35 @@ class DangerousPathBypassTest {
         assertTrue(PROBE.check("/home/user/.ENV"));
     }
 
+    /**
+     * Windows 非管理员进程默认无 SeCreateSymbolicLink 特权（开启开发者模式后放开），
+     * {@link Files#createSymbolicLink} 会抛 FileSystemException「客户端没有所需的特权」。
+     * 环境依赖探测：无特权时跳过 symlink 用例（skipped 而非 error），有特权机器与 CI 照常运行。
+     */
+    private static boolean symlinksAllowed() {
+        Path dir = null;
+        try {
+            dir = Files.createTempDirectory("symlink-privilege-probe");
+            Path link = dir.resolve("probe-link");
+            Files.createSymbolicLink(link, dir.resolve("target"));
+            Files.deleteIfExists(link);
+            return true;
+        } catch (IOException | UnsupportedOperationException | SecurityException e) {
+            return false;
+        } finally {
+            if (dir != null) {
+                try {
+                    Files.deleteIfExists(dir);
+                } catch (IOException ignored) {
+                    // 临时目录清理失败不影响判定
+                }
+            }
+        }
+    }
+
     @Test
     void symlinkToSshIsDetected(@TempDir Path tempDir) throws IOException {
+        Assumptions.assumeTrue(symlinksAllowed(), () -> "跳过：当前进程无创建符号链接特权（Windows 需管理员或开发者模式）");
         Path sshDir = tempDir.resolve(".ssh");
         Files.createDirectory(sshDir);
         Path sshConfig = sshDir.resolve("config");
@@ -112,6 +140,7 @@ class DangerousPathBypassTest {
 
     @Test
     void symlinkToDotEnvIsDetected(@TempDir Path tempDir) throws IOException {
+        Assumptions.assumeTrue(symlinksAllowed(), () -> "跳过：当前进程无创建符号链接特权（Windows 需管理员或开发者模式）");
         Path envFile = tempDir.resolve(".env");
         Files.writeString(envFile, "SECRET=value\n");
 
