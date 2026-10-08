@@ -159,7 +159,8 @@ public class DbConnectionService {
                     workspaceId, serverKey, db, session.product());
             return connKey;
         } catch (SQLException e) {
-            throw new IllegalStateException("数据库连接失败: " + e.getMessage(), e);
+            log.warn("数据库连接失败: workspace={}, serverKey={}, db={}", workspaceId, serverKey, db, e);
+            throw new IllegalStateException("数据库连接失败: " + describe(e), e);
         }
     }
 
@@ -244,8 +245,26 @@ public class DbConnectionService {
             }
             return out;
         } catch (SQLException e) {
-            throw new IllegalStateException("查询库清单失败: " + e.getMessage(), e);
+            log.warn("查询库清单失败: serverKey={}", serverKey, e);
+            throw new IllegalStateException("查询库清单失败: " + describe(e), e);
         }
+    }
+
+    /**
+     * 压缩 SQLException 因果链为一句可诊断描述：顶层消息 + 最深层根因（类名: 消息）。
+     * JDBC 驱动常把真实原因（连接被拒/超时/DNS 解析失败/SSL 握手）挂在 cause 链上，
+     * 只取 {@code getMessage()} 会得到「尝试连线已失败」这类无信息量的本地化文案。
+     * 驱动异常消息只含 host/port 等连接目标信息、不含凭据，可安全透出给前端。
+     */
+    private static String describe(SQLException e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root == e || root.getMessage() == null || root.getMessage().isBlank()) {
+            return e.getMessage();
+        }
+        return e.getMessage() + "（根因: " + root.getClass().getSimpleName() + ": " + root.getMessage() + "）";
     }
 
     // ==================== 连接构造 ====================
