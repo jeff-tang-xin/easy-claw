@@ -238,6 +238,14 @@ export default function DbPage() {
       case 'error':
         appendMsg(key, {kind: 'error', content: ev.content ?? '执行出错'});
         setBusy(key, false);
+        // 终态清挂起确认：确认超时清扫走 error+end（「工具确认超时，已自动取消」），
+        // 确认条残留会「点了没反应」
+        setPendingConfirms((prev) => {
+          if (!(key in prev)) return prev;
+          const next = {...prev};
+          delete next[key];
+          return next;
+        });
         break;
       case 'end':
       case 'stopped':

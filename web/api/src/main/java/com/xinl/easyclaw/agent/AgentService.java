@@ -1628,6 +1628,15 @@ public class AgentService {
                     handleEvent(event, eventSink, onError, onFinish, trace, sessionId, sideEffects, batcher);
                     // 收到 AGENT_END 即认为回复完成，立即复位 UI（不依赖 Flux complete）
                     if (event.getType() == AgentEventType.AGENT_END) {
+                        // 确认挂起的 AGENT_END 是框架「暂停」语义而非回合结束：此时若照常收尾，
+                        // onFinish 会发 end 事件 → 前端清掉刚弹出的确认条（DbPage end 分支清
+                        // pendingConfirms），工具永远等不到确认；「已结束」收口也会把等待确认的
+                        // 工具卡片标成已结束（误导）。收尾交由 doFinally 暂停分支（保持 SSE +
+                        // registerPendingCallbacks）与 resume 流 / 超时清扫负责。
+                        if (sessions.hasPendingConfirm(sessionId)) {
+                            log.info("AGENT_END 为确认暂停语义，抑制收尾: sessionId={}", sessionId);
+                            return;
+                        }
                         // 回合收尾第一锚点：本条不出 = ReAct 循环未退出（空转/工具链未收），
                         // 「输出完了但不结束」排查先看本条有无
                         log.info("回合结束(AGENT_END): sessionId={}, mainTurn={}", sessionId, mainTurn);
