@@ -10,7 +10,7 @@ import com.xinl.easyclaw.base.profile.ScenarioProfile;
  * 数据库调度模式（工作区形态「数据库」，V30）。
  * <p>
  * DB 工作区的智能体侧与单智能体同构：一个主智能体 + {@code db_query/db_schema/db_status}
- * 工具（每次查询都需用户确认），结构照抄 {@code OpsOrchestrator}。
+ * 工具（V31 起静默放行，见 ToolPermissionPolicy SILENTLY_ALLOWED），结构照抄 {@code OpsOrchestrator}。
  * 计划恒为单阶段单步。
  * <p>
  * <b>modeId 红线</b>：{@code "db"} 同时是工作区形态分类
@@ -62,7 +62,10 @@ public final class DbOrchestrator implements AgentOrchestrator {
         return false;
     }
 
-    /** 数据库模式：不启用白名单机制 —— db 三工具每次调用都必须用户确认 */
+    /**
+     * 数据库模式：不启用白名单机制 —— db 三工具走 ToolPermissionPolicy SILENTLY_ALLOWED
+     * （V31：只读防线 + 只读账号已兜底，无需逐次确认），与授权白名单无关。
+     */
     @Override
     public boolean whitelistEnabled() {
         return false;

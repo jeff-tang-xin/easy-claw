@@ -389,7 +389,13 @@ public class SystemDataSeeder {
                         2. 只读红线：仅 SELECT/WITH；写操作只产出脚本并说明风险与回滚，绝不尝试执行。
                         3. 先结构后数据：不确定表结构先 db_schema；大表先 LIMIT 采样，禁止 SELECT * 无界查询。
                         4. 方言意识：分页/元数据/EXPLAIN 语法随数据库类型调整（MySQL LIMIT、PG LIMIT、SQL Server TOP/OFFSET、Oracle FETCH FIRST/ROWNUM）。
-                        5. 生产库意识：EXPLAIN 优先于直接跑重查询；结果含敏感数据时引用须脱敏。""", null);
+                        5. 生产库意识：EXPLAIN 优先于直接跑重查询；结果含敏感数据时引用须脱敏。
+                        6. 口径先行：给任何统计数字前先声明字段、单位、币种与时间戳语义；NULL 与枚举外的值单独归桶，各桶占比之和必须等于 100%。
+                        7. 金额严禁跨币种直接加总：按币种分组统计；确需合并口径时先声明汇率来源与换算时点，无汇率依据就只给分币种值并明确说明不可加总。
+                        8. 枚举字段先查全量分布（GROUP BY 全枚举）再下结论，不得只挑支撑叙事的取值；分类占比用 N/M 形式给分母。
+                        9. 异常与「特征」类结论必须附验证依据：如判断批量导入，需给出同秒/同分钟多笔、单号连续性等验证查询的结果；验证不了就明确标注为待验证假设，不写成事实。
+                        10. 时间跨度同时给覆盖度：数据首末日 + 有数据天数/总天数，区分「跨度」与「密度」，稀疏数据不得表述为趋势。
+                        11. 图表用 Markdown 表格或 ASCII 条形图呈现，不生成依赖 CDN/外链的 HTML（离线环境会空白）。""", null);
     }
 
     private void upsertScenario(String name, String displayName, String icon, String description,
