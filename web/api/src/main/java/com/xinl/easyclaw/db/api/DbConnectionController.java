@@ -43,12 +43,15 @@ public class DbConnectionController {
     private final DbConnectionService db;
     private final CloudBootstrapService cloudBootstrap;
     private final OpsCryptoService crypto;
+    private final com.xinl.easyclaw.db.service.DbQueryExecutor queryExecutor;
 
     public DbConnectionController(DbConnectionService db, CloudBootstrapService cloudBootstrap,
-                                  OpsCryptoService crypto) {
+                                  OpsCryptoService crypto,
+                                  com.xinl.easyclaw.db.service.DbQueryExecutor queryExecutor) {
         this.db = db;
         this.cloudBootstrap = cloudBootstrap;
         this.crypto = crypto;
+        this.queryExecutor = queryExecutor;
     }
 
     /**
@@ -147,6 +150,28 @@ public class DbConnectionController {
     public Map<String, Object> disconnect(@RequestParam String workspaceId,
                                           @RequestParam String connKey) {
         return Map.of("connections", db.disconnect(workspaceId, connKey));
+    }
+
+    /**
+     * 活跃连接的表清单（V31，右侧面板数据源）：schema.table 复合名（排除系统 schema）。
+     * 带 table 参数时返回该表的列结构文本（前端点击表名展开）。
+     */
+    @PostMapping("/tables")
+    public Map<String, Object> tables(@RequestParam String workspaceId,
+                                      @RequestParam String connKey,
+                                      @RequestParam(required = false) String table) {
+        DbConnectionService.DbSession session = db.session(workspaceId, connKey);
+        if (session == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "连接不存在或已断开: " + connKey);
+        }
+        try {
+            if (table == null || table.isBlank()) {
+                return Map.of("tables", queryExecutor.listTables(session));
+            }
+            return Map.of("schema", queryExecutor.renderSchema(session, session.database(), table));
+        } catch (IllegalStateException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
+        }
     }
 
     @GetMapping("/status")

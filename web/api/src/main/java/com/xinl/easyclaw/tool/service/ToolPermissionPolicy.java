@@ -60,7 +60,11 @@ public final class ToolPermissionPolicy {
             // 本地知识库只读工具：knowledge 目录虽在沙箱禁止路径内，但这三个工具只能读
             // 知识库自己的条目、不触碰用户文件、不对外发送，性质与 memory_search/get 相同。
             // knowledge_write 不在此列 —— 它会真正落盘新增/覆盖知识条目，必须保留确认。
-            "knowledge_list", "knowledge_search", "knowledge_read"
+            "knowledge_list", "knowledge_search", "knowledge_read",
+            // 数据库三工具（V31 静默放行）：db_status/db_schema 是纯元数据读取；
+            // db_query 有 DbQueryGuard 只读防线（首词白名单 + 危险子句定位匹配），
+            // 物理防线是 DB 只读账号——readonly 已定，行为层不再逐次弹确认。
+            "db_query", "db_schema", "db_status"
     );
 
     /**
@@ -75,10 +79,7 @@ public final class ToolPermissionPolicy {
             // 运维远程执行：命令在用户服务器上真实生效，必须每次显式确认。
             // 仅注册 ASK 规则还不够「无法绕过」——ops 场景同时停用白名单机制
             // （ScenarioResolver.whitelistEnabled），回合/永久授权都不会摘掉这条 ASK 规则
-            "remote_shell",
-            // 数据库查询（V30）：SQL 在用户数据库上真实执行，必须每次显式确认。
-            // 与 remote_shell 同理：db 场景停用白名单机制，回合/永久授权无法静音
-            "db_query", "db_schema", "db_status"
+            "remote_shell"
     );
 
     /** 静默放行的只读工具名（不可变） */

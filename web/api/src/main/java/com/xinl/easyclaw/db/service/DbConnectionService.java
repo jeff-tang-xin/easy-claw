@@ -174,6 +174,25 @@ public class DbConnectionService {
         return s != null && s.alive() ? s : null;
     }
 
+    /**
+     * 会话级 DB 上下文（V31）：随 chat 消息注入 LLM，让模型免探测即知连接基本信息
+     * （类型/版本/主机/库/schema 清单/只读）。会话不存在或已断开返回 null（不注入）。
+     */
+    public String contextFor(String workspaceId, String connKey) {
+        DbSession s = session(workspaceId, connKey);
+        if (s == null) {
+            return null;
+        }
+        String version = s.version() == null ? "" : s.version().split("\n")[0].trim();
+        return "[DB 连接上下文] 数据库类型=" + s.dbType()
+                + " 版本=" + version
+                + " 主机=" + s.host() + ":" + s.port()
+                + " 库=" + s.database()
+                + (s.schemaHint() == null ? "" : " 有表的schema=" + s.schemaHint())
+                + (s.readonlyHint() ? " 只读模式（仅允许 SELECT/WITH 查询）" : "")
+                + "。表名可用 db_schema 工具查询，查询时使用 schema.table 限定名。";
+    }
+
     /** 活跃连接快照（status 端点 / 前端渲染 / MCP db_status 的类型化契约）。 */
     public List<DbConnectionStatus> status(String workspaceId) {
         Map<String, DbSession> ws = sessions.get(workspaceId);
@@ -357,6 +376,10 @@ public class DbConnectionService {
         private final String version;
         private final Instant connectedAt;
         private final String connKey;
+        /** 建连时探测的「有用户表的 schema」清单（逗号拼接，仅 PG；探测失败为 null）。
+         *  PG 的 schema ≠ 库，表常落在非默认 schema（如 hub）——注入 LLM 上下文用，
+         *  免去模型盲目探测。MySQL 的 schema=库（无需单独提示），其他库型暂不探测。 */
+        private final String schemaHint;
 
         DbSession(Connection connection, SpokeDbConnectionView cfg, String database, String connKey)
                 throws SQLException {
@@ -374,6 +397,7 @@ public class DbConnectionService {
             this.version = connection.getMetaData().getDatabaseProductVersion();
             this.connectedAt = Instant.now();
             this.connKey = connKey;
+            this.schemaHint = probeSchemaHint(connection, cfg.dbType());
         }
 
         /**
@@ -428,6 +452,10 @@ public class DbConnectionService {
             return connectedAt;
         }
 
+        public String schemaHint() {
+            return schemaHint;
+        }
+
         public String connKey() {
             return connKey;
         }
@@ -449,6 +477,27 @@ public class DbConnectionService {
                 }
             } catch (SQLException e) {
                 log.debug("关闭数据库连接失败（忽略）: {}", e.getMessage());
+            }
+        }
+
+        /**
+         * 建连时探测「有用户表的 schema」清单（仅 PG）：PG 的 schema ≠ 库，表常落在
+         * 非默认 schema（如 hub），不提示的话模型要盲查 information_schema 才能发现。
+         * 探测失败返回 null——建连不因元数据探测失败而阻断。
+         */
+        private static String probeSchemaHint(Connection connection, String dbType) {
+            if (!"postgresql".equalsIgnoreCase(dbType)) {
+                return null;
+            }
+            try (java.sql.Statement st = connection.createStatement();
+                 java.sql.ResultSet rs = st.executeQuery(
+                         "SELECT string_agg(DISTINCT table_schema, ', ' ORDER BY table_schema) "
+                                 + "FROM information_schema.tables "
+                                 + "WHERE table_schema <> 'information_schema' AND table_schema NOT LIKE 'pg_%'")) {
+                return rs.next() ? rs.getString(1) : null;
+            } catch (SQLException e) {
+                log.debug("schema 清单探测失败（忽略）: {}", e.getMessage());
+                return null;
             }
         }
     }

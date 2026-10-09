@@ -89,4 +89,19 @@ public class DbQueryExecutor {
             return "❌ 查询表结构失败: " + e.getMessage();
         }
     }
+
+    /**
+     * 表清单编排（V31，右侧面板数据源）：schema.table 复合名清单。
+     * 失败抛 IllegalStateException（控制器映射 502），与 connect/databases 同口径。
+     */
+    public java.util.List<String> listTables(DbConnectionService.DbSession session) {
+        try {
+            return session.withConnection(conn ->
+                    java.util.List.copyOf(DbSchemaRenderer.listTablesForUi(conn, session.dbType())));
+        } catch (SQLException e) {
+            log.warn("表清单查询失败: serverKey={}, db={}, err={}",
+                    session.serverKey(), session.database(), e.getMessage());
+            throw new IllegalStateException("表清单查询失败: " + e.getMessage(), e);
+        }
+    }
 }

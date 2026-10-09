@@ -70,6 +70,11 @@ interface DbTab {
   sessionId: string;
   busy: boolean;
   messages: DbMsg[];
+  /** 表清单（schema.table 复合名；连接后自动加载，undefined = 未加载） */
+  tables?: string[];
+  tablesLoading?: boolean;
+  /** 展开的表结构（点击表名；再点收起） */
+  tableDetail?: { name: string; text: string } | null;
 }
 
 /** confirm 事件 content：{replyId, tools:[{id,name,input}]}（AgentService.buildConfirmJson） */
@@ -508,6 +513,50 @@ export default function DbPage() {
     }
   };
 
+  // ==================== 表清单（右侧面板：连接后直接展示，无需再操作） ====================
+
+  const loadTables = async (connKey: string) => {
+    if (!workspaceIdRef.current) return;
+    setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tablesLoading: true} : t)));
+    try {
+      const r = await postJson<{ tables: string[] }>(
+        `/api/db/tables?workspaceId=${encodeURIComponent(workspaceIdRef.current)}&connKey=${encodeURIComponent(connKey)}`,
+        {});
+      setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tables: r.tables ?? [], tablesLoading: false} : t)));
+    } catch {
+      // 表清单失败不阻断对话：置空清单，错误只在展开详情时可见
+      setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tables: [], tablesLoading: false} : t)));
+    }
+  };
+
+  const toggleTable = async (connKey: string, table: string) => {
+    const cur = tabsRef.current.find((t) => t.connKey === connKey);
+    if (cur?.tableDetail?.name === table) {
+      setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tableDetail: null} : t)));
+      return;
+    }
+    setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tableDetail: {name: table, text: '加载中…'}} : t)));
+    try {
+      const r = await postJson<{ schema: string }>(
+        `/api/db/tables?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`
+        + `&connKey=${encodeURIComponent(connKey)}&table=${encodeURIComponent(table)}`,
+        {});
+      setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tableDetail: {name: table, text: r.schema ?? ''}} : t)));
+    } catch (e) {
+      setTabs((prev) => prev.map((t) => (t.connKey === connKey ? {...t, tableDetail: {name: table, text: String(e)}} : t)));
+    }
+  };
+
+  // 活跃 tab 首次展示时拉表清单（连接成功 setActiveTabKey 后自动触发）
+  useEffect(() => {
+    if (!activeTabKey) return;
+    const tab = tabsRef.current.find((t) => t.connKey === activeTabKey);
+    if (tab && tab.tables === undefined && !tab.tablesLoading) {
+      void loadTables(tab.connKey);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTabKey]);
+
   // ==================== 对话 ====================
 
   const sendChat = () => {
@@ -671,8 +720,34 @@ export default function DbPage() {
           </div>
         </div>
 
-        {/* 右侧栏：平台下发的数据库连接清单 + 两级选择器 */}
+        {/* 右侧栏：当前连接的表清单（连接后直接展示）+ 平台数据库连接清单 */}
         <aside className="ops-side">
+          {activeTab && (
+            <div className="db-tables-panel">
+              <div className="ops-side-head">
+                📋 {activeTab.database} 的表（{activeTab.tablesLoading ? '…' : (activeTab.tables?.length ?? 0)}）
+              </div>
+              {activeTab.tablesLoading && <div className="ops-empty">正在读取表清单…</div>}
+              {!activeTab.tablesLoading && (activeTab.tables?.length ?? 0) === 0 && (
+                <div className="ops-empty">没有可见表（或账号无权限）</div>
+              )}
+              <ul className="db-table-list">
+                {(activeTab.tables ?? []).map((t) => (
+                  <li
+                    key={t}
+                    className={activeTab.tableDetail?.name === t ? 'active' : ''}
+                    onClick={() => void toggleTable(activeTab.connKey, t)}
+                    title="点击查看表结构"
+                  >
+                    {t}
+                  </li>
+                ))}
+              </ul>
+              {activeTab.tableDetail && (
+                <pre className="db-table-detail">{activeTab.tableDetail.text}</pre>
+              )}
+            </div>
+          )}
           <div className="ops-side-head">平台数据库连接（{dbConns.length}）</div>
           {dbConns.length === 0 && (
             <div className="ops-empty">

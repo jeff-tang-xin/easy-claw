@@ -495,6 +495,14 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
             sendJson(sessionId, StreamEvent.end());
             return;
         }
+        // DB 会话上下文注入（V31）：连接基本信息随消息供给 LLM（类型/版本/库/schema 清单/
+        // 只读），免去模型每轮盲目探测。放在空消息防护之后——拼接不应让空消息绕过防护。
+        if (!connKey.isBlank() && !workspaceId.isBlank()) {
+            String dbCtx = dbConnections.contextFor(workspaceId, connKey);
+            if (dbCtx != null) {
+                msg = dbCtx + "\n\n" + msg;
+            }
+        }
         // 附件门禁（spec §4.3）：组织经 hub 目录关闭 allow_attachments 后，拒绝带附件消息
         if (!atts.isEmpty() && !featureGate.attachmentsAllowed()) {
             log.warn("WS chat 拒绝附件: 组织已禁用附件与图片上传, sessionId={}", sessionId);

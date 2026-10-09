@@ -272,3 +272,13 @@
 }
 
 .db-page .ops-confirm-deny { color: var(--danger, #dc2626); }
+
+
+/* ==================== 右侧表清单面板（V31：连接后直接展示） ==================== */
+.db-page .db-tables-panel { margin-bottom: 12px; }
+.db-page .db-table-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.db-page .db-table-list li { padding: 6px 10px; font-size: 12px; color: var(--text-secondary); cursor: pointer; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.db-page .db-table-list li:last-child { border-bottom: none; }
+.db-page .db-table-list li:hover { background: #f0f7ff; }
+.db-page .db-table-list li.active { background: #f0f7ff; color: var(--accent); font-weight: 600; }
+.db-page .db-table-detail { margin: 8px 0 0; padding: 10px; max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 11.5px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; }

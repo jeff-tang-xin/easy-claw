@@ -55,30 +55,49 @@ public final class DbSchemaRenderer {
                 + (session.readonlyHint() ? "（只读）" : "");
     }
 
+    /** 表清单（schema.table 复合名，排除系统 schema）：表清单端点与 db_schema 共用。 */
+    public static List<String> listTablesForUi(Connection conn, String dbType) throws SQLException {
+        return listTables(conn, "oracle".equals(dbType) ? ORACLE : INFORMATION_SCHEMA, null, dbType);
+    }
+
     /** 表结构 → 紧凑文本；按库类型选方言（Oracle 走 all_* 视图，其余走 information_schema）。 */
     public static String renderSchema(Connection conn, String dbType, String targetDb, String table)
             throws SQLException {
         SchemaDialect dialect = "oracle".equals(dbType) ? ORACLE : INFORMATION_SCHEMA;
+        // PG/MySQL 的表清单是 schema.table 复合名（跨 schema），列查询按复合名拆分定位
+        boolean composite = "postgresql".equalsIgnoreCase(dbType) || "mysql".equalsIgnoreCase(dbType);
         StringBuilder sb = new StringBuilder(bannerOf(conn, dbType, targetDb)).append("\n\n");
-        List<String> tables = listTables(conn, dialect, targetDb);
+        List<String> tables = listTables(conn, dialect, targetDb, dbType);
         if (tables.isEmpty()) {
-            sb.append(dialect.scopeNoun()).append(" ").append(targetDb)
-                    .append(" 中没有可见表（0 tables，或当前账号无权限）");
+            sb.append("没有可见表（0 tables，或当前账号无权限）");
             return sb.toString();
         }
-        List<String> wanted = table == null || table.isBlank()
-                ? tables : tables.stream().filter(t -> t.equalsIgnoreCase(table.trim())).toList();
+        List<String> wanted;
+        if (table == null || table.isBlank()) {
+            wanted = tables;
+        } else {
+            String t = table.trim();
+            // 参数可为复合名（hub.organizations）或裸名（organizations——按后缀跨 schema 命中）
+            wanted = tables.stream().filter(x -> x.equalsIgnoreCase(t)
+                    || x.toLowerCase().endsWith("." + t.toLowerCase())).toList();
+        }
         if (wanted.isEmpty()) {
-            sb.append("表 ").append(table).append(" 不存在。").append(dialect.scopeNoun())
-                    .append(" ").append(targetDb).append(" 中的表（").append(tables.size())
+            sb.append("表 ").append(table).append(" 不存在。可见表（").append(tables.size())
                     .append("）: ").append(String.join(", ", tables));
             return sb.toString();
         }
         try (PreparedStatement ps = conn.prepareStatement(dialect.columnsSql())) {
-            ps.setString(1, targetDb);
             for (String t : wanted) {
                 sb.append("## ").append(t).append("\n");
-                ps.setString(2, t);
+                if (composite && t.indexOf('.') > 0) {
+                    int dot = t.indexOf('.');
+                    ps.setString(1, t.substring(0, dot));
+                    ps.setString(2, t.substring(dot + 1));
+                } else {
+                    // Oracle/SQLServer：清单为裸名，schema/owner = targetDb
+                    ps.setString(1, targetDb);
+                    ps.setString(2, t);
+                }
                 try (ResultSet rs = ps.executeQuery()) {
                     boolean any = false;
                     while (rs.next()) {
@@ -106,8 +125,33 @@ public final class DbSchemaRenderer {
         return "Y".equalsIgnoreCase(raw) || "YES".equalsIgnoreCase(raw);
     }
 
-    private static List<String> listTables(Connection conn, SchemaDialect dialect, String targetDb)
+    private static List<String> listTables(Connection conn, SchemaDialect dialect, String targetDb, String dbType)
             throws SQLException {
+        // PG/MySQL：列「非系统 schema 的全部表」，返回 schema.table 复合名——旧实现把库名当
+        // schema 过滤（WHERE table_schema = 库名），PG 下库名 ≠ schema 名时永远查空。
+        // MySQL 的 schema=库，限定 DATABASE() 保持单库语义；PG 跨 schema 全列。
+        if ("postgresql".equalsIgnoreCase(dbType)) {
+            return listComposite(conn,
+                    "SELECT table_schema || '.' || table_name FROM information_schema.tables "
+                            + "WHERE table_schema <> 'information_schema' AND table_schema NOT LIKE 'pg_%' ORDER BY 1");
+        }
+        if ("mysql".equalsIgnoreCase(dbType)) {
+            return listComposite(conn,
+                    "SELECT CONCAT(table_schema, '.', table_name) FROM information_schema.tables "
+                            + "WHERE table_schema = DATABASE() ORDER BY 1");
+        }
+        if ("oracle".equalsIgnoreCase(dbType)) {
+            return listComposite(conn,
+                    "SELECT owner || '.' || table_name FROM all_tables "
+                            + "WHERE owner NOT IN ('SYS','SYSTEM','OUTLN','XDB','CTXSYS','MDSYS','OLAPSYS',"
+                            + "'LBACSYS','DVSYS','AUDSYS','WMSYS','DBSNMP','APPQOSSYS') ORDER BY 1");
+        }
+        if ("sqlserver".equalsIgnoreCase(dbType)) {
+            return listComposite(conn,
+                    "SELECT table_schema + '.' + table_name FROM information_schema.tables "
+                            + "WHERE table_schema <> 'INFORMATION_SCHEMA' AND table_schema NOT LIKE 'db_%' ORDER BY 1");
+        }
+        // 未知库型：退回方言默认（schema/owner = targetDb，清单为裸名）
         List<String> tables = new ArrayList<>();
         try (PreparedStatement ps = conn.prepareStatement(dialect.tablesSql())) {
             ps.setString(1, targetDb);
@@ -115,6 +159,18 @@ public final class DbSchemaRenderer {
                 while (rs.next()) {
                     tables.add(rs.getString(1));
                 }
+            }
+        }
+        return tables;
+    }
+
+    /** 执行无参复合名清单 SQL（schema.table）。 */
+    private static List<String> listComposite(Connection conn, String sql) throws SQLException {
+        List<String> tables = new ArrayList<>();
+        try (PreparedStatement ps = conn.prepareStatement(sql);
+             ResultSet rs = ps.executeQuery()) {
+            while (rs.next()) {
+                tables.add(rs.getString(1));
             }
         }
         return tables;

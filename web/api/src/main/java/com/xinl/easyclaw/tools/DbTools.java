@@ -19,9 +19,9 @@ import org.springframework.stereotype.Component;
  *   <li>{@code db_query}：执行只读查询——<b>无 database 参数</b>，作用域锁定会话绑定库，
  *       跨库 JOIN 用 SQL 限定名。</li>
  * </ul>
- * 权限语义：三个工具全部 ALWAYS_ASK——每次调用都弹用户确认，用户点「本轮总是允许/
- * 永久允许」也无法让它静音（生产库受控入口，见 ToolPermissionPolicy 与
- * WorkspaceAgentBuilder.buildPermissionContext）。
+ * 权限语义（V31）：三工具静默放行（ToolPermissionPolicy SILENTLY_ALLOWED）——
+ * db_status/db_schema 是纯元数据读取；db_query 有 {@link DbQueryGuard} 只读防线
+ * （首词白名单 + 危险子句定位匹配），物理防线是 DB 只读账号，行为层不再逐次弹确认。
  * <p>
  * 呈现双通道（设计定稿）：给 AI 的查询结果经 {@link DbResultSanitizer} 脱敏 + 三重截断；
  * 用户在确认弹窗看真实 SQL、在聊天流看渲染后的 Markdown。
@@ -58,7 +58,8 @@ public class DbTools {
     // ==================== db_schema ====================
 
     @Tool(name = "db_schema", description = "查看数据库的表结构：表清单与各表列名/类型（紧凑文本）。\n"
-            + "【何时用】写查询前先了解表结构；参数 database 可看同一连接实例上其他库的结构（当前查询仍锁定在本会话的库）。\n"
+            + "【何时用】写查询前先了解表结构；表清单返回 schema.table 复合名（如 hub.organizations），"
+            + "查询时直接用作 SQL 限定名。参数 table 可只看某张表的列（支持复合名或裸名）。\n"
             + "【前置】用户必须先在 DB 页面建立连接。")
     public String dbSchema(
             @ToolParam(name = "database", required = false,
@@ -78,8 +79,8 @@ public class DbTools {
     // ==================== db_query ====================
 
     @Tool(name = "db_query", description = "在当前会话绑定的库上执行一条只读 SQL 查询（SELECT/WITH），返回 Markdown 表格（敏感列已脱敏，超长已截断）。\n"
-            + "【何时用】查数据、统计、核对业务问题。作用域锁定本会话的库——跨库查询用 SQL 限定名（如 other_db.table）。\n"
-            + "【边界】仅允许只读查询；写操作（INSERT/UPDATE/DELETE/DDL）会被拒绝。每次调用都会向用户弹确认（无法绕过）。\n"
+            + "【何时用】查数据、统计、核对业务问题。作用域锁定本会话的库——跨 schema 查询用 SQL 限定名（如 hub.table）。\n"
+            + "【边界】仅允许只读查询；写操作（INSERT/UPDATE/DELETE/DDL）会被只读防线拒绝，数据库账号本身也是只读。\n"
             + "【注意】结果最多 500 行，需要聚合分析请写好 SQL；空结果会明确标注 0 rows。")
     public String dbQuery(
             @ToolParam(name = "sql", description = "要执行的只读 SQL（单条 SELECT/WITH 语句）") String sql,
