@@ -245,7 +245,7 @@ public class WorkspaceController {
         }
 
         workspaceManager.createSession(id, entity.getId(), entity.getTitle(),
-                entity.getWorktreePath(), entity.getBranch());
+                entity.getWorktreePath(), entity.getBranch(), entity.getBoundKey());
         return entity;
     }
 
