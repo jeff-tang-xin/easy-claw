@@ -74,7 +74,7 @@ public class WorkspaceController {
     public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
     }
 
-    public record CreateSessionRequest(String title, BranchSpec branch) {
+    public record CreateSessionRequest(String title, BranchSpec branch, String boundKey) {
     }
 
     /**
@@ -217,6 +217,8 @@ public class WorkspaceController {
         entity.setStatus("active");
         entity.setCreatedAt(java.time.Instant.now());
         entity.setLastAccessedAt(java.time.Instant.now());
+        // 连接归属（db/ops 页）：结构化外键，重连/刷新恢复按它精确反查复用会话
+        entity.setBoundKey(req.boundKey());
 
         // 可选：挂 git worktree。branch 缺省或 type=none 时完全不触碰（行为与旧版一致）。
         BranchSpec spec = req.branch();

@@ -340,22 +340,23 @@ export default function OpsPage() {
   };
 
   /** 为一条连接创建专属智能体会话（一个连接一个 session，对话与输出互不串扰）。
-   * 标题带 serverKey 唯一键（有则附）：同名连接不撞车，会话反查可精确归属 */
+   * boundKey = serverKey（hub 下发连接唯一键，结构化外键）：重连/刷新恢复按它精确
+   * 反查复用会话，同名连接不会串会话；标题纯人读，归属不依赖标题字符串 */
   const createSessionFor = useCallback(async (connName: string, serverKey?: string | null): Promise<string> => {
     if (!workspaceId) return '';
     const s = await postJson<{ id: string }>(
       `/api/workspaces/${workspaceId}/sessions`,
-      {title: `运维 · ${connName}${serverKey ? ` [${serverKey}]` : ''}`});
+      {title: `运维 · ${connName}`, boundKey: serverKey ?? undefined});
     return s.id;
   }, [workspaceId]);
 
-  /** 反查该服务器的既有会话（标题带 serverKey 唯一键，防同名连接撞车——
-   * 跨服务器复用历史会造成「AI 说着 A 机的事、屏幕在 B 机」的认知偏差）；
+  /** 反查该服务器的既有会话（按 boundKey = serverKey 结构化精确命中）；
    * serverKey 缺失（老快照）返回 null 走新建 */
   const findOpsSession = async (c: ActiveConn): Promise<string | null> => {
     if (!c.serverKey) return null;
-    const sessions = await getJson<{ id: string; title: string }[]>(`/api/workspaces/${workspaceId}/sessions`);
-    const hit = (sessions ?? []).find((s) => s.title === `运维 · ${c.connName} [${c.serverKey}]`);
+    const sessions = await getJson<{ id: string; title: string; boundKey: string | null }[]>(
+      `/api/workspaces/${workspaceId}/sessions`);
+    const hit = (sessions ?? []).find((s) => s.boundKey === c.serverKey);
     return hit?.id ?? null;
   };
 

@@ -6,7 +6,8 @@ import java.time.Instant;
 
 @Entity
 @Table(name = "sessions", indexes = {
-    @Index(name = "idx_sessions_workspace_id", columnList = "workspace_id")
+    @Index(name = "idx_sessions_workspace_id", columnList = "workspace_id"),
+    @Index(name = "idx_sessions_bound_key", columnList = "workspace_id, bound_key")
 })
 @Data
 @Builder
@@ -45,4 +46,13 @@ public class SessionEntity {
      */
     @Column(name = "branch", length = 200)
     private String branch;
+
+    /**
+     * 绑定的连接标识（db/ops 页会话归属的结构化外键，hub 下发连接的唯一键）：
+     * db = connKey（serverKey/database）、ops = serverKey；null = 普通会话（ChatPage）。
+     * 重连/刷新恢复按 (workspaceId, boundKey) 精确反查复用会话——不依赖标题字符串
+     * （标题给人看、boundKey 给机器匹配，同名连接不会串会话）。
+     */
+    @Column(name = "bound_key", length = 200)
+    private String boundKey;
 }

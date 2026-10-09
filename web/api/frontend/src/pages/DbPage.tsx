@@ -348,12 +348,33 @@ export default function DbPage() {
     }
   }, []);
 
-  const createSessionFor = useCallback(async (title: string): Promise<string> => {
+  const createSessionFor = useCallback(async (title: string, boundKey?: string): Promise<string> => {
     const wsId = workspaceIdRef.current;
     const s = await postJson<{ id: string }>(
-      `/api/workspaces/${wsId}/sessions`, {title});
+      `/api/workspaces/${wsId}/sessions`, {title, boundKey});
     return s.id;
   }, []);
+
+  /** 解析连接的会话：先按 boundKey（结构化外键 = connKey，hub 下发连接唯一键）反查复用
+   * 旧会话并回放历史——重连/刷新恢复不丢对话；无旧会话则新建（标题纯人读，
+   * 归属由 boundKey 承担，同名连接不会串会话）。创建失败返回空 sid，由调用方提示。 */
+  const resolveSessionFor = async (conn: ActiveDbConn): Promise<{ sid: string; replayed: DbMsg[] | null }> => {
+    const wsId = workspaceIdRef.current;
+    if (!wsId) return {sid: '', replayed: null};
+    try {
+      const sessions = await getJson<{ id: string; title: string; boundKey: string | null }[]>(
+        `/api/workspaces/${wsId}/sessions`);
+      const old = (sessions ?? []).find((s) => s.boundKey === conn.connKey);
+      if (old) {
+        return {sid: old.id, replayed: await replayHistory(wsId, old.id)};
+      }
+    } catch { /* 反查/回放失败降级为新建 */ }
+    try {
+      return {sid: await createSessionFor(`数据库 · ${conn.serverName}/${conn.database}`, conn.connKey), replayed: null};
+    } catch {
+      return {sid: '', replayed: null};
+    }
+  };
 
   /** 页面刷新恢复：服务端仍活跃的连接补建 tab（按 connKey 去重，不抢激活） */
   useEffect(() => {
@@ -361,10 +382,8 @@ export default function DbPage() {
       const conns = await fetchStatus();
       for (const c of conns) {
         if (tabsRef.current.some((t) => t.connKey === c.connKey)) continue;
-        let sid = '';
-        try {
-          sid = await createSessionFor(`数据库 · ${c.serverName}/${c.database}`);
-        } catch {
+        const {sid, replayed} = await resolveSessionFor(c);
+        if (!sid) {
           setPageError(`「${c.serverName}/${c.database}」的智能体会话创建失败 —— 重连可重试`);
         }
         setTabs((prev) => prev.some((t) => t.connKey === c.connKey) ? prev : [...prev, {
@@ -381,7 +400,7 @@ export default function DbPage() {
           version: firstLine(c.version),
           sessionId: sid,
           busy: false,
-          messages: [],
+          messages: replayed ?? [],
         }]);
       }
     })();
@@ -517,28 +536,11 @@ export default function DbPage() {
         setPageError('连接未建立（服务端无该活跃连接）');
         return;
       }
-      // 复用旧会话：按标题反查该连接的历史会话（标题格式固定「数据库 · serverName/database」，
-      // 由本页 createSessionFor 生成），找到则复用其 sessionId 并回放历史——重连不丢对话；
-      // 反查失败或无旧会话时降级为新建（与旧行为一致）
-      let sid = '';
-      let replayed: DbMsg[] | null = null;
-      try {
-        // 标题带 serverKey 唯一键：同名连接（serverName 撞车）不会反查到彼此的会话——
-        // 跨连接复用历史会造成「AI 说着 A 库的事、屏幕在 B 库」的认知偏差
-        const wanted = `数据库 · ${conn.serverName}/${conn.database} [${conn.serverKey}]`;
-        const sessions = await getJson<{ id: string; title: string }[]>(`/api/workspaces/${workspaceId}/sessions`);
-        const old = (sessions ?? []).find((s) => s.title === wanted);
-        if (old) {
-          sid = old.id;
-          replayed = await replayHistory(workspaceId, sid);
-        }
-      } catch { /* 反查/回放失败降级为新建 */ }
+      // 会话解析：按 boundKey（= connKey 结构化外键）反查复用旧会话并回放历史；
+      // 无旧会话则新建（归属由 boundKey 承担，标题纯人读）
+      const {sid, replayed} = await resolveSessionFor(conn);
       if (!sid) {
-        try {
-          sid = await createSessionFor(`数据库 · ${conn.serverName}/${conn.database} [${conn.serverKey}]`);
-        } catch {
-          setPageError('智能体会话创建失败 —— 连接可用，对话不可用（重连可重试）');
-        }
+        setPageError('智能体会话创建失败 —— 连接可用，对话不可用（重连可重试）');
       }
       setTabs((prev) => [...prev, {
         connKey: conn.connKey,
