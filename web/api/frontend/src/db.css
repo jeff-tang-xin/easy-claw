@@ -22,7 +22,7 @@
 /* tab 上的运行中徽标 */
 .db-tab-busy {
   font-size: 0.72em;
-  color: #f59e0b;
+  color: var(--warning, #b45309);
 }
 
 /* 消息流：可滚动区域，占满 tab 条与幕布之间 */
@@ -45,8 +45,11 @@
 
 .db-msg-user {
   align-self: flex-end;
-  background: var(--accent-weak, #1e2a3a);
-  border: 1px solid var(--border, #2a2d35);
+  /* AntD 用户气泡：accent 弱化底 + 显式深字。--accent-weak 从未定义过，
+     旧写法永远落深色 fallback（#1e2a3a）→ 浅色主题下深底深字不可见 */
+  background: rgba(22, 119, 255, 0.08);
+  border: 1px solid rgba(22, 119, 255, 0.25);
+  color: var(--text, #1e293b);
   border-radius: 10px 10px 2px 10px;
   padding: 8px 12px;
 }
@@ -59,8 +62,8 @@
 
 .db-msg-error {
   align-self: flex-start;
-  color: #f87171;
-  border: 1px solid #f8717155;
+  color: var(--danger, #dc2626);
+  border: 1px solid rgba(220, 38, 38, 0.35);
   border-radius: 8px;
   padding: 6px 10px;
 }
@@ -102,13 +105,13 @@
 }
 
 .db-msg-text th {
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--panel-hover, #f1f5f9);
   position: sticky;
   top: 0;
 }
 
 .db-msg-text code {
-  background: rgba(255, 255, 255, 0.06);
+  background: rgba(15, 23, 42, 0.05);
   padding: 1px 5px;
   border-radius: 4px;
   font-size: 0.9em;
@@ -132,7 +135,7 @@
 }
 
 .db-msg-tool.running {
-  border-color: #f59e0b66;
+  border-color: rgba(180, 83, 9, 0.45);
 }
 
 .db-tool-head {
@@ -153,7 +156,7 @@
 .db-tool-result {
   margin: 6px 0 0;
   padding: 6px 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.03);
   border-radius: 6px;
   max-height: 180px;
   overflow: auto;
@@ -177,8 +180,8 @@
 .db-confirm-sql {
   margin: 4px 0;
   padding: 8px 10px;
-  background: rgba(250, 204, 21, 0.06);
-  border: 1px solid #facc1533;
+  background: var(--warning-bg, rgba(245, 158, 11, 0.12));
+  border: 1px solid rgba(180, 83, 9, 0.35);
   border-radius: 6px;
   font-size: 0.88em;
   white-space: pre-wrap;
@@ -233,3 +236,39 @@
 .db-picker-connect {
   width: 100%;
 }
+
+/* ==================== 浅色主题覆盖（.db-page 作用域） ====================
+   DbPage 骨架复用 ops.css，但 ops 是运维终端的深色主题（tab/确认卡等硬编码
+   深色值）。OpsPage 的深色是既定外观、不能动 ops.css，这里以 .db-page 作用域
+   把 DbPage 用到的深色块覆盖为浅色，对齐 styles.css 的 AntD token 基线。 */
+
+.db-page .ops-tab {
+  background: var(--panel-hover, #f1f5f9);
+  color: var(--text-secondary, #475569);
+  border-color: var(--border, #e2e8f0);
+}
+
+.db-page .ops-tab:hover { color: var(--text, #1e293b); }
+
+.db-page .ops-tab.active {
+  background: var(--panel, #ffffff);
+  color: var(--accent, #1677ff);
+  border-color: var(--border-strong, #cbd5e1);
+  /* AntD active tab：底部 accent 指示条 */
+  box-shadow: inset 0 -2px 0 var(--accent, #1677ff);
+}
+
+.db-page .ops-terminal-empty { color: var(--text-tertiary, #64748b); }
+
+.db-page .ops-confirm {
+  background: var(--panel, #ffffff);
+  border-color: rgba(180, 83, 9, 0.45);
+  box-shadow: var(--shadow-md);
+}
+
+.db-page .ops-confirm-allow {
+  background: var(--success, #059669);
+  border-color: var(--success, #059669);
+}
+
+.db-page .ops-confirm-deny { color: var(--danger, #dc2626); }

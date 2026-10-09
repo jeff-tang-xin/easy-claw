@@ -557,7 +557,7 @@ export default function DbPage() {
 
   const dbConns = cloud.dbConnections ?? [];
   return (
-    <div className="ops-page">
+    <div className="ops-page db-page">
       <header className="ops-topbar">
         <span className="ops-title">🗄️ 数据库工作台</span>
         <span className={'ops-status ' + (activeTab ? 'on' : 'off')}>
