@@ -168,6 +168,8 @@ export default function DbPage() {
   const [connectingKey, setConnectingKey] = useState<string | null>(null);
   const [pageError, setPageError] = useState('');
   const [curtain, setCurtain] = useState('');
+  /** 表清单过滤词（前端过滤，切换连接不清空——用户自行清除） */
+  const [tableFilter, setTableFilter] = useState('');
 
   const sockRef = useRef<OpsSocket | null>(null);
   const sockOpenRef = useRef(false);
@@ -183,6 +185,10 @@ export default function DbPage() {
 
   const activeTab = tabs.find((t) => t.connKey === activeTabKey) ?? null;
   const activeConfirm = activeTab ? pendingConfirms[activeTab.connKey] : undefined;
+  /** 表清单过滤结果（前端过滤；大小写不敏感） */
+  const visibleTables = activeTab
+    ? (activeTab.tables ?? []).filter((t) => t.toLowerCase().includes(tableFilter.trim().toLowerCase()))
+    : [];
 
   // ==================== 报表中心（V32） ====================
   const [reportsOpen, setReportsOpen] = useState(false);
@@ -891,11 +897,14 @@ export default function DbPage() {
               if (m.kind === 'tool') {
                 return (
                   <div key={i} className={'db-msg db-msg-tool' + (m.running ? ' running' : '')}>
-                    <div className="db-tool-head">
-                      {m.running ? '⚙' : '✓'} {m.toolName}
-                      {m.toolArgs && <code className="db-tool-args">{m.toolArgs}</code>}
-                    </div>
-                    {m.toolResult && <pre className="db-tool-result">{m.toolResult}</pre>}
+                    {/* 运行中强制展开看进度；完成后非受控（用户自由切换，默认折叠收起轨迹噪音） */}
+                    <details className="db-tool-details" open={m.running ? true : undefined}>
+                      <summary className="db-tool-head">
+                        {m.running ? '⚙' : '✓'} {m.toolName}
+                        {m.toolArgs && <code className="db-tool-args">{m.toolArgs}</code>}
+                      </summary>
+                      {m.toolResult && <pre className="db-tool-result">{m.toolResult}</pre>}
+                    </details>
                   </div>
                 );
               }
@@ -923,12 +932,22 @@ export default function DbPage() {
           <div className="ops-curtain">
             {pageError && <div className="ops-error">{pageError}</div>}
             <div className="ops-curtain-row">
-              <input
+              <textarea
                 value={curtain}
-                onChange={(e) => setCurtain(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) sendChat();
+                onChange={(e) => {
+                  setCurtain(e.target.value);
+                  // 自动增高：随内容 1→5 行生长，封顶 120px 后内部滚动
+                  e.target.style.height = 'auto';
+                  e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
                 }}
+                onKeyDown={(e) => {
+                  // Enter 发送 / Shift+Enter 换行；输入法组合中不触发
+                  if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    sendChat();
+                  }
+                }}
+                rows={1}
                 disabled={!activeTab || (activeTab?.busy ?? false)}
                 placeholder={activeTab
                   ? (activeTab.busy ? '智能体执行中…' : `向智能体提问（作用于 ${activeTab.database}）…`)
@@ -948,12 +967,22 @@ export default function DbPage() {
               <div className="ops-side-head">
                 📋 {activeTab.database} 的表（{activeTab.tablesLoading ? '…' : (activeTab.tables?.length ?? 0)}）
               </div>
+              <input
+                className="db-table-search"
+                value={tableFilter}
+                onChange={(e) => setTableFilter(e.target.value)}
+                placeholder="🔍 过滤表名…"
+                disabled={activeTab.tablesLoading}
+              />
               {activeTab.tablesLoading && <div className="ops-empty">正在读取表清单…</div>}
               {!activeTab.tablesLoading && (activeTab.tables?.length ?? 0) === 0 && (
                 <div className="ops-empty">没有可见表（或账号无权限）</div>
               )}
+              {!activeTab.tablesLoading && (activeTab.tables?.length ?? 0) > 0 && visibleTables.length === 0 && (
+                <div className="ops-empty">无匹配表</div>
+              )}
               <ul className="db-table-list">
-                {(activeTab.tables ?? []).map((t) => (
+                {visibleTables.map((t) => (
                   <li
                     key={t}
                     className={activeTab.tableDetail?.name === t ? 'active' : ''}
@@ -982,7 +1011,7 @@ export default function DbPage() {
               const inUse = tabs.some((t) => t.serverKey === c.serverKey);
               const expanded = picker?.serverKey === c.serverKey;
               return (
-                <li key={c.serverKey} className={expanded ? 'active' : ''}>
+                <li key={c.serverKey} className={(expanded ? 'active' : '') + (inUse ? ' in-use' : '')}>
                   <div className="db-conn-row" onClick={() => void openPicker(c)}>
                     <div className="ops-conn-info">
                       <b>{dbIcon(c.dbType)} {c.name}{inUse ? ' · 使用中' : ''}</b>

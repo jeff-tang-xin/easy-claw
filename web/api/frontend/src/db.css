@@ -301,3 +301,16 @@
 .db-page .db-report-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; background: #f8fafc; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; font-size: 12px; color: #64748b; flex: none; }
 .db-page .db-report-preview-bar button { padding: 3px 10px; font-size: 12px; }
 .db-page .db-report-preview-bar + .db-report-preview { border-radius: 0 0 8px 8px; }
+/* 表清单过滤框 */
+.db-page .db-table-search { margin: 0 0 8px; width: 100%; box-sizing: border-box; padding: 5px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12.5px; background: #fff; }
+.db-page .db-table-search:focus { outline: none; border-color: #1677ff; }
+.db-page .db-table-search:disabled { background: #f5f5f5; color: #94a3b8; }
+/* 工具卡片折叠（details/summary：去原生三角，头部即切换区） */
+.db-page .db-tool-details summary { cursor: pointer; list-style: none; }
+.db-page .db-tool-details summary::-webkit-details-marker { display: none; }
+/* 多行输入（textarea 对齐原 input 观感；自动增高由 JS 控制） */
+.db-page .ops-curtain-row textarea { flex: 1; resize: none; min-height: 36px; max-height: 120px; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13.5px; font-family: inherit; line-height: 1.5; background: #fff; color: inherit; }
+.db-page .ops-curtain-row textarea:focus { outline: none; border-color: #1677ff; }
+.db-page .ops-curtain-row textarea:disabled { background: #f5f5f5; color: #94a3b8; }
+/* 连接卡片「使用中」高亮（主色左边条） */
+.db-page .ops-conn-list li.in-use { border-left: 3px solid #1677ff; }
