@@ -160,6 +160,8 @@ export default function DbPage() {
   const workspaceIdRef = useRef(workspaceId);
   workspaceIdRef.current = workspaceId;
   const streamRef = useRef<Record<string, string>>({}); // sessionId → 进行中 text 段索引 key
+  /** 消息流滚动容器：新消息/流式增量时自动跟随到底部（用户上翻看历史时不打扰） */
+  const scrollRef = useRef<HTMLDivElement | null>(null);
 
   const activeTab = tabs.find((t) => t.connKey === activeTabKey) ?? null;
   const activeConfirm = activeTab ? pendingConfirms[activeTab.connKey] : undefined;
@@ -557,6 +559,31 @@ export default function DbPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTabKey]);
 
+  // ==================== 消息流自动滚动 ====================
+
+  // tab 切换：无条件滚到最新（用户切 tab 就是想看最新对话）
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [activeTabKey]);
+
+  // 消息更新：仅当用户接近底部时跟随（上翻看历史时不强行拉底）。
+  // 信号取最后一条消息各文本字段长度——流式增量不改变 messages.length，
+  // 只依赖条数会漏掉「同一条消息内容持续增长」的滚动时机
+  const msgs = activeTab?.messages;
+  const lastMsgSig = msgs && msgs.length > 0
+    ? `${msgs.length}:${msgs[msgs.length - 1]?.content.length ?? 0}`
+      + `:${msgs[msgs.length - 1]?.toolResult?.length ?? 0}`
+      + `:${msgs[msgs.length - 1]?.toolArgs?.length ?? 0}`
+    : '0';
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (el.scrollHeight - el.scrollTop - el.clientHeight < 120) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [lastMsgSig]);
+
   // ==================== 对话 ====================
 
   const sendChat = () => {
@@ -647,7 +674,7 @@ export default function DbPage() {
           </div>
 
           {/* 消息流：当前 tab 的对话（AI 回复 Markdown 渲染，db_query 结果即其中的表格） */}
-          <div className="db-stream">
+          <div className="db-stream" ref={scrollRef}>
             {!activeTab && (
               <div className="ops-terminal-empty">
                 <p>先选择才能对话：</p>
