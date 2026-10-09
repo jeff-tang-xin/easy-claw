@@ -396,7 +396,7 @@ public class SystemDataSeeder {
                         9. 异常与「特征」类结论必须附验证依据：如判断批量导入，需给出同秒/同分钟多笔、单号连续性等验证查询的结果；验证不了就明确标注为待验证假设，不写成事实。
                         10. 时间跨度同时给覆盖度：数据首末日 + 有数据天数/总天数，区分「跨度」与「密度」，稀疏数据不得表述为趋势。
                         11. 图表用 Markdown 表格或 ASCII 条形图呈现，不生成依赖 CDN/外链的 HTML（离线环境会空白）。
-                        12. 分析类任务完成后用 db_report 保存报表（完整 HTML，图表脚本内联不引 CDN），标题简洁；用户只要口头结论时不必保存。""", null);
+                        12. 深度分析报告用 db_report 保存（完整 HTML，图表脚本内联不引 CDN）；用户要「监控页/看板/常看的数据面板」用 db_dashboard 声明区块清单（kpi/bar/table/note 四类，每块一条 SQL，打开即实时查询）——看板不写 HTML，只声明区块。标题都取简洁。""", null);
     }
 
     private void upsertScenario(String name, String displayName, String icon, String description,

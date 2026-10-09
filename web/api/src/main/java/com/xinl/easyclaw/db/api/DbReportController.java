@@ -66,6 +66,19 @@ public class DbReportController {
                 .body(e.getHtmlContent().getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 刷新看板（kind=dashboard）：实时执行全部区块 SQL 并渲染 HTML——
+     * 「每次打开就查询一次」的落点。report 是静态快照，刷新返回 400。
+     */
+    @PostMapping("/{id}/refresh")
+    public Map<String, Object> refresh(@PathVariable Long id, @RequestParam String workspaceId) {
+        String html = reports.refreshDashboard(id, workspaceId);
+        if (html == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "静态报表不支持刷新（仅看板可实时刷新）");
+        }
+        return Map.of("html", html);
+    }
+
     /** 删除报表 */
     @PostMapping("/{id}/delete")
     public Map<String, Object> delete(@PathVariable Long id, @RequestParam String workspaceId) {

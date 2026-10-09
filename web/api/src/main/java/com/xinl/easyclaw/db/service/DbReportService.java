@@ -26,9 +26,11 @@ public class DbReportService {
     public static final int MAX_HTML_CHARS = 5_000_000;
 
     private final DbReportRepository repo;
+    private final DbDashboardRenderer dashboardRenderer;
 
-    public DbReportService(DbReportRepository repo) {
+    public DbReportService(DbReportRepository repo, DbDashboardRenderer dashboardRenderer) {
         this.repo = repo;
+        this.dashboardRenderer = dashboardRenderer;
     }
 
     @Transactional
@@ -59,11 +61,58 @@ public class DbReportService {
                 .dbType(dbType)
                 .databaseName(databaseName)
                 .title(trimmedTitle)
+                .kind("report")
                 .htmlContent(html)
                 .build());
         log.info("DB 报表已保存: id={}, ws={}, title={}, size={}",
                 saved.getId(), workspaceId, trimmedTitle, html.length());
         return saved;
+    }
+
+    /**
+     * 保存数据看板（kind=dashboard）：存区块清单 JSON，不存渲染结果——
+     * 打开/刷新时由 {@link DbDashboardRenderer} 实时执行渲染。
+     * 保存即校验 blocks 结构（类型合法/SQL 非空），AI 传错立即反馈。
+     */
+    @Transactional
+    public DbReportEntity saveDashboard(String workspaceId, String connKey, String serverKey, String serverName,
+                                        String dbType, String databaseName, String title, String blocksJson) {
+        if (workspaceId == null || workspaceId.isBlank()) {
+            throw new IllegalArgumentException("workspaceId 不能为空");
+        }
+        List<DbDashboardRenderer.Block> blocks = dashboardRenderer.parseBlocks(blocksJson);
+        String trimmedTitle = title == null || title.isBlank() ? "未命名看板" : title.trim();
+        if (trimmedTitle.length() > 256) {
+            trimmedTitle = trimmedTitle.substring(0, 256);
+        }
+        DbReportEntity saved = repo.save(DbReportEntity.builder()
+                .workspaceId(workspaceId)
+                .connKey(connKey)
+                .serverKey(serverKey)
+                .serverName(serverName)
+                .dbType(dbType)
+                .databaseName(databaseName)
+                .title(trimmedTitle)
+                .kind("dashboard")
+                .blocks(blocksJson)
+                .build());
+        log.info("DB 看板已保存: id={}, ws={}, title={}, blocks={}",
+                saved.getId(), workspaceId, trimmedTitle, blocks.size());
+        return saved;
+    }
+
+    /**
+     * 刷新看板：实时执行全部区块 SQL 并渲染 HTML（「每次打开就查询一次」的落点）。
+     * 仅 kind=dashboard 可刷新；report 是静态快照，返回 null 由控制器映射 400。
+     */
+    @Transactional(readOnly = true)
+    public String refreshDashboard(Long id, String workspaceId) {
+        DbReportEntity e = repo.findByIdAndWorkspaceId(id, workspaceId)
+                .orElseThrow(() -> new IllegalArgumentException("看板不存在: " + id));
+        if (!"dashboard".equals(e.getKind())) {
+            return null;
+        }
+        return dashboardRenderer.render(workspaceId, e.getConnKey(), e.getBlocks());
     }
 
     /** 列表（元数据投影，不含 htmlContent），新→旧排序 */

@@ -55,8 +55,14 @@ public class DbTools {
         if (session == null) {
             return notConnected();
         }
+        StringBuilder conns = new StringBuilder();
+        for (DbConnectionService.DbConnectionStatus c : db.status(workspace.getWorkspaceId())) {
+            conns.append("\n- ").append(c.serverName()).append(" (connKey=").append(c.connKey())
+                    .append(", ").append(c.dbType()).append(")");
+        }
         return DbSchemaRenderer.banner(session) + "\n状态: 已连接"
-                + "\n只读提示: " + (session.readonlyHint() ? "是（连接配置标记为只读，请只执行查询）" : "未标记（仍请只执行查询，写操作由数据库账号权限兜底）");
+                + "\n只读提示: " + (session.readonlyHint() ? "是（连接配置标记为只读，请只执行查询）" : "未标记（仍请只执行查询，写操作由数据库账号权限兜底）")
+                + "\n活跃连接清单（跨库看板/查询引用 connKey 用）:" + conns;
     }
 
     // ==================== db_schema ====================
@@ -125,6 +131,38 @@ public class DbTools {
                     title, html);
             return "✅ 报表已保存（#" + saved.getId() + " " + saved.getTitle()
                     + "，约 " + (html.length() / 1024 + 1) + "KB）——DB 页面「📊 报表」面板可查看与下载。";
+        } catch (IllegalArgumentException e) {
+            return "❌ " + e.getMessage();
+        }
+    }
+
+    // ==================== db_dashboard ====================
+
+    @Tool(name = "db_dashboard", description = "创建数据看板（实时刷新）：你只声明区块清单，不写 HTML——每次打开/刷新时后端实时执行各区块 SQL 渲染。\n"
+            + "【何时用】用户要「监控页/看板/常看的数据面板」时用本工具；一次性深度分析报告用 db_report。\n"
+            + "【区块类型】kpi（SQL 返回单值）/ bar（SQL 返回两列 label,value，≤20 条）/ table（任意列）/ note（口径说明，无 SQL）。\n"
+            + "【跨库】区块可带 connKey 指定其他活跃连接（db_status 返回清单）；缺省用当前会话连接。\n"
+            + "【前置】用户必须先在 DB 页面建立连接。")
+    public String dbDashboard(
+            @ToolParam(name = "title", description = "看板标题（简洁，如「订单监控」）") String title,
+            @ToolParam(name = "blocks", description = "区块清单 JSON 数组，如 [{\"type\":\"kpi\",\"label\":\"总订单\",\"sql\":\"SELECT COUNT(*) FROM t\"}]") String blocks,
+            WorkspaceContext workspace,
+            RuntimeContext rc) {
+        if (workspace == null || workspace.getWorkspaceId() == null) {
+            return "❌ 无法确定工作区，保存失败。";
+        }
+        DbConnectionService.DbSession session = resolveSession(workspace, rc);
+        try {
+            DbReportEntity saved = reportService.saveDashboard(
+                    workspace.getWorkspaceId(),
+                    session != null ? session.connKey() : null,
+                    session != null ? session.serverKey() : null,
+                    session != null ? session.serverName() : null,
+                    session != null ? session.dbType() : null,
+                    session != null ? session.database() : null,
+                    title, blocks);
+            return "✅ 看板已保存（#" + saved.getId() + " " + saved.getTitle()
+                    + "）——DB 页面「📊 报表」面板打开即实时查询，可随时刷新。";
         } catch (IllegalArgumentException e) {
             return "❌ " + e.getMessage();
         }

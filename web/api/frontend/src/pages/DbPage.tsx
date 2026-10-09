@@ -24,6 +24,7 @@ import '../db.css';
 /** 报表列表元数据（GET /api/db/reports 元素，不含 HTML 大字段） */
 interface ReportMeta {
   id: number;
+  kind: string | null;
   title: string;
   serverName: string | null;
   dbType: string | null;
@@ -181,7 +182,7 @@ export default function DbPage() {
   const [reportsOpen, setReportsOpen] = useState(false);
   const [reports, setReports] = useState<ReportMeta[]>([]);
   const [reportsLoading, setReportsLoading] = useState(false);
-  const [reportDetail, setReportDetail] = useState<{ id: number; title: string; html: string } | null>(null);
+  const [reportDetail, setReportDetail] = useState<{ id: number; kind: string | null; title: string; html: string } | null>(null);
 
   // ==================== 消息流操作 ====================
 
@@ -550,11 +551,28 @@ export default function DbPage() {
 
   const openReport = async (id: number) => {
     if (!workspaceIdRef.current) return;
-    setReportDetail({id, title: '加载中…', html: ''});
+    setReportDetail({id, kind: null, title: '加载中…', html: ''});
     try {
-      const r = await getJson<{ report: { id: number; title: string; htmlContent: string } }>(
+      const r = await getJson<{ report: { id: number; kind: string | null; title: string; htmlContent: string } }>(
         `/api/db/reports/${id}?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`);
-      setReportDetail({id: r.report.id, title: r.report.title, html: r.report.htmlContent});
+      if (r.report.kind === 'dashboard') {
+        await refreshDashboard(id, r.report.title);
+        return;
+      }
+      setReportDetail({id: r.report.id, kind: r.report.kind, title: r.report.title, html: r.report.htmlContent});
+    } catch (e) {
+      setReportDetail(null);
+      setPageError(String(e));
+    }
+  };
+
+  /** 看板刷新：实时执行全部区块 SQL 并渲染（「每次打开就查询一次」的落点） */
+  const refreshDashboard = async (id: number, title: string) => {
+    if (!workspaceIdRef.current) return;
+    try {
+      const r = await postJson<{ html: string }>(
+        `/api/db/reports/${id}/refresh?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`, {});
+      setReportDetail({id, kind: 'dashboard', title, html: r.html});
     } catch (e) {
       setReportDetail(null);
       setPageError(String(e));
@@ -763,7 +781,7 @@ export default function DbPage() {
                 )}
                 {reports.map((r) => (
                   <div key={r.id} className={'db-report-item' + (reportDetail?.id === r.id ? ' active' : '')} onClick={() => void openReport(r.id)}>
-                    <div className="db-report-title">📄 {r.title}</div>
+                    <div className="db-report-title">{r.kind === 'dashboard' ? '📊' : '📄'} {r.title}</div>
                     <div className="db-report-meta">
                       {[r.serverName, r.databaseName].filter(Boolean).join('/') || '未知来源'}
                       {r.dbType ? ` · ${r.dbType}` : ''}
@@ -771,6 +789,9 @@ export default function DbPage() {
                       {` · ${r.sizeBytes > 1024 ? `${(r.sizeBytes / 1024).toFixed(1)} KB` : `${r.sizeBytes} B`}`}
                     </div>
                     <div className="db-report-actions">
+                      {r.kind === 'dashboard' && (
+                        <button onClick={(e) => { e.stopPropagation(); void refreshDashboard(r.id, r.title); }}>刷新</button>
+                      )}
                       <button onClick={(e) => { e.stopPropagation(); downloadReport(r); }}>下载</button>
                       <button className="danger" onClick={(e) => { e.stopPropagation(); void deleteReport(r.id); }}>删除</button>
                     </div>
@@ -778,7 +799,15 @@ export default function DbPage() {
                 ))}
               </div>
               {reportDetail && (
-                <iframe className="db-report-preview" sandbox="allow-scripts" srcDoc={reportDetail.html} title={reportDetail.title}/>
+                <div className="db-report-preview-wrap">
+                  {reportDetail.kind === 'dashboard' && (
+                    <div className="db-report-preview-bar">
+                      <span>实时看板 · 打开/刷新即查询最新数据</span>
+                      <button onClick={() => void refreshDashboard(reportDetail.id, reportDetail.title)}>🔄 刷新</button>
+                    </div>
+                  )}
+                  <iframe className="db-report-preview" sandbox="allow-scripts" srcDoc={reportDetail.html} title={reportDetail.title}/>
+                </div>
               )}
             </div>
           )}

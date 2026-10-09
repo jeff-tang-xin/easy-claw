@@ -60,8 +60,17 @@ public class DbReportEntity {
     @Column(name = "title", nullable = false, length = 256)
     private String title;
 
-    @Column(name = "html_content", nullable = false, length = 5_242_880)
+    /** report 行必填；dashboard 行为 null（数据在 blocks） */
+    @Column(name = "html_content", length = 5_242_880)
     private String htmlContent;
+
+    /** 记录类型：report（HTML 快照）/ dashboard（区块化看板）。存量行 null 视为 report。 */
+    @Column(name = "kind", length = 16)
+    private String kind;
+
+    /** 看板区块清单 JSON（kind=dashboard 时非空）：[{type,label,sql?,text?,connKey?}] */
+    @Column(name = "blocks", length = 1_048_576)
+    private String blocks;
 
     @Column(name = "created_at", nullable = false)
     private Instant createdAt;

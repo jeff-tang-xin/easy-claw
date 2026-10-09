@@ -18,7 +18,7 @@ import java.util.Optional;
 public interface DbReportRepository extends JpaRepository<DbReportEntity, Long> {
 
     @Query("select new com.xinl.easyclaw.db.service.DbReportMeta("
-            + "r.id, r.title, r.serverName, r.dbType, r.databaseName, r.createdAt, length(r.htmlContent)) "
+            + "r.id, r.kind, r.title, r.serverName, r.dbType, r.databaseName, r.createdAt, coalesce(length(r.htmlContent), length(r.blocks))) "
             + "from DbReportEntity r where r.workspaceId = :workspaceId order by r.createdAt desc")
     List<DbReportMeta> listMeta(@Param("workspaceId") String workspaceId);
 

@@ -297,3 +297,7 @@
 .db-page .db-report-actions button:hover { border-color: var(--accent); color: var(--accent); }
 .db-page .db-report-actions button.danger:hover { border-color: var(--danger, #dc2626); color: var(--danger, #dc2626); }
 .db-page .db-report-preview { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.db-page .db-report-preview-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.db-page .db-report-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; background: #f8fafc; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; font-size: 12px; color: #64748b; flex: none; }
+.db-page .db-report-preview-bar button { padding: 3px 10px; font-size: 12px; }
+.db-page .db-report-preview-bar + .db-report-preview { border-radius: 0 0 8px 8px; }

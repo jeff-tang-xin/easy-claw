@@ -64,8 +64,8 @@ public final class ToolPermissionPolicy {
             // 数据库四工具（V31/V32 静默放行）：db_status/db_schema 是纯元数据读取；
             // db_query 有 DbQueryGuard 只读防线（首词白名单 + 危险子句定位匹配），
             // 物理防线是 DB 只读账号——readonly 已定，行为层不再逐次弹确认。
-            // db_report（V32）只写本工作区 SQLite 的报表表，不触碰用户文件、不外发。
-            "db_query", "db_schema", "db_status", "db_report"
+            // db_report/db_dashboard（V32/V33）只写本工作区 SQLite 的报表/看板表，不触碰用户文件、不外发。
+            "db_query", "db_schema", "db_status", "db_report", "db_dashboard"
     );
 
     /**
