@@ -62,6 +62,12 @@ interface TermTab {
   mode: 'agent' | 'shell';
 }
 
+/** 历史消息（GET /api/chat/history 元素；结构对齐 ChatPage.BoxMessage） */
+interface BoxMessage {
+  id?: string; type: string; content: string; toolName?: string;
+  toolArgs?: string; toolResult?: string; seq: number;
+}
+
 /** confirm 事件 content：{replyId, tools:[{id,name,input}]}（AgentService.buildConfirmJson） */
 interface PendingConfirm {
   replyId: string;
@@ -307,6 +313,8 @@ export default function OpsPage() {
   /** terminalId → AI 模式本地命令历史（↑↓ 翻阅用；SH 模式用远程 bash 自带历史，不记这里）。
    * idx=-1 表示编辑态（未在翻阅）；draft 存翻阅前的未提交草稿，↓ 翻回最新时恢复 */
   const historiesRef = useRef<Map<string, {items: string[]; idx: number; draft: string}>>(new Map());
+  /** connId → 待回放历史（复用旧会话时拉取；终端首次创建时打印进屏后清除） */
+  const replayRef = useRef<Map<number, BoxMessage[]>>(new Map());
   /** terminalId → 终端容器 div（JSX ref 回填，供 xterm.open 挂载） */
   const containersRef = useRef<Map<string, HTMLDivElement | null>>(new Map());
   const sockRef = useRef<OpsSocket | null>(null);
@@ -331,13 +339,25 @@ export default function OpsPage() {
     termsRef.current.get(terminalId)?.term.write(text);
   };
 
-  /** 为一条连接创建专属智能体会话（一个连接一个 session，对话与输出互不串扰） */
-  const createSessionFor = useCallback(async (connName: string): Promise<string> => {
+  /** 为一条连接创建专属智能体会话（一个连接一个 session，对话与输出互不串扰）。
+   * 标题带 serverKey 唯一键（有则附）：同名连接不撞车，会话反查可精确归属 */
+  const createSessionFor = useCallback(async (connName: string, serverKey?: string | null): Promise<string> => {
     if (!workspaceId) return '';
     const s = await postJson<{ id: string }>(
-      `/api/workspaces/${workspaceId}/sessions`, {title: `运维 · ${connName}`});
+      `/api/workspaces/${workspaceId}/sessions`,
+      {title: `运维 · ${connName}${serverKey ? ` [${serverKey}]` : ''}`});
     return s.id;
   }, [workspaceId]);
+
+  /** 反查该服务器的既有会话（标题带 serverKey 唯一键，防同名连接撞车——
+   * 跨服务器复用历史会造成「AI 说着 A 机的事、屏幕在 B 机」的认知偏差）；
+   * serverKey 缺失（老快照）返回 null 走新建 */
+  const findOpsSession = async (c: ActiveConn): Promise<string | null> => {
+    if (!c.serverKey) return null;
+    const sessions = await getJson<{ id: string; title: string }[]>(`/api/workspaces/${workspaceId}/sessions`);
+    const hit = (sessions ?? []).find((s) => s.title === `运维 · ${c.connName} [${c.serverKey}]`);
+    return hit?.id ?? null;
+  };
 
   /** 新增/更新 tab（terminalId 每 tab 实例唯一）；activate=false 用于刷新恢复不抢焦点。
    * 建立后立即注册其会话（事件据此定向投递回该 tab） */
@@ -436,6 +456,23 @@ export default function OpsPage() {
     term.writeln(`\x1b[90m!命令 = 强制直通远程 shell（如 !tail -f app.log）\x1b[0m`);
     term.writeln(`\x1b[90mvim/top 等交互程序 → 点 tab 上 AI/SH 徽标切换\x1b[0m`);
     term.writeln(`\x1b[90mAI 执行中按 Ctrl+C 可打断当前回合\x1b[0m`);
+    // 历史对话回放：复用旧会话时把历史按实时渲染同款配色打印进屏
+    // （replayRef 按 connId 关联，upsertTab 前拉好；打印后清除，终端重建不重复打印）
+    const replayBox = replayRef.current.get(active.connId);
+    if (replayBox && replayBox.length > 0) {
+      replayRef.current.delete(active.connId);
+      term.writeln(`\x1b[90m── 历史对话回放 ──\x1b[0m`);
+      for (const b of replayBox) {
+        if (b.type === 'USER') term.write(`\r\n\x1b[36m🧑 ${toTermText(b.content)}\x1b[0m\r\n`);
+        else if (b.type === 'AI_TEXT') term.write(`\x1b[92m${toTermText(b.content)}\x1b[0m\r\n`);
+        else if (b.type === 'THINKING') term.write(`\x1b[90m${toTermText(b.content)}\x1b[0m\r\n`);
+        else if (b.type === 'TOOL_CALL') term.write(`\r\n\x1b[33m⚙ ${b.toolName ?? ''} ${truncate(b.toolArgs ?? '')}\x1b[0m\r\n`);
+        else if (b.type === 'TOOL_RESULT') term.write(`\x1b[90m  ⇐ ${truncate(b.toolResult ?? '')}\x1b[0m\r\n`);
+        else if (b.type === 'SYSTEM') term.write(`\r\n\x1b[90m📦 ${toTermText(b.content)}\x1b[0m\r\n`);
+      }
+      term.writeln(`\x1b[90m── 回放结束 ──\x1b[0m`);
+      term.write(AGENT_PROMPT);
+    }
     // 键盘分流：AI 模式本地行编辑（回车提交分流，不直通 PTY）；SH 模式逐键直通远程 shell
     term.onData((data) => {
       const tab = tabsRef.current.find((t) => t.terminalId === active.terminalId);
@@ -638,9 +675,15 @@ export default function OpsPage() {
         if (tabsRef.current.some((t) => t.connId === c.connId)) continue;
         let sid = '';
         try {
-          sid = await createSessionFor(c.connName);
+          sid = (await findOpsSession(c)) ?? (await createSessionFor(c.connName, c.serverKey));
         } catch {
           setOpsError(`「${c.connName}」的智能体会话创建失败 —— 终端可用，幕布对话不可用（重连可重试）`);
+        }
+        if (sid) {
+          try {
+            const box = await getJson<BoxMessage[]>(`/api/chat/history?workspaceId=${workspaceId}&sessionId=${sid}`);
+            if (box.length > 0) replayRef.current.set(c.connId, box);
+          } catch { /* 回放拉取失败不阻塞连接 */ }
         }
         upsertTab(c, sid, activeTabRef.current === null);
       }
@@ -717,9 +760,15 @@ export default function OpsPage() {
         }
         let sid = '';
         try {
-          sid = await createSessionFor(c.connName);
+          sid = (await findOpsSession(c)) ?? (await createSessionFor(c.connName, c.serverKey));
         } catch {
           setOpsError('智能体会话创建失败 —— 终端可用，幕布对话不可用（重连可重试）');
+        }
+        if (sid) {
+          try {
+            const box = await getJson<BoxMessage[]>(`/api/chat/history?workspaceId=${workspaceId}&sessionId=${sid}`);
+            if (box.length > 0) replayRef.current.set(c.connId, box);
+          } catch { /* 回放拉取失败不阻塞连接 */ }
         }
         upsertTab(c, sid);
       } else {

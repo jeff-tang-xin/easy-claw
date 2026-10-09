@@ -523,7 +523,9 @@ export default function DbPage() {
       let sid = '';
       let replayed: DbMsg[] | null = null;
       try {
-        const wanted = `数据库 · ${conn.serverName}/${conn.database}`;
+        // 标题带 serverKey 唯一键：同名连接（serverName 撞车）不会反查到彼此的会话——
+        // 跨连接复用历史会造成「AI 说着 A 库的事、屏幕在 B 库」的认知偏差
+        const wanted = `数据库 · ${conn.serverName}/${conn.database} [${conn.serverKey}]`;
         const sessions = await getJson<{ id: string; title: string }[]>(`/api/workspaces/${workspaceId}/sessions`);
         const old = (sessions ?? []).find((s) => s.title === wanted);
         if (old) {
@@ -533,7 +535,7 @@ export default function DbPage() {
       } catch { /* 反查/回放失败降级为新建 */ }
       if (!sid) {
         try {
-          sid = await createSessionFor(`数据库 · ${conn.serverName}/${conn.database}`);
+          sid = await createSessionFor(`数据库 · ${conn.serverName}/${conn.database} [${conn.serverKey}]`);
         } catch {
           setPageError('智能体会话创建失败 —— 连接可用，对话不可用（重连可重试）');
         }
