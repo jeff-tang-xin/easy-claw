@@ -98,17 +98,17 @@ public class AgentFactory {
     }
 
     /**
-     * 创建数据库（db）工作区的最小 Toolkit：只有 db 三工具（V30，照 createOpsToolkit 同构）。
+     * 创建数据库（db）工作区的最小 Toolkit：db 四工具（V30 三工具 + V32 db_report，照 createOpsToolkit 同构）。
      * <p>
-     * 场景决定能力边界：数据库智能体只通过 db_query/db_schema/db_status 触达数据库，
+     * 场景决定能力边界：数据库智能体只通过 db_query/db_schema/db_status/db_report 触达数据库与报表存储，
      * 不注册本地文件/代码/搜索工具、HTTP 工具与 MCP 工具（LLM 永不直接触碰数据库之外的资源）。
-     * 刻意不走 disabledToolNames / cloud 门控过滤——db 工具集只有三项，
+     * 刻意不走 disabledToolNames / cloud 门控过滤——db 工具集只有四项，
      * 若被工具管理页误关会导致数据库场景完全不可用；如需停用请直接停用场景。
      */
     public Toolkit createDbToolkit() {
         Toolkit toolkit = new Toolkit();
         toolkit.registration().tool(dbTools).apply();
-        log.info("已创建数据库最小 toolkit（db_query/db_schema/db_status）");
+        log.info("已创建数据库最小 toolkit（db_query/db_schema/db_status/db_report）");
         return toolkit;
     }
 
