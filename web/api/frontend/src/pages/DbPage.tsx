@@ -33,6 +33,12 @@ interface ReportMeta {
   sizeBytes: number;
 }
 
+/** 历史消息（GET /api/chat/history 元素；结构对齐 ChatPage.BoxMessage） */
+interface BoxMessage {
+  id?: string; type: string; content: string; toolName?: string;
+  toolArgs?: string; toolResult?: string; seq: number;
+}
+
 /** 一条活跃数据库连接（DbConnectionService.status 元素） */
 interface ActiveDbConn {
   connKey: string;
@@ -439,6 +445,35 @@ export default function DbPage() {
     }
   };
 
+  /** 历史回放：BoxMessage[] → DbMsg[]（映射规则对齐 ChatPage.loadHistory；
+   * BLACKBOARD/SUBAGENT 为团队场景段型，DB 页不产生，跳过） */
+  const replayHistory = async (wid: string, sid: string): Promise<DbMsg[]> => {
+    const box = await getJson<BoxMessage[]>(`/api/chat/history?workspaceId=${wid}&sessionId=${sid}`);
+    const msgs: DbMsg[] = [];
+    for (const b of box) {
+      if (b.type === 'USER') {
+        msgs.push({kind: 'user', content: b.content});
+      } else if (b.type === 'AI_TEXT') {
+        msgs.push({kind: 'text', content: b.content});
+      } else if (b.type === 'THINKING') {
+        msgs.push({kind: 'reasoning', content: b.content});
+      } else if (b.type === 'TOOL_CALL') {
+        msgs.push({kind: 'tool', content: '', toolName: b.toolName, toolArgs: b.toolArgs || '', running: false});
+      } else if (b.type === 'TOOL_RESULT') {
+        // 配对到最近的 tool 条目（历史里调用与结果分两条）
+        const lastTool = msgs[msgs.length - 1];
+        if (lastTool && lastTool.kind === 'tool') {
+          lastTool.toolResult = b.toolResult || '';
+        } else {
+          msgs.push({kind: 'tool', content: '', toolName: b.toolName, toolResult: b.toolResult || '', running: false});
+        }
+      } else if (b.type === 'SYSTEM') {
+        msgs.push({kind: 'info', content: b.content});
+      }
+    }
+    return msgs;
+  };
+
   /** 建立连接：POST /api/db/connect（只传 serverKey + database；密码链路同 ops）。
    * 已有同 connKey 的活跃 tab：直接切换过去，不重连 */
   const connectDb = async (c: CloudDbConnection, database: string) => {
@@ -476,11 +511,26 @@ export default function DbPage() {
         setPageError('连接未建立（服务端无该活跃连接）');
         return;
       }
+      // 复用旧会话：按标题反查该连接的历史会话（标题格式固定「数据库 · serverName/database」，
+      // 由本页 createSessionFor 生成），找到则复用其 sessionId 并回放历史——重连不丢对话；
+      // 反查失败或无旧会话时降级为新建（与旧行为一致）
       let sid = '';
+      let replayed: DbMsg[] | null = null;
       try {
-        sid = await createSessionFor(`数据库 · ${conn.serverName}/${conn.database}`);
-      } catch {
-        setPageError('智能体会话创建失败 —— 连接可用，对话不可用（重连可重试）');
+        const wanted = `数据库 · ${conn.serverName}/${conn.database}`;
+        const sessions = await getJson<{ id: string; title: string }[]>(`/api/workspaces/${workspaceId}/sessions`);
+        const old = (sessions ?? []).find((s) => s.title === wanted);
+        if (old) {
+          sid = old.id;
+          replayed = await replayHistory(workspaceId, sid);
+        }
+      } catch { /* 反查/回放失败降级为新建 */ }
+      if (!sid) {
+        try {
+          sid = await createSessionFor(`数据库 · ${conn.serverName}/${conn.database}`);
+        } catch {
+          setPageError('智能体会话创建失败 —— 连接可用，对话不可用（重连可重试）');
+        }
       }
       setTabs((prev) => [...prev, {
         connKey: conn.connKey,
@@ -496,11 +546,14 @@ export default function DbPage() {
         version: firstLine(conn.version),
         sessionId: sid,
         busy: false,
-        messages: [{
-          kind: 'info',
-          content: `已连接 ${conn.serverName} / ${conn.database}（${conn.product} ${firstLine(conn.version)}）`
-            + (conn.readonlyHint ? ' · 只读' : ''),
-        }],
+        messages: [
+          {
+            kind: 'info',
+            content: `已连接 ${conn.serverName} / ${conn.database}（${conn.product} ${firstLine(conn.version)}）`
+              + (conn.readonlyHint ? ' · 只读' : ''),
+          },
+          ...(replayed ?? []),
+        ],
       }]);
       setActiveTabKey(conn.connKey);
       setPicker(null);
