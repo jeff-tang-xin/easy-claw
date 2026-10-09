@@ -282,3 +282,18 @@
 .db-page .db-table-list li:hover { background: #f0f7ff; }
 .db-page .db-table-list li.active { background: #f0f7ff; color: var(--accent); font-weight: 600; }
 .db-page .db-table-detail { margin: 8px 0 0; padding: 10px; max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 11.5px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; }
+
+/* ==================== 报表中心面板（V32：伪 tab 选中时替换消息流） ==================== */
+.db-page .db-reports-tab { margin-left: auto; }
+.db-page .db-reports-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; overflow: hidden; }
+.db-page .db-reports-list { flex: none; max-height: 42%; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
+.db-page .db-report-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.db-page .db-report-item:last-child { border-bottom: none; }
+.db-page .db-report-item:hover, .db-page .db-report-item.active { background: #f0f7ff; }
+.db-page .db-report-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #1e293b); }
+.db-page .db-report-meta { font-size: 11.5px; color: var(--text-tertiary, #64748b); margin-top: 3px; }
+.db-page .db-report-actions { margin-top: 6px; display: flex; gap: 8px; }
+.db-page .db-report-actions button { font-size: 11.5px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; color: var(--text-secondary); }
+.db-page .db-report-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.db-page .db-report-actions button.danger:hover { border-color: var(--danger, #dc2626); color: var(--danger, #dc2626); }
+.db-page .db-report-preview { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; }

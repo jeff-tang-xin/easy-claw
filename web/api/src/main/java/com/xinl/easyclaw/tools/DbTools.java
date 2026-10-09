@@ -2,6 +2,8 @@ package com.xinl.easyclaw.tools;
 
 import com.xinl.easyclaw.db.service.DbConnectionService;
 import com.xinl.easyclaw.db.service.DbQueryExecutor;
+import com.xinl.easyclaw.db.entity.DbReportEntity;
+import com.xinl.easyclaw.db.service.DbReportService;
 import com.xinl.easyclaw.db.service.DbSchemaRenderer;
 import com.xinl.easyclaw.workspace.WorkspaceContext;
 import io.agentscope.core.agent.RuntimeContext;
@@ -35,10 +37,12 @@ public class DbTools {
 
     private final DbConnectionService db;
     private final DbQueryExecutor queryExecutor;
+    private final DbReportService reportService;
 
-    public DbTools(DbConnectionService db, DbQueryExecutor queryExecutor) {
+    public DbTools(DbConnectionService db, DbQueryExecutor queryExecutor, DbReportService reportService) {
         this.db = db;
         this.queryExecutor = queryExecutor;
+        this.reportService = reportService;
     }
 
     // ==================== db_status ====================
@@ -94,6 +98,36 @@ public class DbTools {
             return notConnected();
         }
         return queryExecutor.executeQuery(session, sql, "ai");
+    }
+
+    // ==================== db_report ====================
+
+    @Tool(name = "db_report", description = "把分析产出的完整 HTML 报表保存到报表中心（DB 页面「📊 报表」面板展示与下载）。\n"
+            + "【何时用】完成一份数据分析后主动保存：html 传完整 HTML 文档（含内嵌样式与图表脚本；图表脚本必须内联，禁止引用 CDN/外链——离线环境会空白）。\n"
+            + "【前置】用户必须先在 DB 页面建立连接。")
+    public String dbReport(
+            @ToolParam(name = "title", description = "报表标题（简洁，如「订单数据分析 2026-10」）") String title,
+            @ToolParam(name = "html", description = "完整 HTML 文档（<!DOCTYPE html> 开头，含 <style> 与内联脚本）") String html,
+            WorkspaceContext workspace,
+            RuntimeContext rc) {
+        if (workspace == null || workspace.getWorkspaceId() == null) {
+            return "❌ 无法确定工作区，保存失败。";
+        }
+        DbConnectionService.DbSession session = resolveSession(workspace, rc);
+        try {
+            DbReportEntity saved = reportService.save(
+                    workspace.getWorkspaceId(),
+                    session != null ? session.connKey() : null,
+                    session != null ? session.serverKey() : null,
+                    session != null ? session.serverName() : null,
+                    session != null ? session.dbType() : null,
+                    session != null ? session.database() : null,
+                    title, html);
+            return "✅ 报表已保存（#" + saved.getId() + " " + saved.getTitle()
+                    + "，约 " + (html.length() / 1024 + 1) + "KB）——DB 页面「📊 报表」面板可查看与下载。";
+        } catch (IllegalArgumentException e) {
+            return "❌ " + e.getMessage();
+        }
     }
 
     // ==================== 会话解析与公共片段 ====================

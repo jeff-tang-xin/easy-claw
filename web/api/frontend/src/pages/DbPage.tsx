@@ -21,6 +21,17 @@ import {encryptPassword, getOpsPublicKey} from '../opsCrypto';
 import '../ops.css';
 import '../db.css';
 
+/** 报表列表元数据（GET /api/db/reports 元素，不含 HTML 大字段） */
+interface ReportMeta {
+  id: number;
+  title: string;
+  serverName: string | null;
+  dbType: string | null;
+  databaseName: string | null;
+  createdAt: string;
+  sizeBytes: number;
+}
+
 /** 一条活跃数据库连接（DbConnectionService.status 元素） */
 interface ActiveDbConn {
   connKey: string;
@@ -165,6 +176,12 @@ export default function DbPage() {
 
   const activeTab = tabs.find((t) => t.connKey === activeTabKey) ?? null;
   const activeConfirm = activeTab ? pendingConfirms[activeTab.connKey] : undefined;
+
+  // ==================== 报表中心（V32） ====================
+  const [reportsOpen, setReportsOpen] = useState(false);
+  const [reports, setReports] = useState<ReportMeta[]>([]);
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [reportDetail, setReportDetail] = useState<{ id: number; title: string; html: string } | null>(null);
 
   // ==================== 消息流操作 ====================
 
@@ -515,6 +532,57 @@ export default function DbPage() {
     }
   };
 
+  // ==================== 报表中心（右侧伪 tab：列表 + 预览 + 下载） ====================
+
+  const loadReports = async () => {
+    if (!workspaceIdRef.current) return;
+    setReportsLoading(true);
+    try {
+      const r = await getJson<{ reports: ReportMeta[] }>(
+        `/api/db/reports?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`);
+      setReports(r.reports ?? []);
+    } catch (e) {
+      setPageError(String(e));
+    } finally {
+      setReportsLoading(false);
+    }
+  };
+
+  const openReport = async (id: number) => {
+    if (!workspaceIdRef.current) return;
+    setReportDetail({id, title: '加载中…', html: ''});
+    try {
+      const r = await getJson<{ report: { id: number; title: string; htmlContent: string } }>(
+        `/api/db/reports/${id}?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`);
+      setReportDetail({id: r.report.id, title: r.report.title, html: r.report.htmlContent});
+    } catch (e) {
+      setReportDetail(null);
+      setPageError(String(e));
+    }
+  };
+
+  const deleteReport = async (id: number) => {
+    if (!workspaceIdRef.current) return;
+    try {
+      await postJson(`/api/db/reports/${id}/delete?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`, {});
+      setReports((prev) => prev.filter((r) => r.id !== id));
+      if (reportDetail?.id === id) setReportDetail(null);
+    } catch (e) {
+      setPageError(String(e));
+    }
+  };
+
+  /** 下载：a[download] 触发浏览器保存（Content-Disposition attachment 由后端设置） */
+  const downloadReport = (r: ReportMeta) => {
+    if (!workspaceIdRef.current) return;
+    const a = document.createElement('a');
+    a.href = `/api/db/reports/${r.id}/download?workspaceId=${encodeURIComponent(workspaceIdRef.current)}`;
+    a.download = `${r.title}.html`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
   // ==================== 表清单（右侧面板：连接后直接展示，无需再操作） ====================
 
   const loadTables = async (connKey: string) => {
@@ -661,8 +729,8 @@ export default function DbPage() {
             {tabs.map((t) => (
               <div
                 key={t.connKey}
-                className={'ops-tab' + (t.connKey === activeTabKey ? ' active' : '')}
-                onClick={() => setActiveTabKey(t.connKey)}
+                className={'ops-tab' + (!reportsOpen && t.connKey === activeTabKey ? ' active' : '')}
+                onClick={() => { setActiveTabKey(t.connKey); setReportsOpen(false); }}
                 title={`${t.serverName}/${t.database} @ ${t.host}:${t.port}`}
               >
                 <span className="ops-tab-dot" style={{background: t.busy ? '#f59e0b' : '#22c55e'}}/>
@@ -671,9 +739,52 @@ export default function DbPage() {
               </div>
             ))}
             {tabs.length === 0 && <span className="ops-empty">尚无连接 —— 在右侧选择连接与库</span>}
+            {/* 报表中心伪 tab：固定靠右，与连接 tab 互斥高亮 */}
+            <div
+              className={'ops-tab db-reports-tab' + (reportsOpen ? ' active' : '')}
+              onClick={() => {
+                const next = !reportsOpen;
+                setReportsOpen(next);
+                if (next) void loadReports();
+              }}
+              title="AI 生成的分析报表（展示与下载）"
+            >
+              <span>📊 报表{reports.length > 0 ? ` (${reports.length})` : ''}</span>
+            </div>
           </div>
 
+          {/* 报表中心面板：伪 tab 选中时替换消息流 */}
+          {reportsOpen && (
+            <div className="db-reports-panel">
+              <div className="db-reports-list">
+                {reportsLoading && <div className="ops-empty">加载中…</div>}
+                {!reportsLoading && reports.length === 0 && (
+                  <div className="ops-empty">暂无报表 —— 让 AI 分析数据，完成后它会自动保存到这里</div>
+                )}
+                {reports.map((r) => (
+                  <div key={r.id} className={'db-report-item' + (reportDetail?.id === r.id ? ' active' : '')} onClick={() => void openReport(r.id)}>
+                    <div className="db-report-title">📄 {r.title}</div>
+                    <div className="db-report-meta">
+                      {[r.serverName, r.databaseName].filter(Boolean).join('/') || '未知来源'}
+                      {r.dbType ? ` · ${r.dbType}` : ''}
+                      {` · ${new Date(r.createdAt).toLocaleString()}`}
+                      {` · ${r.sizeBytes > 1024 ? `${(r.sizeBytes / 1024).toFixed(1)} KB` : `${r.sizeBytes} B`}`}
+                    </div>
+                    <div className="db-report-actions">
+                      <button onClick={(e) => { e.stopPropagation(); downloadReport(r); }}>下载</button>
+                      <button className="danger" onClick={(e) => { e.stopPropagation(); void deleteReport(r.id); }}>删除</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {reportDetail && (
+                <iframe className="db-report-preview" sandbox="allow-scripts" srcDoc={reportDetail.html} title={reportDetail.title}/>
+              )}
+            </div>
+          )}
+
           {/* 消息流：当前 tab 的对话（AI 回复 Markdown 渲染，db_query 结果即其中的表格） */}
+          {!reportsOpen && (
           <div className="db-stream" ref={scrollRef}>
             {!activeTab && (
               <div className="ops-terminal-empty">
@@ -710,6 +821,7 @@ export default function DbPage() {
               return <div key={i} className="db-msg db-msg-text" dangerouslySetInnerHTML={{__html: md(m.content)}}/>;
             })}
           </div>
+          )}
 
           {/* 确认条：真实 SQL + 允许一次/拒绝（db 场景无白名单机制，不渲染永久授权按钮） */}
           {activeConfirm && activeTab && (

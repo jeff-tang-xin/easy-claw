@@ -61,10 +61,11 @@ public final class ToolPermissionPolicy {
             // 知识库自己的条目、不触碰用户文件、不对外发送，性质与 memory_search/get 相同。
             // knowledge_write 不在此列 —— 它会真正落盘新增/覆盖知识条目，必须保留确认。
             "knowledge_list", "knowledge_search", "knowledge_read",
-            // 数据库三工具（V31 静默放行）：db_status/db_schema 是纯元数据读取；
+            // 数据库四工具（V31/V32 静默放行）：db_status/db_schema 是纯元数据读取；
             // db_query 有 DbQueryGuard 只读防线（首词白名单 + 危险子句定位匹配），
             // 物理防线是 DB 只读账号——readonly 已定，行为层不再逐次弹确认。
-            "db_query", "db_schema", "db_status"
+            // db_report（V32）只写本工作区 SQLite 的报表表，不触碰用户文件、不外发。
+            "db_query", "db_schema", "db_status", "db_report"
     );
 
     /**
