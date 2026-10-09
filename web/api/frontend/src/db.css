@@ -1,5 +1,48 @@
 /* 数据库工作台（DbPage）专属样式：骨架布局复用 ops.css（ops-page/ops-main/ops-side/ops-tabs/
-   ops-curtain/ops-confirm），这里只补 DB 页新增的块——消息流、版本徽标、库选择器、SQL 确认卡。 */
+   ops-curtain/ops-confirm），这里只补 DB 页新增的块——消息流、版本徽标、库选择器、SQL 确认卡。
+
+   设计基线：Ant Design v5 Token（antdesign-philosophy skill）。
+   .db-page 作用域内重定义 ops.css 的语义变量为 AntD 值——骨架（tab/幕布/确认卡/侧栏）
+   一处覆盖全页对齐；新增 --db-* 承担 AntD 细分语义（淡底/边框/文字四级）。
+   原则：平面分层靠 1px 边框 #f0f0f0，阴影只给浮起元素；圆角控件 6 / 容器 8；
+   间距 8 的倍数；交互反馈 0.2s；focus = 主色边框 + 淡主色光环。 */
+
+.db-page {
+  /* —— 重定义 ops 语义变量（骨架对齐 AntD）—— */
+  --accent: #1677ff;            /* colorPrimary */
+  --accent-dark: #0958d9;       /* colorPrimaryActive */
+  --panel: #ffffff;             /* colorBgContainer */
+  --panel-hover: #fafafa;       /* colorFillTertiary */
+  --bg: #f5f5f5;                /* colorBgLayout：页面布局底 */
+  --border: #d9d9d9;            /* colorBorder（控件边框） */
+  --border-strong: #d9d9d9;
+  --text: rgba(0, 0, 0, 0.88);            /* colorText */
+  --text-primary: rgba(0, 0, 0, 0.88);
+  --text-secondary: rgba(0, 0, 0, 0.65);  /* colorTextSecondary */
+  --text-tertiary: rgba(0, 0, 0, 0.45);   /* colorTextTertiary */
+  --success: #52c41a;
+  --warning: #faad14;
+  --danger: #ff4d4f;
+
+  /* —— AntD 细分语义（db 页专属）—— */
+  --db-primary-hover: #4096ff;
+  --db-primary-bg: #e6f4ff;     /* colorPrimaryBg：选中行/标签底 */
+  --db-primary-border: #91caff; /* colorPrimaryBorder */
+  --db-split: #f0f0f0;          /* colorBorderSecondary：分割线/卡片内分隔 */
+  --db-fill: #f5f5f5;           /* colorFillSecondary：hover 底 */
+  --db-success-bg: #f6ffed;
+  --db-success-border: #b7eb8f;
+  --db-warning-bg: #fffbe6;
+  --db-warning-border: #ffe58f;
+  --db-warning-text: #d46b08;
+  --db-error-bg: #fff2f0;
+  --db-error-border: #ffccc7;
+  --db-error-text: #cf1322;
+  --db-focus-ring: 0 0 0 2px rgba(5, 145, 255, 0.1);
+  --db-ease: cubic-bezier(0.645, 0.045, 0.355, 1);
+}
+
+/* ==================== 布局骨架 ==================== */
 
 /* 主列：tab 条 + 消息流 + 幕布，纵向排布（ops-main 是横向 flex，这里包一层） */
 .db-main-col {
@@ -9,87 +52,78 @@
   flex-direction: column;
 }
 
-/* 顶栏版本徽标：mysql 8.0.36 @ …（只读） */
-.db-version-badge {
-  font-size: 0.82em;
-  padding: 2px 10px;
-  border-radius: 999px;
-  border: 1px solid var(--border, #2a2d35);
-  color: var(--text-secondary, #9aa3af);
-  white-space: nowrap;
-}
-
-/* tab 上的运行中徽标 */
-.db-tab-busy {
-  font-size: 0.72em;
-  color: var(--warning, #b45309);
-}
-
 /* 消息流：可滚动区域，占满 tab 条与幕布之间 */
 .db-stream {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 14px 16px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
+
+/* ==================== 消息流 ==================== */
 
 .db-msg {
   max-width: 92%;
-  font-size: 0.92em;
+  font-size: 13px;
   line-height: 1.6;
   word-break: break-word;
 }
 
+/* 用户气泡：主色淡底 + 主色淡边框（colorPrimaryBg/Border），右下角收口示意方向 */
 .db-msg-user {
   align-self: flex-end;
-  /* AntD 用户气泡：accent 弱化底 + 显式深字。--accent-weak 从未定义过，
-     旧写法永远落深色 fallback（#1e2a3a）→ 浅色主题下深底深字不可见 */
-  background: rgba(22, 119, 255, 0.08);
-  border: 1px solid rgba(22, 119, 255, 0.25);
-  color: var(--text, #1e293b);
-  border-radius: 10px 10px 2px 10px;
+  background: var(--db-primary-bg);
+  border: 1px solid var(--db-primary-border);
+  color: var(--text);
+  border-radius: 8px 8px 2px 8px;
   padding: 8px 12px;
 }
 
+/* 系统/连接信息：居中辅助文字 */
 .db-msg-info {
   align-self: center;
-  font-size: 0.82em;
-  color: var(--text-tertiary, #6b7280);
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
+/* 错误：错误淡底 + 淡边框 + 深错误字（AntD 错误三件套） */
 .db-msg-error {
   align-self: flex-start;
-  color: var(--danger, #dc2626);
-  border: 1px solid rgba(220, 38, 38, 0.35);
+  background: var(--db-error-bg);
+  border: 1px solid var(--db-error-border);
+  color: var(--db-error-text);
   border-radius: 8px;
-  padding: 6px 10px;
+  padding: 8px 12px;
 }
 
+/* 推理过程：辅助灰、不抢正文 */
 .db-msg-reasoning {
   align-self: flex-start;
-  color: var(--text-tertiary, #6b7280);
-  font-size: 0.85em;
+  color: var(--text-tertiary);
+  font-size: 12px;
   white-space: pre-wrap;
 }
 
-/* AI 回复：Markdown 渲染（表格 = db_query 结果） */
+/* AI 回复卡片：白底 + 分割线级边框（平面分层，不用阴影） */
 .db-msg-text {
   align-self: flex-start;
-  background: var(--panel, #16181d);
-  border: 1px solid var(--border, #2a2d35);
-  border-radius: 10px 10px 10px 2px;
-  padding: 10px 14px;
+  background: var(--panel);
+  border: 1px solid var(--db-split);
+  border-radius: 8px 8px 8px 2px;
+  padding: 12px 16px;
 }
 
 .db-msg-text > :first-child { margin-top: 0; }
 .db-msg-text > :last-child { margin-bottom: 0; }
 
+/* Markdown 表格（db_query 结果）：AntD 表格风——表头 #fafafa、分割线 #f0f0f0、
+   sticky 表头、横向滚动 */
 .db-msg-text table {
   border-collapse: collapse;
-  font-size: 0.88em;
+  font-size: 12px;
   margin: 8px 0;
   display: block;
   max-width: 100%;
@@ -98,44 +132,51 @@
 
 .db-msg-text th,
 .db-msg-text td {
-  border: 1px solid var(--border, #2a2d35);
-  padding: 4px 10px;
+  border: 1px solid var(--db-split);
+  padding: 6px 12px;
   text-align: left;
   white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .db-msg-text th {
-  background: var(--panel-hover, #f1f5f9);
+  background: var(--panel-hover);
   position: sticky;
   top: 0;
+  color: var(--text-secondary);
+  font-weight: 600;
 }
 
 .db-msg-text code {
-  background: rgba(15, 23, 42, 0.05);
-  padding: 1px 5px;
+  background: var(--db-fill);
+  padding: 1px 6px;
   border-radius: 4px;
-  font-size: 0.9em;
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 }
 
 .db-msg-text pre code {
   display: block;
-  padding: 8px 10px;
+  padding: 8px 12px;
   overflow-x: auto;
 }
 
-/* 工具调用轨迹：折叠卡片 */
+/* ==================== 工具调用轨迹（details 折叠卡片） ==================== */
+
 .db-msg-tool {
   align-self: flex-start;
-  border: 1px solid var(--border, #2a2d35);
+  border: 1px solid var(--db-split);
   border-radius: 8px;
-  padding: 6px 10px;
-  font-size: 0.85em;
-  color: var(--text-secondary, #9aa3af);
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
   max-width: 92%;
+  background: var(--panel);
 }
 
 .db-msg-tool.running {
-  border-color: rgba(180, 83, 9, 0.45);
+  border-color: var(--db-warning-border);
+  background: var(--db-warning-bg);
 }
 
 .db-tool-head {
@@ -150,21 +191,36 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 420px;
-  font-size: 0.92em;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
 }
 
 .db-tool-result {
-  margin: 6px 0 0;
-  padding: 6px 8px;
-  background: rgba(15, 23, 42, 0.03);
+  margin: 8px 0 0;
+  padding: 8px 12px;
+  background: var(--panel-hover);
   border-radius: 6px;
   max-height: 180px;
   overflow: auto;
   white-space: pre-wrap;
-  font-size: 0.92em;
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
-/* 确认卡：真实 SQL 展示（db_query 的 sql 参数） */
+/* details 折叠：去原生三角，头部即切换区；hover 提示可点 */
+.db-page .db-tool-details summary {
+  cursor: pointer;
+  list-style: none;
+  border-radius: 4px;
+  transition: color 0.2s var(--db-ease);
+}
+.db-page .db-tool-details summary::-webkit-details-marker { display: none; }
+.db-page .db-tool-details summary:hover { color: var(--accent); }
+.db-page .db-tool-details[open] summary { margin-bottom: 4px; }
+
+/* ==================== SQL 确认卡（浮起元素：唯一用阴影处） ==================== */
+
 .db-confirm {
   flex-direction: column;
   align-items: stretch;
@@ -174,20 +230,23 @@
 
 .db-confirm-body strong {
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 8px;
 }
 
+/* 待确认 SQL：警告淡底三件套（执行前的人工闸口） */
 .db-confirm-sql {
   margin: 4px 0;
-  padding: 8px 10px;
-  background: var(--warning-bg, rgba(245, 158, 11, 0.12));
-  border: 1px solid rgba(180, 83, 9, 0.35);
+  padding: 8px 12px;
+  background: var(--db-warning-bg);
+  border: 1px solid var(--db-warning-border);
   border-radius: 6px;
-  font-size: 0.88em;
+  font-size: 12px;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 160px;
   overflow: auto;
+  color: var(--db-warning-text);
 }
 
 .db-confirm .ops-confirm-allow,
@@ -195,7 +254,9 @@
   align-self: flex-end;
 }
 
-/* 右侧栏连接项：可点击行 + 展开的库选择器 */
+/* ==================== 右侧栏：连接清单 + 库选择器 ==================== */
+
+/* 连接项：可点击行 + 展开的库选择器 */
 .db-conn-row {
   display: flex;
   align-items: center;
@@ -211,22 +272,23 @@
 
 .db-picker-arrow {
   flex: none;
-  color: var(--text-tertiary, #6b7280);
+  color: var(--text-tertiary);
 }
 
 .db-picker {
   margin-top: 8px;
-  padding: 10px;
-  border: 1px solid var(--border, #2a2d35);
+  padding: 12px;
+  border: 1px solid var(--db-split);
   border-radius: 8px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  background: var(--panel);
 }
 
 .db-picker-label {
-  font-size: 0.8em;
-  color: var(--text-tertiary, #6b7280);
+  font-size: 12px;
+  color: var(--text-tertiary);
 }
 
 .db-picker-select {
@@ -237,80 +299,292 @@
   width: 100%;
 }
 
-/* ==================== 浅色主题覆盖（.db-page 作用域） ====================
-   DbPage 骨架复用 ops.css，但 ops 是运维终端的深色主题（tab/确认卡等硬编码
+/* 连接卡片「使用中」：主色左边条（AntD 选中态语义） */
+.db-page .ops-conn-list li.in-use {
+  border-left: 3px solid var(--accent);
+}
+
+/* ==================== 右侧栏：表清单面板 ==================== */
+
+.db-page .db-tables-panel { margin-bottom: 16px; }
+
+.db-page .db-table-search {
+  margin: 0 0 8px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 5px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color 0.2s var(--db-ease), box-shadow 0.2s var(--db-ease);
+}
+.db-page .db-table-search::placeholder { color: var(--text-tertiary); }
+.db-page .db-table-search:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--db-focus-ring);
+}
+.db-page .db-table-search:disabled { background: var(--db-fill); color: var(--text-tertiary); }
+
+.db-page .db-table-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 260px;
+  overflow-y: auto;
+  border: 1px solid var(--db-split);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.db-page .db-table-list li {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 1px solid var(--db-split);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background-color 0.2s var(--db-ease), color 0.2s var(--db-ease);
+}
+.db-page .db-table-list li:last-child { border-bottom: none; }
+.db-page .db-table-list li:hover { background: var(--db-fill); }
+.db-page .db-table-list li.active {
+  background: var(--db-primary-bg);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.db-page .db-table-detail {
+  margin: 8px 0 0;
+  padding: 12px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--db-split);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+
+/* ==================== 报表中心面板 ==================== */
+
+.db-page .db-reports-tab { margin-left: auto; }
+
+.db-page .db-reports-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  overflow: hidden;
+}
+
+.db-page .db-reports-list {
+  flex: none;
+  max-height: 42%;
+  overflow-y: auto;
+  border: 1px solid var(--db-split);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.db-page .db-report-item {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--db-split);
+  cursor: pointer;
+  transition: background-color 0.2s var(--db-ease);
+}
+.db-page .db-report-item:last-child { border-bottom: none; }
+.db-page .db-report-item:hover { background: var(--db-fill); }
+.db-page .db-report-item.active { background: var(--db-primary-bg); }
+
+.db-page .db-report-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.db-page .db-report-meta {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  margin-top: 4px;
+}
+.db-page .db-report-actions {
+  margin-top: 8px;
+  display: flex;
+  gap: 8px;
+}
+/* AntD default 按钮：白底 + 控件边框，hover 主色字 + 主色边框 */
+.db-page .db-report-actions button {
+  font-size: 12px;
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  cursor: pointer;
+  color: var(--text-secondary);
+  transition: color 0.2s var(--db-ease), border-color 0.2s var(--db-ease);
+}
+.db-page .db-report-actions button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.db-page .db-report-actions button.danger:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.db-page .db-report-preview {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  border: 1px solid var(--db-split);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.db-page .db-report-preview-wrap {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.db-page .db-report-preview-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--panel-hover);
+  border: 1px solid var(--db-split);
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  font-size: 12px;
+  color: var(--text-tertiary);
+  flex: none;
+}
+.db-page .db-report-preview-bar button {
+  padding: 3px 12px;
+  font-size: 12px;
+}
+.db-page .db-report-preview-bar + .db-report-preview { border-radius: 0 0 8px 8px; }
+
+/* ==================== 输入区（多行 textarea） ==================== */
+
+.db-page .ops-curtain-row textarea {
+  flex: 1;
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  font-family: inherit;
+  line-height: 1.5714;
+  background: var(--panel);
+  color: var(--text);
+  transition: border-color 0.2s var(--db-ease), box-shadow 0.2s var(--db-ease);
+}
+.db-page .ops-curtain-row textarea::placeholder { color: var(--text-tertiary); }
+.db-page .ops-curtain-row textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: var(--db-focus-ring);
+}
+.db-page .ops-curtain-row textarea:disabled { background: var(--db-fill); color: var(--text-tertiary); }
+
+/* ==================== 顶栏徽章与 tab ==================== */
+
+/* 顶栏版本徽标：mysql 8.0.36 @ …（只读） */
+.db-version-badge {
+  font-size: 12px;
+  padding: 2px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--db-split);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  background: var(--panel);
+}
+
+/* tab 上的运行中徽标：警告语义 */
+.db-tab-busy {
+  font-size: 12px;
+  color: var(--db-warning-text);
+}
+
+/* ==================== ops 骨架覆盖（.db-page 作用域） ==================== */
+/* DbPage 骨架复用 ops.css，但 ops 是运维终端的深色主题（tab/确认卡等硬编码
    深色值）。OpsPage 的深色是既定外观、不能动 ops.css，这里以 .db-page 作用域
-   把 DbPage 用到的深色块覆盖为浅色，对齐 styles.css 的 AntD token 基线。 */
+   把 DbPage 用到的深色块覆盖为 AntD 浅色——变量重定义已覆盖走 var() 的部分，
+   这里处理 ops.css 硬编码的块。 */
 
 .db-page .ops-tab {
-  background: var(--panel-hover, #f1f5f9);
-  color: var(--text-secondary, #475569);
-  border-color: var(--border, #e2e8f0);
+  background: var(--panel-hover);
+  color: var(--text-secondary);
+  border-color: var(--db-split);
+  transition: color 0.2s var(--db-ease), background-color 0.2s var(--db-ease);
 }
 
-.db-page .ops-tab:hover { color: var(--text, #1e293b); }
+.db-page .ops-tab:hover { color: var(--text); }
 
 .db-page .ops-tab.active {
-  background: var(--panel, #ffffff);
-  color: var(--accent, #1677ff);
-  border-color: var(--border-strong, #cbd5e1);
-  /* AntD active tab：底部 accent 指示条 */
-  box-shadow: inset 0 -2px 0 var(--accent, #1677ff);
+  background: var(--panel);
+  color: var(--accent);
+  border-color: var(--db-primary-border);
+  /* AntD active tab：底部主色指示条 */
+  box-shadow: inset 0 -2px 0 var(--accent);
 }
 
-.db-page .ops-terminal-empty { color: var(--text-tertiary, #64748b); }
+.db-page .ops-terminal-empty { color: var(--text-tertiary); }
 
+/* 确认卡：浮起元素（覆盖在消息流上）——唯一用阴影处（AntD boxShadowSecondary） */
 .db-page .ops-confirm {
-  background: var(--panel, #ffffff);
-  border-color: rgba(180, 83, 9, 0.45);
-  box-shadow: var(--shadow-md);
+  background: var(--panel);
+  border-color: var(--db-warning-border);
+  box-shadow: 0 6px 16px 0 rgba(0, 0, 0, 0.08),
+              0 3px 6px -4px rgba(0, 0, 0, 0.12),
+              0 9px 28px 8px rgba(0, 0, 0, 0.05);
 }
 
+/* 「允许一次」= 主操作（AntD primary）：主色底 + hover 加深，不用渐变；
+   「拒绝」= default 危险字 */
 .db-page .ops-confirm-allow {
-  background: var(--success, #059669);
-  border-color: var(--success, #059669);
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+.db-page .ops-confirm-allow:hover {
+  background: var(--db-primary-hover);
+  border-color: var(--db-primary-hover);
+}
+.db-page .ops-confirm-deny { color: var(--text-secondary); }
+.db-page .ops-confirm-deny:hover { color: var(--danger); border-color: var(--danger); }
+
+/* ==================== ops 骨架补充覆盖（硬编码深色/彩色的块） ==================== */
+
+/* 顶栏连接状态徽章：AntD 成功/中性语义（ops.css 硬编码 Tailwind green-400） */
+.db-page .ops-status.on { color: var(--success); border-color: rgba(82, 196, 26, 0.45); }
+.db-page .ops-status.off { color: var(--text-tertiary); }
+
+/* 页级错误条：AntD 错误三件套（淡底 + 淡边框 + 深字） */
+.db-page .ops-error {
+  color: var(--db-error-text);
+  background: var(--db-error-bg);
+  border-bottom: 1px solid var(--db-error-border);
 }
 
-.db-page .ops-confirm-deny { color: var(--danger, #dc2626); }
+/* 连接卡片 picker 展开态：主色淡边框（ops.css 硬编码绿色） */
+.db-page .ops-conn-list li.active { border-color: var(--db-primary-border); }
 
+/* 分类标签分组标题：辅助灰 */
+.db-page .ops-conn-list li.ops-cat-label { color: var(--text-tertiary); }
 
-/* ==================== 右侧表清单面板（V31：连接后直接展示） ==================== */
-.db-page .db-tables-panel { margin-bottom: 12px; }
-.db-page .db-table-list { list-style: none; margin: 0; padding: 0; max-height: 260px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
-.db-page .db-table-list li { padding: 6px 10px; font-size: 12px; color: var(--text-secondary); cursor: pointer; border-bottom: 1px solid var(--border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.db-page .db-table-list li:last-child { border-bottom: none; }
-.db-page .db-table-list li:hover { background: #f0f7ff; }
-.db-page .db-table-list li.active { background: #f0f7ff; color: var(--accent); font-weight: 600; }
-.db-page .db-table-detail { margin: 8px 0 0; padding: 10px; max-height: 320px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; font-size: 11.5px; line-height: 1.6; color: var(--text-secondary); white-space: pre-wrap; word-break: break-all; }
-
-/* ==================== 报表中心面板（V32：伪 tab 选中时替换消息流） ==================== */
-.db-page .db-reports-tab { margin-left: auto; }
-.db-page .db-reports-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; padding: 14px 16px; overflow: hidden; }
-.db-page .db-reports-list { flex: none; max-height: 42%; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
-.db-page .db-report-item { padding: 10px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
-.db-page .db-report-item:last-child { border-bottom: none; }
-.db-page .db-report-item:hover, .db-page .db-report-item.active { background: #f0f7ff; }
-.db-page .db-report-title { font-size: 13px; font-weight: 600; color: var(--text-primary, #1e293b); }
-.db-page .db-report-meta { font-size: 11.5px; color: var(--text-tertiary, #64748b); margin-top: 3px; }
-.db-page .db-report-actions { margin-top: 6px; display: flex; gap: 8px; }
-.db-page .db-report-actions button { font-size: 11.5px; padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; background: #fff; cursor: pointer; color: var(--text-secondary); }
-.db-page .db-report-actions button:hover { border-color: var(--accent); color: var(--accent); }
-.db-page .db-report-actions button.danger:hover { border-color: var(--danger, #dc2626); color: var(--danger, #dc2626); }
-.db-page .db-report-preview { flex: 1; min-height: 0; width: 100%; border: 1px solid var(--border); border-radius: 8px; background: #fff; }
-.db-page .db-report-preview-wrap { display: flex; flex-direction: column; height: 100%; min-height: 0; }
-.db-page .db-report-preview-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 10px; background: #f8fafc; border: 1px solid var(--border); border-bottom: none; border-radius: 8px 8px 0 0; font-size: 12px; color: #64748b; flex: none; }
-.db-page .db-report-preview-bar button { padding: 3px 10px; font-size: 12px; }
-.db-page .db-report-preview-bar + .db-report-preview { border-radius: 0 0 8px 8px; }
-/* 表清单过滤框 */
-.db-page .db-table-search { margin: 0 0 8px; width: 100%; box-sizing: border-box; padding: 5px 10px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 12.5px; background: #fff; }
-.db-page .db-table-search:focus { outline: none; border-color: #1677ff; }
-.db-page .db-table-search:disabled { background: #f5f5f5; color: #94a3b8; }
-/* 工具卡片折叠（details/summary：去原生三角，头部即切换区） */
-.db-page .db-tool-details summary { cursor: pointer; list-style: none; }
-.db-page .db-tool-details summary::-webkit-details-marker { display: none; }
-/* 多行输入（textarea 对齐原 input 观感；自动增高由 JS 控制） */
-.db-page .ops-curtain-row textarea { flex: 1; resize: none; min-height: 36px; max-height: 120px; padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 8px; font-size: 13.5px; font-family: inherit; line-height: 1.5; background: #fff; color: inherit; }
-.db-page .ops-curtain-row textarea:focus { outline: none; border-color: #1677ff; }
-.db-page .ops-curtain-row textarea:disabled { background: #f5f5f5; color: #94a3b8; }
-/* 连接卡片「使用中」高亮（主色左边条） */
-.db-page .ops-conn-list li.in-use { border-left: 3px solid #1677ff; }
+/* 侧栏留白对齐 8 栅格（ops.css 14px） */
+.db-page .ops-side { padding: 16px; }

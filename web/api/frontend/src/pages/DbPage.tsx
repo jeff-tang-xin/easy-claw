@@ -814,7 +814,7 @@ export default function DbPage() {
                 onClick={() => { setActiveTabKey(t.connKey); setReportsOpen(false); }}
                 title={`${t.serverName}/${t.database} @ ${t.host}:${t.port}`}
               >
-                <span className="ops-tab-dot" style={{background: t.busy ? '#f59e0b' : '#22c55e'}}/>
+                <span className="ops-tab-dot" style={{background: t.busy ? '#faad14' : '#52c41a'}}/>
                 <span>{dbIcon(t.dbType)} {t.serverName}/{t.database}</span>
                 {t.busy && <span className="db-tab-busy">运行中</span>}
               </div>
