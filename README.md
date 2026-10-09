@@ -1,8 +1,14 @@
 # Easy Claw - AI Work Assistant
 
-> 基于 AgentScope 2.0 构建的可配置 AI 助手，支持 **Workspace 隔离**、**多模型 Provider**、**MCP 双向桥接**、**Skill 技能系统**。
+> 基于 AgentScope 2.0 构建的可配置 AI 助手平台：**Workspace 隔离**、**多模型 Provider**、**MCP 双向桥接**、**场景化多智能体**、**数据库/运维工作台**，配套 **hub 平台管理后端**（多组织/项目/积分/审计）。
 
-一个轻量的 Spring Boot + React 全栈应用。AI 在被指定的工作区（Workspace）内运作，可调用工具、操作文件，并按内置/自定义的 Skill 完成多轮任务。所有元数据存于本地 SQLite，零外部依赖即可启动。
+一个 Spring Boot + React 全栈项目，采用 Maven 多模块结构：
+
+- **web** — 主应用（单体助手 + 多智能体协作 + DB/运维工作台），SQLite 存储、独立可运行
+- **hub** — 平台管理后端（组织/项目/用户/模型目录/积分网关/审计/资源下发），PostgreSQL + Flyway
+- **agentscope-java** — AgentScope 2.0 框架源码（core / harness / extensions / distribution）
+
+web 主应用所有元数据存于本地 SQLite，零外部依赖即可启动。
 
 ---
 
@@ -20,35 +26,43 @@
 - API Key 留空时按 `<PROVIDER>_API_KEY` 环境变量兜底
 - 支持 `temperature`、`stream` 等参数配置
 
-### 🔌 MCP（Model Context Protocol）双向桥接
-- **INBOUND**：将外部 MCP Server 的工具接入 AI 工具集
-- **OUTBOUND**：把内置的工具暴露为 HTTP 端点供其他 Agent 调用
-- 提供可视化管理页面（`McpPage`），运行时增删改
+### 🎭 场景系统（Scenario：单体 / 多智能体 / 专项工作台）
+- **single**：单体智能体，按需绑定 Skill / 子 Agent / MCP 服务
+- **team**：多智能体编排——主 Agent 作为协调者拆解任务，按阶段并行派发子 Agent、统一验收；子 Agent 进度实时流式展示
+- **db**：数据库工作台（见下文「DB 工作区」）
+- **ops**：运维工作台——远程服务器管理、交互式终端、AI 模式（受控执行）/ SH 模式（直连 PTY）
+- **schedule**：定时任务模式
+- 场景绑定（Skill / 子 Agent / MCP / 能力档位 CapabilityTier）全部 UI 可配，即时生效
 
-### 📚 Skill 系统（SYSTEM / GLOBAL / WORKSPACE 三级作用域）
-- **SYSTEM**：项目内置，只读
-- **GLOBAL**：用户级（`~/.easyClaw/skills/`），跨 Workspace 复用
-- **WORKSPACE**：工作区级，每个 Workspace 可独立装配自己的 Skill
-- 提供 SkillsPage 可视化管理
-- 内置 6 个 Skill：`cursor-rules` / `backend-architecture` / `code-refactor` / `frontend-quality` / `devops-cicd` / `vercel-react-best-practices`
+### 🤝 子 Agent 团队（SPI 插件化）
+- 内置 9 个子 Agent：`main` / `coder` / `code-expert` / `reviewer` / `planner` / `researcher` / `file-expert` / `db` / `ops`
+- 子 Agent 以独立 Maven 模块声明（`web/agents/agent-*`），SPI 自动发现，新增即插即用
+- 团队协作基础设施：**共享黑板**（blackboard，跨 Agent 结论登记）、**本地知识库**（wiki 式条目，跨会话沉淀）
+- 步数上限、超时提升（timeout promotion）、失控防护（orphan cancel / 循环调度守卫）内置
+
+### 🗄 DB 工作区
+- 数据库连接**只来自 hub 下发**（按组织 + 用户授权过滤），spoke 端不持久化任何凭证；手输密码经 RSA-OAEP 加密传输
+- **只读双防线**：物理防线是 DB 只读账号；行为防线是 `DbQueryGuard`（首词白名单 + 危险子句定位匹配），写操作直接拒绝
+- 查询工具（`db_query` / `db_schema` / `db_status`）静默放行，不打断工作流；结果敏感列自动脱敏、超长自动截断
+- **连接上下文自动注入**：连接建立后，库类型/版本/主机/库/schema 清单随消息供给模型，免去盲目探测
+- **右侧表面板**：连接成功即列出全部表（`schema.table` 复合名，四库型全覆盖），点击表名展开列结构
+- 查询审计：执行前入队上报 hub（谁在什么时候对哪个库执行了什么）
 
 ### 🌐 实时对话
 - WebSocket 流式输出（替代传统 SSE，连接更稳定）
 - 支持推理模型 `deepseek-reasoner` 的 thinking 过程可视化
-- 多轮对话上下文管理
+- 子 Agent 事件流（派发/文本/工具调用）实时渲染，顶栏徽标显示运行中的成员
+- HITL 工具确认（require confirm）与「本轮/永久允许」授权机制
 
-### ⚙️ 全 UI 可配置
-提供 7 个管理页面：
+### 🐍 内置 Python 沙箱
+- GraalPy（`polyglot`）嵌入式 Python 运行时，`run_python` 工具可直接执行 Python 3 代码
+- 适合精确计算、数据变换、正则抽取等「LLM 硬算容易错」的场景
 
-| 页面 | 用途 |
-|------|------|
-| **ChatPage** | 主对话界面，WebSocket 流式输出 |
-| **WorkspacesPage** | Workspace 增删改、切换激活工作区 |
-| **RolesPage** | AI 角色/系统提示词管理 |
-| **SkillsPage** | Skill 启停、查看详情、跨作用域管理 |
-| **McpPage** | MCP Server 配置、IN/OUT 桥接管理 |
-| **ToolsPage** | 内置工具列表与参数说明 |
-| **SettingsPage** | 全局参数（超时、Shell 超时、模型参数） |
+### 🏢 hub 平台管理后端
+- 多组织 / 项目 / 用户 / appKey 管理，RBAC（platformAdmin 等）
+- **模型目录与积分网关**：模型登记、按请求模型名扣积分、Provider 授权
+- **资源下发管道**：运维服务器、数据库连接、知识库/黑板云同步统一经 spoke 端点下发
+- 审计日志、功能开关（Feature Flags）、菜单配置
 
 ---
 
@@ -56,19 +70,21 @@
 
 ### 后端
 - **Spring Boot 3.4.1** + **Java 21**
-- **AgentScope 2.0.2**（`agentscope-core` / `agentscope-harness` / `agentscope-extensions-model-openai`）
-- **Spring Data JPA** + **SQLite**（Hibernate `ddl-auto: update`）
+- **AgentScope 2.0.2**（源码内嵌于 `agentscope-java/`：core / harness / extensions-model-openai / distribution）
+- **web**：Spring Data JPA + **SQLite**（Hibernate `ddl-auto: update`），零外部依赖
+- **hub**：Spring Data JPA + **PostgreSQL**（**Flyway** 管理 schema，禁用 ddl-auto）+ **JWT** 鉴权 + 敏感字段 AES-GCM 静态加密
 - **Spring WebSocket**（流式对话）
-- **Lombok** + **Jackson 2.16.1**
+- **GraalPy polyglot**（Python 沙箱）
+- **Project Reactor**（响应式事件流，禁止 `.block()`）
 
 ### 前端
-- **React** + **TypeScript**
-- **Vite**（`frontend-maven-plugin` 集成）
-- 纯原生 CSS（无 UI 框架依赖）
-- 状态管理：自研轻量 store
+- **React 18.3** + **TypeScript 5.6**
+- **Vite 5**（`frontend-maven-plugin` 集成）
+- 纯原生 CSS（无 UI 框架依赖，语义色 token 化）
 
 ### 数据存储
-- **系统元数据库**：`~/.easyClaw/ai-assistant.db`（SQLite，所有 Workspace 共用）
+- **web 主应用**：`~/.easyClaw/` 下 SQLite（零外部依赖）
+- **hub 平台库**：PostgreSQL（环境变量配置连接，Flyway 管理 schema）
 - **Workspace 状态/对话**：`<workspace>/.easyClaw/agent/` 目录下
 
 ---
@@ -78,9 +94,9 @@
 ### 环境要求
 - **JDK 21+**
 - **Maven 3.8+**
-- **Node.js 22.13+**（仅首次构建前端需要，之后由 `frontend-maven-plugin` 自动管理）
+- **Node.js 22+**（仅首次构建前端需要，之后由 `frontend-maven-plugin` 自动管理）
 
-### 启动
+### 启动主应用（web）
 
 ```bash
 # 1. 克隆
@@ -94,15 +110,32 @@ export DASHSCOPE_API_KEY=sk-xxx         # 阿里通义千问
 # 或
 export OPENAI_API_KEY=sk-xxx            # OpenAI 兼容服务
 
-# 3. 启动（首次会触发前端 npm install + vite build）
-mvn spring-boot:run
+# 3. 构建 + 启动（首次会触发前端 npm install + vite build）
+mvn install -DskipTests
+mvn -pl web/api spring-boot:run
 ```
 
 启动后访问：**http://localhost:18080**
 
+### 启动平台管理后端（hub，可选）
+
+hub 需要 PostgreSQL 实例，连接信息走环境变量：
+
+```bash
+export HUB_DB_URL=jdbc:postgresql://localhost:5432/easy_claw
+export HUB_DB_USER=postgres
+export HUB_DB_PASSWORD=xxx
+export HUB_JWT_SECRET=<随机长串>       # 生产必须覆盖默认值
+export HUB_MASTER_KEY=<随机长串>       # 敏感字段加密主密钥，生产必须覆盖
+
+mvn -pl hub/server spring-boot:run
+```
+
+启动后访问：**http://localhost:18081**（schema 由 Flyway 自动迁移，首次启动自动建表）
+
 ### 配置 Provider
 
-在 `application.yml` 中选择当前激活的 Provider：
+在 `web/api/src/main/resources/application.yml` 中选择当前激活的 Provider：
 
 ```yaml
 agentscope:
@@ -122,38 +155,74 @@ agentscope:
 
 ```
 easy-claw/
-├── pom.xml                                  # Maven 配置（Spring Boot 3.4.1 / Java 21 / AgentScope 2.0.2）
-├── src/main/java/com/xinl/easyclaw/
-│   ├── AiAssistantApplication.java          # 启动类
-│   ├── agent/                               # AgentScope 集成（ReActAgent、会话管理、模型工厂）
-│   ├── config/                              # 配置类（WebSocket、CORS、SchemaMigration、BuiltinSkillsInstaller）
-│   ├── controller/                          # REST + WebSocket Controller
-│   ├── domain/                              # JPA Entity
-│   ├── dto/                                 # 数据传输对象
-│   ├── mcp/                                 # MCP IN/OUT 桥接
-│   ├── repository/                          # Spring Data Repository
-│   ├── service/                             # 业务逻辑
-│   ├── skill/                               # Skill 加载/解析/作用域管理
-│   ├── tool/                                # 内置工具实现
-│   └── workspace/                           # Workspace 路径解析与安全检查
-├── src/main/resources/
-│   ├── application.yml                      # 主配置（端口 18080 / profile dev-sqlite）
-│   └── static/                              # 前端构建产物
-├── frontend/                                # React + Vite 前端
-│   ├── src/
-│   │   ├── pages/                           # 7 个页面（Chat/Mcp/Roles/Settings/Skills/Tools/Workspaces）
-│   │   ├── components/                      # 公共组件
-│   │   ├── api.ts                           # 后端 API 封装
-│   │   ├── chatSocket.ts                    # WebSocket 客户端
-│   │   ├── chatStore.ts                     # 对话状态管理
-│   │   └── styles.css
-│   ├── package.json
-│   └── vite.config.ts
-├── docs/
-│   ├── required.md                          # 项目需求文档（V6 旧规划，已不适用）
-│   └── tool.md                              # MCP / Skill / Tool 集成示例
-└── README.md                                # 本文件
+├── pom.xml                                      # 父 POM（web / hub / agentscope-java 三聚合）
+├── web/                                         # 主应用
+│   ├── base/                                    # 基础公共层（跨模块共享类型）
+│   ├── agent-core/                              # AgentScope 集成核心（agent / scenario / middleware）
+│   ├── agents/                                  # 子 Agent SPI 模块（每个子 Agent 一个子模块）
+│   │   ├── agent-main / agent-coder / agent-code-expert / agent-reviewer
+│   │   ├── agent-planner / agent-researcher / agent-file-expert
+│   │   └── agent-db / agent-ops
+│   ├── modes/                                   # 模式 SPI 模块
+│   │   ├── mode-single / mode-team              # 单体 / 多智能体编排
+│   │   └── mode-db / mode-ops / mode-schedule   # 专项工作台
+│   ├── api/                                     # 主应用（启动类 + REST/WS + 业务）
+│   │   ├── src/main/java/com/xinl/easyclaw/
+│   │   │   ├── agent/                           # AgentService（会话/事件流/副作用）
+│   │   │   ├── api/                             # REST Controller
+│   │   │   ├── blackboard/ knowledge/ memory/   # 黑板 / 知识库 / 记忆
+│   │   │   ├── db/                              # DB 工作区（连接服务 / 查询编排 / 渲染）
+│   │   │   ├── mcp/                             # MCP IN/OUT 桥接
+│   │   │   ├── ops/                             # 运维（服务器管理 / 远程终端）
+│   │   │   ├── permission/                      # 工具权限（确认 / 白名单 / 授权规则）
+│   │   │   ├── python/                          # GraalPy 沙箱
+│   │   │   ├── scenario/ workspace/             # 场景解析 / Workspace 安全
+│   │   │   ├── tool/ tools/                     # 工具权限策略 / 内置工具
+│   │   │   └── ws/                              # WebSocket 处理
+│   │   └── frontend/                            # React 前端（11 个页面）
+│   └── frontend/                                # 前端构建工作目录（node_modules 缓存）
+├── hub/                                         # 平台管理后端
+│   ├── contract/                                # hub↔spoke 契约（DTO / 端点约定）
+│   ├── common/                                  # hub 公共库
+│   └── server/                                  # 平台服务（端口 18081）
+│       └── frontend/                            # hub 前端（18 个页面）
+├── agentscope-java/                             # AgentScope 2.0 框架源码
+│   ├── agentscope-core / agentscope-harness     # 核心 / harness（工具调度、子 Agent）
+│   ├── agentscope-extensions/                   # 模型扩展（openai 兼容等）
+│   └── agentscope-distribution / -bom / -examples
+└── docs/                                        # 设计文档（DB 工作区 / 重构计划等）
 ```
+
+---
+
+## 🖥 页面一览
+
+### web 前端（http://localhost:18080，11 个页面）
+
+| 页面 | 用途 |
+|------|------|
+| **ChatPage** | 主对话界面，WebSocket 流式输出、子 Agent 进度、工具确认条 |
+| **WorkspacesPage** | Workspace 增删改、切换激活工作区 |
+| **ScenariosPage** | 场景管理：single/team 模式、Skill/子 Agent/MCP 绑定、编排工作流步骤 |
+| **DbPage** | DB 工作台：连接管理、对话查询、右侧表清单（点击看表结构） |
+| **OpsPage** | 运维工作台：服务器列表、交互式终端、AI 模式 / SH 模式 |
+| **KnowledgePage** | 本地知识库：条目增删改查、全文检索 |
+| **BlackboardPage** | 共享黑板：任务结论/风险/决策的时间线视图 |
+| **RolesPage** | AI 角色/系统提示词管理 |
+| **SkillsPage** | Skill 启停、查看详情、跨作用域管理、脚本执行 |
+| **McpPage** | MCP Server 配置、IN/OUT 桥接管理 |
+| **ToolsPage** | 内置工具列表与参数说明 |
+| **SettingsPage** | 全局参数（超时、Shell 超时、模型参数、路径安全） |
+
+### hub 前端（http://localhost:18081，18 个页面）
+
+| 分组 | 页面 |
+|------|------|
+| 组织与用户 | OrgsPage / OrgDetailPage / ProjectsPage / ProjectSpacePage / UsersPage / AppKeysPage |
+| 模型与网关 | ProvidersPage / ModelCatalogPage / GatewayPage / CreditsPage |
+| 平台目录 | PlatformCatalogPage（运维服务器 / 数据库连接 / 标签字典） |
+| 治理 | AuditLogsPage / FeatureFlagsPage / MenuConfigPage |
+| 协作 | KnowledgePage / BlackboardPage / RolesPage（项目级云同步） |
 
 ---
 
@@ -178,6 +247,11 @@ ai:
 
 可以在 SettingsPage 调整这些参数（运行期生效）。
 
+工具权限分层（`ToolPermissionPolicy`，唯一权威来源）：
+- **静默放行**：只读工具（读文件/检索/黑板/知识库/DB 查询三件套）
+- **显式确认**：写文件 / 编辑 / Shell / 远程执行——每次弹确认，用户可选「本轮允许 / 永久允许」
+- **未知工具** fail-closed：一律需要确认
+
 ---
 
 ## 🧩 Skill 系统详解
@@ -193,7 +267,7 @@ SYSTEM > GLOBAL > WORKSPACE
 每个 Skill 是一个目录，包含 `SKILL.md`（必需）+ 可选脚本/资源：
 
 ```
-.cursor-rules/
+<skill-name>/
 ├── SKILL.md              # 必需：描述 Skill 的用途、加载时机、使用规范
 └── scripts/              # 可选：可被 AI 执行的脚本
 ```
@@ -205,11 +279,15 @@ AI 在对话中会根据 Skill 描述自动判断是否加载。
 | Skill | 用途 |
 |-------|------|
 | `cursor-rules` | Agent 协作规范（沟通风格、原子操作、验证闭环） |
+| `karpathy-guidelines` | Karpathy 风格编码原则（思考先于编码、外科手术式修改） |
+| `clean-code` | 五维代码审查（正确性/可读性/架构/安全/性能） |
 | `backend-architecture` | 后端架构标准（API 设计、错误处理、数据层、安全） |
 | `code-refactor` | 重构指南（坏味道检测、手法速查、红牌警告） |
 | `frontend-quality` | 前端质量标准（组件设计、性能、状态管理、A11y） |
-| `devops-cicd` | DevOps 实践（流水线、Docker、GitHub Actions） |
 | `vercel-react-best-practices` | React/Next.js 性能优化（Vercel 官方） |
+| `antdesign-philosophy` | Ant Design 设计理念与 Token 体系 |
+| `elementui-philosophy` | Element UI 设计理念与组件规范 |
+| `devops-cicd` | DevOps 实践（流水线、Docker、GitHub Actions） |
 
 ---
 
@@ -222,12 +300,10 @@ AI 在对话中会根据 Skill 描述自动判断是否加载。
 - **Command/URL**: `npx -y @modelcontextprotocol/server-github`
 - **Env**: `GITHUB_TOKEN=ghp_xxx`
 
-保存后 AI 立即可调用 GitHub 相关工具。
+保存后 AI 立即可调用 GitHub 相关工具。场景绑定 MCP 服务时，运行时按服务展开工具名白名单。
 
 ### OUTBOUND：把内置工具暴露为 HTTP 端点
 McpPage → "Expose Tool" → 选择工具 → 自动生成 `POST /mcp/http_tool/{name}` 端点。
-
-详细示例见 [`docs/tool.md`](docs/tool.md)。
 
 ---
 
@@ -251,10 +327,13 @@ agentscope:
 
 | 数据 | 位置 |
 |------|------|
-| 系统元数据库（Workspace 列表、Provider 配置、MCP 配置、Skill 索引等） | `~/.easyClaw/ai-assistant.db`（SQLite） |
+| web 系统元数据库（Workspace/Provider/MCP/Skill 索引等） | `~/.easyClaw/`（SQLite） |
+| hub 平台库（组织/项目/用户/模型目录/积分/审计/连接目录） | **PostgreSQL**（`HUB_DB_URL` 等环境变量配置连接，Flyway 管理 schema） |
 | Workspace 自身状态、对话历史 | `<workspace>/.easyClaw/agent/` |
 | 用户级 GLOBAL Skill | `~/.easyClaw/skills/` |
 | AgentScope Harness runtime | `<workspace>/<userId>/agents/`（被禁访） |
+
+> web 主应用零外部依赖（SQLite）；hub 需要 PostgreSQL 实例（连接信息走环境变量，不入仓）。
 
 > 卸载/迁移时只需保留 `~/.easyClaw/` 目录即可带走所有配置与历史。
 
@@ -262,27 +341,39 @@ agentscope:
 
 ## 🧪 开发说明
 
-### 后端开发
+### 常用命令
+
 ```bash
-mvn spring-boot:run          # 启动后端（自动触发前端构建）
-mvn test                     # 单元测试
-mvn compile                  # 编译检查
+# 全量构建（约 11 分钟，含前端构建与全部测试）
+mvn clean install
+
+# 只编译主应用（离线、跳测试）
+mvn -q -pl web/api -am compile -o -DskipTests
+
+# 定向跑单个测试类（必须带 -am 与 failIfNoSpecifiedTests=false）
+mvn -pl hub/server -am test -o -Dtest=<TestPattern> -Dsurefire.failIfNoSpecifiedTests=false
+
+# 前端单独构建（web 前端）
+cd web/api/frontend && npx vite build --logLevel warn
+
+# 前端热更新开发
+cd web/api/frontend && npm install && npm run dev
 ```
 
-### 前端开发（热更新）
-```bash
-cd frontend
-npm install
-npm run dev                  # Vite dev server，独立前端开发
-# 单独启动后端时，前端请求会通过 Vite proxy 转发到 18080
-```
+### 新增一个子 Agent（SPI）
+1. 在 `web/agents/` 下新建 `agent-xxx` 模块（参照 `agent-coder`）
+2. 实现 Agent 声明 SPI（名称/描述/系统提示词/工具白名单/步数）
+3. `web/agents/pom.xml` 加入 `<module>`，重新构建——SPI 自动发现，ScenariosPage 即可绑定
+
+### 新增一个模式（SPI）
+`web/modes/` 下参照 `mode-db` 新建模块，声明模式名与 `whitelistEnabled` 等行为，SPI 自动注册。
 
 ### 添加新的内置 Skill
-1. 在 `.easyClaw/agent/.skills-cache/.../<skill-name>/` 下创建 `SKILL.md`
+1. 在内置 Skill 目录下创建 `<skill-name>/SKILL.md`
 2. `BuiltinSkillsInstaller` 启动时会自动播种到系统表
 3. 重启后即可在 SkillsPage 看到
 
-### 添加新的 MCP Provider
+### 添加新的模型 Provider
 所有 Provider 共享 OpenAI 兼容协议，**通常无需改代码**，只需在 `application.yml` 的 `agentscope.providers` 下加配置项。
 
 ---
@@ -304,3 +395,4 @@ npm run dev                  # Vite dev server，独立前端开发
 <p align="center">
   <sub>Built with Spring Boot 3.4 · React 18 · AgentScope 2.0</sub>
 </p>
+
