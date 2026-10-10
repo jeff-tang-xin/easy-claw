@@ -229,6 +229,10 @@ export const archiveProject = (id: number) => request<void>('DELETE', `/api/proj
 
 export const restoreProject = (id: number) => request<void>('POST', `/api/projects/${id}/restore`);
 
+/** 迁移项目到目标组织（仅源组织 admin；目标组织任意）。 */
+export const transferProject = (id: number, targetOrgId: number) =>
+  request<ProjectDto>('POST', `/api/projects/${id}/transfer`, {targetOrgId});
+
 // ============ 审计日志 ============
 /** 组织维度审计日志分页查询（仅 owner/admin 可调通，服务端强制校验） */
 export const fetchAuditLogs = (orgId: number, module: string, page: number, size: number) => {

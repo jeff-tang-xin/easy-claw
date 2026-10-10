@@ -3,6 +3,7 @@ package com.xinl.easyclaw.hub.controller;
 import com.xinl.easyclaw.hub.security.CurrentUserHolder;
 import com.xinl.easyclaw.hub.contract.project.CreateProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.ProjectDto;
+import com.xinl.easyclaw.hub.contract.project.TransferProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.UpdateProjectRequest;
 import jakarta.validation.Valid;
 import java.util.List;
@@ -61,5 +62,11 @@ public class ProjectController {
     public ResponseEntity<Void> restore(@PathVariable Long id) {
         projectService.restore(CurrentUserHolder.requireUserId(), id);
         return ResponseEntity.noContent().build();
+    }
+
+    /** 迁移项目到目标组织（仅源组织 admin；目标组织任意）。 */
+    @PostMapping("/{id}/transfer")
+    public ProjectDto transfer(@PathVariable Long id, @Valid @RequestBody TransferProjectRequest req) {
+        return projectService.transfer(CurrentUserHolder.requireUserId(), id, req.targetOrgId());
     }
 }

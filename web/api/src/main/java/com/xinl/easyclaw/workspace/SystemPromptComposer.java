@@ -82,6 +82,15 @@ public class SystemPromptComposer {
                     workspaceId, personaPrompt.length());
         }
 
+        // 工作区上下文：名称/描述/类型 + 当前激活场景，让智能体知道「自己在哪个工作区、在做什么」。
+        // 放在人格之后、场景编排之前——定位信息比人格具体、比场景抽象，居中不抢两端。
+        String workspaceContext = workspaceContext(workspaceId, activeScenario);
+        if (workspaceContext != null) {
+            sysPrompt = sysPrompt + "\n\n" + workspaceContext;
+            log.info("工作区上下文已注入 system prompt: workspace={}, {} chars",
+                    workspaceId, workspaceContext.length());
+        }
+
         if (!subagents.isEmpty()) {
             sysPrompt = sysPrompt + subagentRoster(subagents,
                     binding != null && binding.isOrchestratedMode(),
@@ -120,6 +129,48 @@ public class SystemPromptComposer {
         }
 
         return sysPrompt;
+    }
+
+    /**
+     * 工作区上下文段：名称/描述/类型 + 当前激活场景，让智能体知道「自己在哪个工作区、在做什么」。
+     * <p>
+     * 失败语义：workspace 不存在时返回 {@code null} 跳过注入（记 debug）——定位信息是增强，
+     * 绝不能让 Agent 构建失败。场景信息来自 {@code activeScenario}（compose 已查过一次，复用）。
+     */
+    private String workspaceContext(String workspaceId,
+                                    com.xinl.easyclaw.base.profile.ScenarioProfile activeScenario) {
+        WorkspaceEntity ws = workspaceRepository.findById(workspaceId).orElse(null);
+        if (ws == null) {
+            log.debug("工作区上下文跳过：workspace 不存在 workspace={}", workspaceId);
+            return null;
+        }
+        StringBuilder sb = new StringBuilder();
+        sb.append("## 📁 当前工作区\n\n");
+        sb.append("- **名称**：").append(ws.getName()).append('\n');
+        if (ws.getDescription() != null && !ws.getDescription().isBlank()) {
+            sb.append("- **描述**：").append(ws.getDescription().trim()).append('\n');
+        }
+        sb.append("- **形态**：").append(describeWorkspaceType(ws.getType())).append('\n');
+        if (activeScenario != null) {
+            sb.append("- **激活场景**：")
+                    .append(activeScenario.getDisplayName() != null
+                            ? activeScenario.getDisplayName()
+                            : activeScenario.getName())
+                    .append("（").append(activeScenario.getMode()).append(" 模式）\n");
+        }
+        return sb.toString().stripTrailing();
+    }
+
+    /** 工作区形态翻译：把内部枚举值翻译成模型能理解的语义。 */
+    private static String describeWorkspaceType(String type) {
+        if (type == null) {
+            return "single（单智能体）";
+        }
+        return switch (type) {
+            case "team" -> "team（多智能体编排）";
+            case "schedule" -> "schedule（定时任务）";
+            default -> "single（单智能体）";
+        };
     }
 
     /**
@@ -257,8 +308,9 @@ public class SystemPromptComposer {
         if (binding.hasSkillBinding()) {
             sb.append("\n- **本场景的 Skill**：")
                     .append(String.join("、", binding.skills()))
-                    .append("。这是本环境为你配备的方法资产，遇到匹配任务应先加载；")
-                    .append("确有场景未覆盖的需求时才使用其他 Skill，并说明理由。");
+                    .append("。这是本环境为你配备的方法资产，遇到匹配任务应先加载——")
+                    .append("用 `load_skill_through_path(skillId=\"<skill-id>\", path=\"SKILL.md\")` 加载，")
+                    .append("按其标准执行；确有场景未覆盖的需求时才使用其他 Skill，并说明理由。");
         }
         List<String> boundAgents = availableBoundAgents(binding, subagents);
         if (!boundAgents.isEmpty()) {
@@ -270,7 +322,9 @@ public class SystemPromptComposer {
         if (binding.hasMcpBinding()) {
             sb.append("\n- **本场景可用的 MCP 服务（硬性）**：")
                     .append(String.join("、", binding.mcpServices()))
-                    .append("。未列出的 MCP 工具已从工具集中移除，调用必然失败，不要尝试。");
+                    .append("。这些服务提供外部能力（数据库、API、外部系统等），")
+                    .append("调用前先看对应工具的 description 了解参数与副作用；")
+                    .append("未列出的 MCP 工具已从工具集中移除，调用必然失败，不要尝试。");
         }
         if (sb.isEmpty()) {
             return null;
@@ -358,10 +412,14 @@ public class SystemPromptComposer {
                       注意「步数」= ReAct 轮次，**不等于工具调用次数**：一轮里并行调 5 个工具只算 1 步，
                       所以真正要估的是「要往返推理多少轮」，不是「要调多少次工具」。
                       耗尽会被强制截断、产出半成品，而半成品往往看起来像成品，最容易被误当结论。
-                   ② **时间墙**——1800 秒到点直接掐断，比步数耗尽更惨：
+                   ② **时间墙**——同步超时到点直接掐断，比步数耗尽更惨：
                       步数耗尽还能强行总结吐点东西，超时掐断**连最后陈述的机会都没有**。
-                      1800s 对绝大多数子任务绰绰有余，正常不会撞上；真撞上说明任务本身过大，
-                      应当拆阶段，而不是指望调大超时（该值已是框架硬上限）。
+                      默认 1800s 对绝大多数子任务绰绰有余，正常不会撞上；真撞上说明任务本身过大，
+                      应当拆阶段，而不是指望调大超时。
+                      **在任务描述里给子 Agent 明确的时间/步数预算**：子 Agent 的系统提示已注入
+                      步数预算（它真正能感知的），但时间预算需要你在任务描述里写清——
+                      例如「你有约 10 分钟，请在预算内收尾，把关键结论写进黑板」。
+                      子 Agent 会在预算耗尽前主动落盘，而不是被掐断时措手不及。
                    **粒度判据**：预估轮次超过步数上限的三分之二就必须拆阶段。
                    **拆分判据**：这个任务能不能用一句话说清「做完什么就算完」？说不清就说明还能再拆。
                    ① 一次只给一个明确目标——「查 A 并改 B 再验证 C」必须拆成三个任务或三个阶段；
@@ -373,6 +431,9 @@ public class SystemPromptComposer {
                    ```
                    【目标】一句话说清做完什么算完（可验证，不是「优化一下」这种）
                    【上下文】相关文件路径 + 已确认的事实 + 明确不用再查的部分
+                   【预算】给子 Agent 明确的时间/步数预算（如「你有约 10 分钟 / 约 40 步」），
+                           并提醒它在预算耗尽前把关键结论写进黑板——它无法感知真实时间，
+                           预算是你替它定的收尾节奏
                    【交付物】要什么形态：结论清单 / 修改后的文件 / 带行号的证据 / 方案对比表
                    【中间结论】哪些结论一得出就立刻写黑板，不要等任务结束（下游成员在等）
                    ```

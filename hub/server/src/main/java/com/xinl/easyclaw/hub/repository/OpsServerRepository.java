@@ -19,4 +19,7 @@ public interface OpsServerRepository extends JpaRepository<OpsServerEntity, Long
     List<OpsServerEntity> findAllByCategory(String category);
 
     boolean existsByCategory(String category);
+
+    /** 项目迁移级联：取归属指定项目的行，同步其 org_id 冗余字段。 */
+    List<OpsServerEntity> findByProjectId(Long projectId);
 }

@@ -2229,12 +2229,18 @@ public class AgentService {
      * 靠提示词约束主控每次显式传值实测不可靠，故改为统一兜底。
      * <p>
      * <b>副作用</b>：主控失去按任务规模分配预算的能力（查证 120s / 实现 300s 那套指导失效），
-     * 所有子 Agent 统一 1800s。要恢复主控自主权，需改框架优先级逻辑让 LLM 传值优先。
+     * 所有子 Agent 统一该值。要恢复主控自主权，需改框架优先级逻辑让 LLM 传值优先。
      * <p>
      * <b>适用范围</b>：由 {@link #applyForceSyncDispatch} 对<b>所有编排模式</b>注入（含 single），
      * 不再按模式分叉 —— 原因见该方法的「为什么不再分模式」。
+     * <p>
+     * <b>取值来源</b>：{@code agentscope.agent.subagent-timeout-seconds}（默认 1800）。
+     * 该值同时被 {@code SubagentLoader} 注入子 Agent 提示词作为「时间预算」，
+     * 两处必须同源，否则提示词说的预算与实际超时不符。
      */
-    private static final int SUBAGENT_SYNC_TIMEOUT_SECONDS = 1800;
+    private int subagentSyncTimeoutSeconds() {
+        return agentScopeProperties.getAgent().getSubagentTimeoutSeconds();
+    }
 
     /** 非 delta 事件的处理（tool_start/end/result, confirm, subagent 等） */
     private void handleNonDeltaEvent(AgentEvent event, Consumer<StreamEvent> onEvent,
@@ -2485,9 +2491,9 @@ public class AgentService {
         // 注入后主控的 timeout_seconds 参数被完全忽略，所有子 Agent 统一该值。
         // 这是有意为之：子 Agent 步数已与主对齐（可达数百步），30s 不够跑完一步。
         // 若未来需要按任务粒度调超时，需改框架的优先级逻辑（让 LLM 传值优先于 app override）。
-        builder.put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, SUBAGENT_SYNC_TIMEOUT_SECONDS);
+        builder.put(AgentSpawnTool.CTX_FORCE_SYNC_TIMEOUT_SECONDS, subagentSyncTimeoutSeconds());
         log.info("子 Agent 强制同步派发，默认超时 {}s（主控 timeout_seconds 参数被覆盖）: workspace={}",
-                SUBAGENT_SYNC_TIMEOUT_SECONDS, workspaceId);
+                subagentSyncTimeoutSeconds(), workspaceId);
     }
 
     /**

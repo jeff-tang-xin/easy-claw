@@ -166,6 +166,11 @@ public class OrgService {
                 .orElse(null);
     }
 
+    /** 组织是否存在（供跨组织迁移等校验目标组织）。 */
+    public boolean orgExists(Long orgId) {
+        return orgId != null && org.existsById(orgId);
+    }
+
     /** 角色门槛校验的公开入口（供 appkey 等其它服务复用）：内部转调私有实现，不新增判定逻辑。 */
     public void requireOrgRole(Long orgId, Long userId, String... allowed) {
         requireRole(orgId, userId, allowed);

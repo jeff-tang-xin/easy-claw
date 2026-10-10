@@ -18,4 +18,7 @@ public interface DbConnectionRepository extends JpaRepository<DbConnectionEntity
 
     /** authorize-check 批查：一次取回全部候选 serverKey 的行（替代逐 key N+1 查询）。 */
     List<DbConnectionEntity> findByServerKeyIn(Collection<String> serverKeys);
+
+    /** 项目迁移级联：取归属指定项目的行，同步其 org_id 冗余字段。 */
+    List<DbConnectionEntity> findByProjectId(Long projectId);
 }

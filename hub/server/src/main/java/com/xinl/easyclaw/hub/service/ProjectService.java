@@ -19,8 +19,14 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.xinl.easyclaw.hub.entity.ProjectEntity;
 import com.xinl.easyclaw.hub.entity.UserEntity;
+import com.xinl.easyclaw.hub.entity.WorkspaceEntity;
+import com.xinl.easyclaw.hub.entity.DbConnectionEntity;
+import com.xinl.easyclaw.hub.entity.OpsServerEntity;
 import com.xinl.easyclaw.hub.repository.ProjectRepository;
 import com.xinl.easyclaw.hub.repository.UserRepository;
+import com.xinl.easyclaw.hub.repository.WorkspaceRepository;
+import com.xinl.easyclaw.hub.repository.DbConnectionRepository;
+import com.xinl.easyclaw.hub.repository.OpsServerRepository;
 
 /**
  * 项目管理：组织内归类锚点。可见性 private|team|public，按角色 + 归属过滤；归档=status:archived。
@@ -36,13 +42,20 @@ public class ProjectService {
     private final UserRepository users;
     private final OrgService orgService;
     private final AuditService auditService;
+    private final WorkspaceRepository workspaces;
+    private final DbConnectionRepository dbConnections;
+    private final OpsServerRepository opsServers;
 
     public ProjectService(ProjectRepository projects, UserRepository users, OrgService orgService,
-                          AuditService auditService) {
+                          AuditService auditService, WorkspaceRepository workspaces,
+                          DbConnectionRepository dbConnections, OpsServerRepository opsServers) {
         this.projects = projects;
         this.users = users;
         this.orgService = orgService;
         this.auditService = auditService;
+        this.workspaces = workspaces;
+        this.dbConnections = dbConnections;
+        this.opsServers = opsServers;
     }
 
     /** 组织下项目列表：owner/admin 全量；member/guest 见 team+public+自己拥有的 private。 */
@@ -69,8 +82,9 @@ public class ProjectService {
                 .orElseThrow(() -> ApiException.notFound("项目不存在"));
         String role = orgService.roleOf(p.getOrgId(), requesterId);
         boolean privileged = "owner".equals(role) || "admin".equals(role);
-        boolean member = role != null;
-        // public 项目组织外可读；其余需成员且满足可见性。
+        // 项目 owner 始终可读（即使不在项目所属组织——跨组织迁移后新 owner 可能不在目标组织）。
+        boolean member = role != null || p.getOwnerUserId().equals(requesterId);
+        // public 项目组织外可读；其余需成员（含 owner）且满足可见性。
         if (!"public".equals(p.getVisibility()) && !member) {
             throw ApiException.forbidden("非组织成员");
         }
@@ -165,6 +179,73 @@ public class ProjectService {
         projects.save(p);
         auditService.record(AuditModule.PROJECT, "restore_project", requesterId, p.getOrgId(), "project",
                 String.valueOf(p.getId()), null, AuditModule.SUCCESS);
+    }
+
+    /**
+     * 迁移项目到目标组织（跨组织）。
+     * <p>
+     * <b>权限</b>：仅<b>源组织 admin</b> 可发起（owner/member/guest 均不可）；目标组织可为
+     * 任意组织，不要求发起人是目标组织成员——admin 是平台级管理角色，可跨组织迁移。
+     * <p>
+     * <b>冲突</b>：目标组织内已存在同名 slug 时<b>禁止迁移</b>（不自动改名，返回 409）。
+     * <p>
+     * <b>级联</b>：项目 org_id 改为目标组织，owner_user_id 改为执行迁移的 admin；
+     * 挂 project_id 的资源（workspaces / db_connections / ops_servers）的 org_id 冗余字段
+     * 一并同步为目标组织，保证「按组织列举与鉴权」的一致性（这些表无外键，一致性由应用层保证）。
+     * 仅挂 project_id 无 org_id 冗余的表（knowledge_items / blackboard_entries / 事件表）
+     * 无需改动——它们只按 project_id 归类，project_id 未变。
+     *
+     * @param requesterId 执行迁移的 admin（迁移后成为项目新 owner）
+     * @param projectId   被迁移项目
+     * @param targetOrgId 目标组织
+     * @return 迁移后的项目视图
+     */
+    @Transactional
+    public ProjectDto transfer(Long requesterId, Long projectId, Long targetOrgId) {
+        ProjectEntity p = projects.findById(projectId)
+                .orElseThrow(() -> ApiException.notFound("项目不存在"));
+        Long sourceOrgId = p.getOrgId();
+        if (sourceOrgId.equals(targetOrgId)) {
+            throw ApiException.validation("目标组织与当前组织相同，无需迁移");
+        }
+        // 仅源组织 admin 可迁移（owner/member/guest 均不可）
+        String sourceRole = orgService.roleOf(sourceOrgId, requesterId);
+        if (!"admin".equals(sourceRole)) {
+            throw ApiException.forbidden("仅源组织 admin 可迁移项目");
+        }
+        // 目标组织必须存在
+        if (!orgService.orgExists(targetOrgId)) {
+            throw ApiException.notFound("目标组织不存在");
+        }
+        // 冲突禁止迁移：目标组织内已存在同名 slug
+        if (projects.existsByOrgIdAndSlug(targetOrgId, p.getSlug())) {
+            throw ApiException.conflict("目标组织已存在同名项目 slug：" + p.getSlug());
+        }
+
+        // 迁移项目本身
+        p.setOrgId(targetOrgId);
+        p.setOwnerUserId(requesterId);
+        projects.save(p);
+
+        // 级联同步 org_id 冗余字段（仅挂 project_id 且冗余 org_id 的表）
+        workspaces.findByProjectId(projectId).ifPresent(w -> {
+            w.setOrgId(targetOrgId);
+            workspaces.save(w);
+        });
+        for (DbConnectionEntity c : dbConnections.findByProjectId(projectId)) {
+            c.setOrgId(targetOrgId);
+            dbConnections.save(c);
+        }
+        for (OpsServerEntity s : opsServers.findByProjectId(projectId)) {
+            s.setOrgId(targetOrgId);
+            opsServers.save(s);
+        }
+
+        auditService.record(AuditModule.PROJECT, "transfer_project", requesterId, targetOrgId, "project",
+                String.valueOf(p.getId()),
+                "fromOrg=" + sourceOrgId + ",toOrg=" + targetOrgId + ",slug=" + p.getSlug(),
+                AuditModule.SUCCESS);
+        return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
     }
 
     /** 显式 slug 校验组织内唯一；留空则从名称派生（纯中文名兜底 "proj"），重名自动追加 -2/-3…。 */

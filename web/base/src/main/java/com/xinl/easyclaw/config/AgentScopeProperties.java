@@ -512,6 +512,17 @@ public class AgentScopeProperties {
          */
         private int subagentSteps = 30;
 
+        /**
+         * 子 Agent 强制同步派发的超时（秒）。
+         * <p>
+         * 该值同时注入两处：① {@code AgentService.applyForceSyncDispatch} 写入
+         * {@code CTX_FORCE_SYNC_TIMEOUT_SECONDS} 作为框架侧硬超时；②
+         * {@code SubagentLoader} 把「时间预算 + 步数预算」注入每个子 Agent 的
+         * system prompt，让子 Agent 在预算耗尽前主动把关键结论写进黑板。
+         * 两处必须同源，否则提示词说的预算与实际超时不符，子 Agent 会误判收尾时机。
+         */
+        private int subagentTimeoutSeconds = 1800;
+
         /** 单次模型调用超时（分钟）。复杂推理/长输出可能需要更久 */
         private int modelTimeoutMinutes = 10;
 
@@ -616,6 +627,14 @@ public class AgentScopeProperties {
 
         public void setSubagentSteps(int subagentSteps) {
             this.subagentSteps = subagentSteps;
+        }
+
+        public int getSubagentTimeoutSeconds() {
+            return subagentTimeoutSeconds;
+        }
+
+        public void setSubagentTimeoutSeconds(int subagentTimeoutSeconds) {
+            this.subagentTimeoutSeconds = subagentTimeoutSeconds;
         }
 
         public int getModelTimeoutMinutes() {

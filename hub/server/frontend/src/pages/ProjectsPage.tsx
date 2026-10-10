@@ -1,8 +1,8 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {createProject, listProjects} from '../api';
+import {createProject, listProjects, listMyOrgs, transferProject} from '../api';
 import Modal from '../components/Modal';
-import type {ProjectDto} from '../types';
+import type {OrgDto, ProjectDto} from '../types';
 
 interface Props {
   orgId: number | null;
@@ -45,6 +45,14 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
   const [busy, setBusy] = useState(false);
 
   const canCreate = role !== null && role !== 'guest';
+  // 仅源组织 admin 可迁移项目（owner/member/guest 均不可）
+  const canTransfer = role === 'admin';
+
+  const [transferTarget, setTransferTarget] = useState<ProjectDto | null>(null);
+  const [orgOptions, setOrgOptions] = useState<OrgDto[] | null>(null);
+  const [transferOrgId, setTransferOrgId] = useState<number | ''>('');
+  const [transferError, setTransferError] = useState('');
+  const [transferBusy, setTransferBusy] = useState(false);
 
   const reload = useCallback(async () => {
     if (orgId == null) return;
@@ -90,6 +98,36 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
       setFormError(err instanceof Error ? err.message : '创建失败');
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** 打开迁移弹窗：加载「我所在的组织」列表，过滤掉当前组织作为候选目标。 */
+  const openTransfer = async (p: ProjectDto) => {
+    setTransferTarget(p);
+    setTransferOrgId('');
+    setTransferError('');
+    setOrgOptions(null);
+    try {
+      const orgs = await listMyOrgs();
+      setOrgOptions(orgs.filter((o) => o.id !== p.orgId));
+    } catch (err) {
+      setTransferError(err instanceof Error ? err.message : '加载组织列表失败');
+    }
+  };
+
+  const submitTransfer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (transferTarget == null || transferOrgId === '') return;
+    setTransferError('');
+    setTransferBusy(true);
+    try {
+      await transferProject(transferTarget.id, transferOrgId);
+      setTransferTarget(null);
+      await reload();
+    } catch (err) {
+      setTransferError(err instanceof Error ? err.message : '迁移失败');
+    } finally {
+      setTransferBusy(false);
     }
   };
 
@@ -220,7 +258,22 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
                 创建者 {p.ownerUsername || `#${p.ownerUserId}`}
                 {mine ? '（我）' : ''} · 更新于 {p.updatedAt ? new Date(p.updatedAt).toLocaleString() : '—'}
               </div>
-              <div className="project-card-enter">进入空间 →</div>
+              <div className="project-card-actions">
+                {canTransfer && !archived && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost btn-sm"
+                    title="迁移到其他组织（仅 admin）"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void openTransfer(p);
+                    }}
+                  >
+                    迁移
+                  </button>
+                )}
+                <span className="project-card-enter">进入空间 →</span>
+              </div>
             </div>
           );
         })}
@@ -228,6 +281,46 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
 
       {createOpen &&
         renderFormModal('新建项目', '标识（slug）由系统根据名称自动生成', submitCreate, () => setCreateOpen(false), '创建')}
+
+      {transferTarget && (
+        <Modal
+          title="迁移项目"
+          subtitle={`将「${transferTarget.name}」迁移到其他组织（仅 admin 可操作）`}
+          onClose={() => setTransferTarget(null)}
+        >
+          <form className="modal-form" onSubmit={submitTransfer}>
+            <label>
+              目标组织
+              <select
+                value={transferOrgId}
+                onChange={(e) => setTransferOrgId(e.target.value === '' ? '' : Number(e.target.value))}
+                required
+              >
+                <option value="" disabled>
+                  {orgOptions == null ? '加载中…' : '请选择目标组织'}
+                </option>
+                {(orgOptions ?? []).map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.name}（@{o.slug}）
+                  </option>
+                ))}
+              </select>
+              <span className="field-hint">
+                迁移后项目归属目标组织，创建者改为你；目标组织已存在同名 slug 时将被拒绝。
+              </span>
+            </label>
+            {transferError && <div className="form-error">{transferError}</div>}
+            <div className="modal-actions">
+              <button type="button" className="btn btn-ghost" onClick={() => setTransferTarget(null)}>
+                取消
+              </button>
+              <button type="submit" className="btn btn-primary" disabled={transferBusy || transferOrgId === ''}>
+                {transferBusy ? '迁移中…' : '确认迁移'}
+              </button>
+            </div>
+          </form>
+        </Modal>
+      )}
     </div>
   );
 }

@@ -564,8 +564,11 @@ label { display: flex; flex-direction: column; gap: 5px; font-size: 0.85em; colo
 
 /* 项目卡片可点击态 */
 .project-card-link { cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s; position: relative; }
+.project-card-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px;
+}
 .project-card-enter {
-  margin-top: 10px; font-size: 0.85em; color: var(--accent-dark); font-weight: 600; opacity: 0;
+  font-size: 0.85em; color: var(--accent-dark); font-weight: 600; opacity: 0;
   transition: opacity 0.15s;
 }
 .project-card-link:hover .project-card-enter { opacity: 1; }

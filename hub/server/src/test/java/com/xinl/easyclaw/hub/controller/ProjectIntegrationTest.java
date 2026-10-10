@@ -3,6 +3,7 @@ package com.xinl.easyclaw.hub.controller;
 import com.xinl.easyclaw.hub.contract.org.AddMemberRequest;
 import com.xinl.easyclaw.hub.contract.org.CreateOrgRequest;
 import com.xinl.easyclaw.hub.contract.project.CreateProjectRequest;
+import com.xinl.easyclaw.hub.contract.project.TransferProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.UpdateProjectRequest;
 import com.xinl.easyclaw.hub.support.HubIntegrationTestSupport;
 import org.junit.jupiter.api.Test;
@@ -200,5 +201,93 @@ class ProjectIntegrationTest extends HubIntegrationTestSupport {
         getJson("/api/projects/" + pid, f.owner())
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.status").value("archived"));
+    }
+
+    // ============ 迁移（transfer） ============
+
+    /** 建第二个组织（目标组织），返回 orgId。 */
+    private long createTargetOrg(String tag, String ownerToken) throws Exception {
+        String json = postJson("/api/orgs", new CreateOrgRequest("Target " + tag, "pj-tgt-" + tag), ownerToken)
+                .andExpect(status().isOk())
+                .andReturn().getResponse().getContentAsString();
+        return om.readTree(json).get("id").asLong();
+    }
+
+    @Test
+    void transfer_adminOk_orgAndOwnerChanged() throws Exception {
+        Fixture f = newFixture("tr1");
+        long pid = createProject(f.member(), f.orgId(), "tr1-p1", "team");
+        long targetOrg = createTargetOrg("tr1", f.owner());
+
+        // admin 迁移成功：org_id 改为目标组织，owner 改为 admin。
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.admin())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orgId").value(targetOrg));
+        // 迁移后 admin 是项目 owner，可读。
+        getJson("/api/projects/" + pid, f.admin())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orgId").value(targetOrg));
+        // 原组织成员自动脱离：源组织列表不再包含该项目，get 403。
+        getJson("/api/projects?orgId=" + f.orgId(), f.member())
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[*].slug", org.hamcrest.Matchers.not(org.hamcrest.Matchers.hasItem("tr1-p1"))));
+        getJson("/api/projects/" + pid, f.member())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    @Test
+    void transfer_ownerMemberGuestForbidden() throws Exception {
+        Fixture f = newFixture("tr2");
+        long pid = createProject(f.member(), f.orgId(), "tr2-p1", "team");
+        long targetOrg = createTargetOrg("tr2", f.owner());
+
+        // owner 不可迁移（仅 admin）。
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.owner())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        // member 不可迁移。
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.member())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        // guest 不可迁移。
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.guest())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+        // 组织外用户不可迁移。
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.outsider())
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    @Test
+    void transfer_slugConflict_conflict() throws Exception {
+        Fixture f = newFixture("tr3");
+        long pid = createProject(f.member(), f.orgId(), "tr3-dup", "team");
+        long targetOrg = createTargetOrg("tr3", f.owner());
+        // 目标组织里已有同名 slug。
+        createProject(f.owner(), targetOrg, "tr3-dup", "team");
+
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.admin())
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("CONFLICT"));
+    }
+
+    @Test
+    void transfer_targetOrgNotFound_notFound() throws Exception {
+        Fixture f = newFixture("tr4");
+        long pid = createProject(f.member(), f.orgId(), "tr4-p1", "team");
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(999999L), f.admin())
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value("NOT_FOUND"));
+    }
+
+    @Test
+    void transfer_sameOrg_validation() throws Exception {
+        Fixture f = newFixture("tr5");
+        long pid = createProject(f.member(), f.orgId(), "tr5-p1", "team");
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(f.orgId()), f.admin())
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("VALIDATION"));
     }
 }
