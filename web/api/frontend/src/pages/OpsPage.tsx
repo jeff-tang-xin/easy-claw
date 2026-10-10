@@ -74,6 +74,18 @@ interface PendingConfirm {
   tools: { id: string; name: string; input: unknown }[];
 }
 
+/** 确认卡命令参数摘要：对象紧凑 JSON，超长截断——执行前必须看清要跑什么 */
+const formatConfirmInput = (input: unknown): string => {
+  if (input == null) return '';
+  let s: string;
+  try {
+    s = typeof input === 'string' ? input : JSON.stringify(input);
+  } catch {
+    s = String(input);
+  }
+  return s.length > 300 ? s.slice(0, 300) + ' …' : s;
+};
+
 /** tab 的 terminalId：每 tab 实例唯一（内嵌 connId 便于排查）。
  * 同一连接将来开多个 tab（复制 tab）时各自持有独立 PTY 与会话：
  * 后端 terminals 按 terminalId 索引且条目自带 connId，会话绑定按 sessionId 键，均不受影响 */
@@ -1164,9 +1176,19 @@ export default function OpsPage() {
           {/* 确认条 fixed 悬浮：不随终端/幕布布局滚动，保证任何状态下都可见可点 */}
           {activeConfirm && (
             <div className="ops-confirm">
-              <span>⏸ 待确认：{activeConfirm.tools.map((t) => t.name).join('、')}</span>
-              <button className="ops-confirm-allow" onClick={() => sendConfirm('once')}>允许一次</button>
-              <button className="ops-confirm-deny" onClick={() => sendConfirm('deny')}>拒绝</button>
+              <div className="ops-confirm-body">
+                <strong>⏸ 待确认操作（{activeConfirm.tools.length} 项）—— 请核对命令后决定</strong>
+                {activeConfirm.tools.map((t) => (
+                  <div key={t.id} className="ops-confirm-cmd">
+                    <span className="ops-confirm-tool">{t.name}</span>
+                    <pre className="ops-confirm-input">{formatConfirmInput(t.input)}</pre>
+                  </div>
+                ))}
+              </div>
+              <div className="ops-confirm-actions">
+                <button className="ops-confirm-allow" onClick={() => sendConfirm('once')}>允许一次</button>
+                <button className="ops-confirm-deny" onClick={() => sendConfirm('deny')}>拒绝</button>
+              </div>
             </div>
           )}
           <div className="ops-curtain">

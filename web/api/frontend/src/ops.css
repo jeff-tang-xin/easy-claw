@@ -153,6 +153,29 @@
 .ops-confirm-allow { background: #16a34a; border-color: #16a34a; color: #fff; }
 .ops-confirm-deny { background: transparent; color: #f87171; }
 
+/* 确认卡命令参数（高对比）：执行前必须看清要跑什么——工具名亮橙、命令文本亮黄
+   （深底 #1c1e14 上对比度约 7:1 / 10:1，WCAG AAA），等宽字体 + 警告淡底 */
+.ops-confirm-body { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.ops-confirm-body > strong { color: #e6edf3; font-size: 1em; }
+.ops-confirm-cmd { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.ops-confirm-tool { font-size: 12px; font-weight: 600; color: #e3a327; }
+.ops-confirm-input {
+  margin: 0;
+  padding: 8px 12px;
+  background: rgba(250, 204, 21, 0.08);
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 6px;
+  color: #facc15;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+}
+.ops-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; }
+
 .ops-curtain-row {
   display: flex;
   gap: 8px;
