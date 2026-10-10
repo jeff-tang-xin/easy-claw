@@ -262,13 +262,22 @@ export default function WorkspacesPage() {
   const togglePerm = async (toolName: string) => {
     if (!permWsId) return;
     const inList = permRules.some((r) => r.toolName === toolName);
-    if (inList) {
-      await del(`/api/workspaces/${permWsId}/permissions/${encodeURIComponent(toolName)}`);
-    } else {
-      await postJson(`/api/workspaces/${permWsId}/permissions/${encodeURIComponent(toolName)}`, {});
+    try {
+      if (inList) {
+        await del(`/api/workspaces/${permWsId}/permissions/${encodeURIComponent(toolName)}`);
+      } else {
+        await postJson(`/api/workspaces/${permWsId}/permissions/${encodeURIComponent(toolName)}`, {});
+      }
+    } catch (e: any) {
+      setError('切换工具权限失败: ' + (e?.message || e));
     }
-    const rules = await getJson<PermRule[]>(`/api/workspaces/${permWsId}/permissions`);
-    setPermRules(rules);
+    // 无论成功失败都重新拉取，避免乐观状态与后端不一致
+    try {
+      const rules = await getJson<PermRule[]>(`/api/workspaces/${permWsId}/permissions`);
+      setPermRules(rules);
+    } catch (e: any) {
+      setError('刷新权限列表失败: ' + (e?.message || e));
+    }
   };
 
   return (

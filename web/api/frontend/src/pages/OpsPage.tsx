@@ -160,7 +160,7 @@ const SHELL_SUBCOMMANDS: Record<string, Set<string>> = {
  * 白名单数据来源由调用方传入：cloud 模式用平台下发的 shellCommands 构建，
  * local 模式（或下发为空）回退上方内置常量——安全拦截规则两种模式完全一致。 */
 const isShellShortcut = (s: string, shortcuts: Set<string>, subsByCmd: Record<string, Set<string>>) => {
-  if (/[|<>&;`]|\$\(/.test(s)) return false;
+  if (/[|<>&;`\n]|\$\(/.test(s)) return false;
   const tokens = s.trim().split(/\s+/);
   const first = (tokens[0] ?? '').toLowerCase();
   // 写参数特判：find -delete/-exec、sed -i 会删文件/改文件/执行任意命令
@@ -1035,6 +1035,8 @@ export default function OpsPage() {
       command = text.slice(1);
       forceShell = true;
     }
+    // 多行输入（粘贴/幕布）在 shell 中是命令分隔符：直通前统一压成单行，杜绝换行注入
+    command = command.replace(/\r?\n/g, ' ');
     if (forceShell || tab.mode === 'shell'
         || isShellShortcut(text, shellWhitelist.shortcuts, shellWhitelist.subs)) {
       if (!tab.connected) {

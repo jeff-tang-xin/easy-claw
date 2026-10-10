@@ -19,8 +19,8 @@ async function safeJson<T>(res: Response): Promise<T> {
   try {
     return JSON.parse(text) as T;
   } catch {
-    // 后端返回了非 JSON 文本（如纯字符串），直接返回
-    return text as unknown as T;
+    // 后端返回了非 JSON 文本（如纯字符串），无法安全解析为 JSON，抛错暴露问题
+    throw new Error(`响应不是合法 JSON: ${text.slice(0, 200)}`);
   }
 }
 

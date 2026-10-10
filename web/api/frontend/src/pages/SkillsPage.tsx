@@ -4,7 +4,7 @@ import Modal from '../components/Modal';
 
 interface SkillChild { name: string; description: string; path: string; content: string; }
 interface SkillFile { scope: string; name: string; description: string; path: string; content: string; type: string; children?: SkillChild[]; }
-interface WorkspaceRef { workspaceId: string; name: string; description?: string; }
+interface WorkspaceRef { workspaceId: string; name: string; description?: string; path?: string; }
 
 const scopeLabel: Record<string, string> = {
   system: '内置',
@@ -47,6 +47,20 @@ export default function SkillsPage() {
   useEffect(() => { load(); loadWorkspaces(); }, []);
 
   const skills = items.filter((s) => s.scope === 'global' || s.scope === 'workspace' || s.scope === 'system');
+
+  /**
+   * 从 skill 的绝对路径反推所属工作区 id。
+   * 后端 SkillFileDto 不返回 workspaceId，但 workspace 级 skill 的 path 形如
+   * `<wsPath>/.easyClaw/agent/skills/<name>`，与 /api/workspaces 返回的 path 前缀匹配即可定位。
+   * 归一化分隔符，兼容 Windows 反斜杠路径。
+   */
+  const resolveWorkspaceId = (skill: SkillFile): string | undefined => {
+    if (skill.scope !== 'workspace') return undefined;
+    const norm = (p: string) => p.replace(/\\/g, '/');
+    const skillPath = norm(skill.path);
+    const hit = workspaces.find((w) => w.path && skillPath.startsWith(norm(w.path) + '/.easyClaw/agent/'));
+    return hit?.workspaceId;
+  };
 
   const openCreate = () => {
     setScope('global');
@@ -94,7 +108,7 @@ export default function SkillsPage() {
         skill: skill.name,
         script,
         args: [],
-        workspaceId: skill.scope === 'workspace' ? workspaceId : undefined,
+        workspaceId: resolveWorkspaceId(skill),
       });
       setRunOut({ ...runOut, [key]: r.output });
     } catch (e) {
@@ -122,7 +136,7 @@ export default function SkillsPage() {
       await putJson('/api/skills', {
         path: viewing.path,
         content: draft,
-        workspaceId: viewing.scope.startsWith('workspace') ? workspaceId : undefined,
+        workspaceId: resolveWorkspaceId(viewing),
       });
       setViewing({ ...viewing, content: draft });
       setEditing(false);

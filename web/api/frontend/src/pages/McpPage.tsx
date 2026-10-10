@@ -215,10 +215,14 @@ export default function McpPage() {
     const newEnabled = checked
       ? [...new Set([...state.enabled, toolName])]
       : state.enabled.filter(t => t !== toolName);
-    setToolStates(prev => ({
-      ...prev,
-      [serviceId]: {...state, enabled: newEnabled},
-    }));
+    setToolStates(prev => {
+      const cur = prev[serviceId];
+      if (!cur) return prev;
+      const nextEnabled = checked
+        ? [...new Set([...cur.enabled, toolName])]
+        : cur.enabled.filter(t => t !== toolName);
+      return {...prev, [serviceId]: {...cur, enabled: nextEnabled}};
+    });
     try {
       await putJson(`/api/mcp/${serviceId}/tools`, {enabledTools: newEnabled});
     } catch (e) {

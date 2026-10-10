@@ -214,10 +214,25 @@ public class MenuService {
         List<SpokeMenuNode> out = new ArrayList<>();
         for (MenuItemEntity m : items) {
             out.add(new SpokeMenuNode(m.getMenuKey(), m.getLabel(), emptyToNull(m.getIcon()), emptyToNull(m.getPath()),
-                    emptyToNull(m.getRequiredPerm()), emptyToNull(m.getVisibleRoles()),
+                    emptyToNull(m.getRequiredPerm()), splitRoles(m.getVisibleRoles()),
                     buildNodes(byParent.getOrDefault(m.getId(), List.of()), byParent)));
         }
         return out;
+    }
+
+    /** 逗号分隔角色串 → 角色清单；null/空/全空白 → 空表（=全部角色可见）。 */
+    private static List<String> splitRoles(String roles) {
+        if (roles == null || roles.isBlank()) {
+            return List.of();
+        }
+        List<String> out = new ArrayList<>();
+        for (String r : roles.split(",")) {
+            String t = r.trim();
+            if (!t.isEmpty()) {
+                out.add(t);
+            }
+        }
+        return List.copyOf(out);
     }
 
     // ---------- 鉴权 ----------

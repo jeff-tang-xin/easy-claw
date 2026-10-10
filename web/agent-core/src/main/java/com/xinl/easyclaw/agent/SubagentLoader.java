@@ -139,7 +139,7 @@ public class SubagentLoader {
      * @param steps          子 Agent 的迭代步数预算
      * @param timeoutSeconds 同步超时参考值（秒），来自 {@code agentscope.agent.subagent-timeout-seconds}
      */
-    private static String blackboardGuide(int steps, int timeoutSeconds) {
+    static String blackboardGuide(int steps, int timeoutSeconds) {
         return """
                 ## 🤝 共享黑板（唯一能幸存的产出通道）
                 你正在一个多智能体任务中工作。**你看不到其他子 Agent 的对话，他们也看不到你的**。

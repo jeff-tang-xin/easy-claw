@@ -2239,7 +2239,9 @@ public class AgentService {
      * 两处必须同源，否则提示词说的预算与实际超时不符。
      */
     private int subagentSyncTimeoutSeconds() {
-        return agentScopeProperties.getAgent().getSubagentTimeoutSeconds();
+        // 钳制到 [1, 1800]：非法/越界配置（0、负数、超大值）会破坏同步等待语义，
+        // 下限 1 保证至少能发起一次等待，上限 1800 与提示词预算保持一致。
+        return Math.max(1, Math.min(1800, agentScopeProperties.getAgent().getSubagentTimeoutSeconds()));
     }
 
     /** 非 delta 事件的处理（tool_start/end/result, confirm, subagent 等） */

@@ -31,7 +31,10 @@ function CompositionBadges({b}: {b: CreditBalanceDto | CreditGrantSummaryDto}) {
  * 扣减口径：按请求模型的目录比例扣分（未登记模型 1 分/次），FIFO 按过期时间消耗。
  */
 export default function CreditsPage({me}: {me: MeResponse}) {
-  const canManageOrg = me.permissions.includes('provider.manage');
+  // 组织总览仅对 owner/admin 开放（后端 GET /api/orgs/{orgId}/credit-overview 校验 owner/admin）。
+  // 按每个组织自身的角色过滤，而非用当前组织的权限判断所有组织。
+  const manageableOrgs = me.orgs.filter((o) => o.role === 'owner' || o.role === 'admin');
+  const canManageOrg = manageableOrgs.length > 0;
   const isPlatformAdmin = me.permissions.includes('platform.catalog.manage');
 
   // ============ 我的积分 ============
@@ -95,9 +98,6 @@ export default function CreditsPage({me}: {me: MeResponse}) {
   useEffect(() => {
     void loadOverview(overviewScope);
   }, [overviewScope, loadOverview]);
-
-  // 组织下拉：我所在的组织（owner/admin 才能调通总览端点；member 选项隐藏）
-  const manageableOrgs = me.orgs.filter(() => canManageOrg);
 
   return (
     <div className="page">

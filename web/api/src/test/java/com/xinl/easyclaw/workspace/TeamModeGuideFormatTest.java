@@ -45,12 +45,16 @@ class TeamModeGuideFormatTest {
 
     @Test
     void subagentRosterRendersWithoutFormatError() {
-        String teamGuide = SystemPromptComposer.subagentRoster(List.of(coder()), true, 30);
-        String singleGuide = SystemPromptComposer.subagentRoster(List.of(coder()), false, 30);
+        String teamGuide = SystemPromptComposer.subagentRoster(List.of(coder()), true, 30, 1800);
+        String singleGuide = SystemPromptComposer.subagentRoster(List.of(coder()), false, 30, 1800);
 
         // 渲染成功且占位符被名册里的真实步数替换
         assertTrue(teamGuide.contains("当前 15 步"), "minSteps 应被渲染为名册里的实际步数");
         assertTrue(singleGuide.contains("当前 15 步"), "minSteps 应被渲染为名册里的实际步数");
+        // 超时占位符被真实超时秒数替换（与 AgentService.subagentSyncTimeoutSeconds 同源）
+        assertTrue(teamGuide.contains("1800 秒"), "timeoutSeconds 应被渲染为真实超时秒数");
+        assertTrue(singleGuide.contains("1800 秒"), "timeoutSeconds 应被渲染为真实超时秒数");
+        assertTrue(teamGuide.contains("默认 1800s"), "timeoutSeconds 应被渲染进时间墙说明");
         assertCommonGuides(teamGuide);
         assertCommonGuides(singleGuide);
 
@@ -62,7 +66,7 @@ class TeamModeGuideFormatTest {
     @Test
     void emptyRosterFallsBackToConfiguredSteps() {
         // 名册为空时 min() 缺省，步数取参数传入的 yml 兜底值而非 NPE。
-        String guide = SystemPromptComposer.subagentRoster(List.of(), false, 42);
+        String guide = SystemPromptComposer.subagentRoster(List.of(), false, 42, 1800);
         assertTrue(guide.contains("当前 42 步"), "空名册应使用配置的兜底步数");
         assertFalse(guide.contains("%d"), "不应残留未替换的 %d");
     }

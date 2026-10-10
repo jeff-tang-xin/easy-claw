@@ -120,6 +120,22 @@ public class AuthService {
         }
         UserEntity u = users.findById(rt.getUserId())
                 .orElseThrow(() -> ApiException.authInvalid("用户不存在"));
+        // 与 login 同口径：账号被禁用或密码已过期时，refresh 一律拒绝并吊销该 token，防止绕过登录校验续期。
+        if (!"active".equals(u.getStatus())) {
+            rt.setRevoked(true);
+            refreshTokens.save(rt);
+            auditService.record(AuditModule.AUTH, "refresh", u.getId(), null, "user", String.valueOf(u.getId()),
+                    "账号已被禁用，拒绝刷新", AuditModule.FAILURE);
+            throw ApiException.authInvalid("账号已被禁用");
+        }
+        Instant now = Instant.now();
+        if (passwordPolicy.isExpired(u.getPasswordChangedAt(), now)) {
+            rt.setRevoked(true);
+            refreshTokens.save(rt);
+            auditService.record(AuditModule.AUTH, "refresh", u.getId(), null, "user", String.valueOf(u.getId()),
+                    "密码已过期，拒绝刷新", AuditModule.FAILURE);
+            throw ApiException.passwordExpired("密码已过期，请联系平台管理员重置密码");
+        }
         rt.setRevoked(true);
         refreshTokens.save(rt);
         auditService.record(AuditModule.AUTH, "refresh", u.getId(), null, "user", String.valueOf(u.getId()),

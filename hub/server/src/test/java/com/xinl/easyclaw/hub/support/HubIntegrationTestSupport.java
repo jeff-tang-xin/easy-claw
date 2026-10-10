@@ -36,7 +36,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         "spring.flyway.enabled=false",
         "hub.jwt.secret=integration-test-secret-key-0123456789abcdef",
         "hub.jwt.access-ttl-minutes=30",
-        "hub.jwt.refresh-ttl-days=30"
+        "hub.jwt.refresh-ttl-days=30",
+        "hub.security.master-key=integration-test-master-key-0123456789abcdef"
 })
 @AutoConfigureMockMvc
 public abstract class HubIntegrationTestSupport {

@@ -82,9 +82,12 @@ public class SystemPromptComposer {
                     workspaceId, personaPrompt.length());
         }
 
-        // 工作区上下文：名称/描述/类型 + 当前激活场景，让智能体知道「自己在哪个工作区、在做什么」。
+        // 工作区上下文：名称/描述/类型，让智能体知道「自己在哪个工作区」。
         // 放在人格之后、场景编排之前——定位信息比人格具体、比场景抽象，居中不抢两端。
-        String workspaceContext = workspaceContext(workspaceId, activeScenario);
+        // 激活场景信息由下方场景编排段统一注入，此处不重复。
+        // WorkspaceEntity 只查一次，供工作区上下文与云端知识库索引复用（避免重复查库）。
+        WorkspaceEntity ws = workspaceRepository.findById(workspaceId).orElse(null);
+        String workspaceContext = workspaceContext(ws);
         if (workspaceContext != null) {
             sysPrompt = sysPrompt + "\n\n" + workspaceContext;
             log.info("工作区上下文已注入 system prompt: workspace={}, {} chars",
@@ -94,7 +97,8 @@ public class SystemPromptComposer {
         if (!subagents.isEmpty()) {
             sysPrompt = sysPrompt + subagentRoster(subagents,
                     binding != null && binding.isOrchestratedMode(),
-                    agentScopeProperties.getAgent().getSubagentSteps());
+                    agentScopeProperties.getAgent().getSubagentSteps(),
+                    agentScopeProperties.getAgent().getSubagentTimeoutSeconds());
         }
 
         if (sysPromptAugment != null && !sysPromptAugment.isBlank()) {
@@ -121,7 +125,7 @@ public class SystemPromptComposer {
         // knowledge/KNOWLEDGE.md，而 cloud 模式知识全存 hub、spoke 不落盘 → 本地注入为空，
         // AI 开局对知识库毫无「目录感」。此处把 hub 条目清单（topic+summary）拼进系统提示，
         // 与 local 模式的注入语义对齐。local 模式跳过（框架已注入，重复会双份）。
-        String knowledgeIndex = cloudKnowledgeIndex(workspaceId);
+        String knowledgeIndex = cloudKnowledgeIndex(ws);
         if (knowledgeIndex != null) {
             sysPrompt = sysPrompt + "\n\n" + knowledgeIndex;
             log.info("云端知识库索引已注入 system prompt: workspace={}, {} chars",
@@ -132,16 +136,14 @@ public class SystemPromptComposer {
     }
 
     /**
-     * 工作区上下文段：名称/描述/类型 + 当前激活场景，让智能体知道「自己在哪个工作区、在做什么」。
+     * 工作区上下文段：名称/描述/类型，让智能体知道「自己在哪个工作区」。
      * <p>
      * 失败语义：workspace 不存在时返回 {@code null} 跳过注入（记 debug）——定位信息是增强，
-     * 绝不能让 Agent 构建失败。场景信息来自 {@code activeScenario}（compose 已查过一次，复用）。
+     * 绝不能让 Agent 构建失败。激活场景信息由场景编排段统一注入，此处不重复。
      */
-    private String workspaceContext(String workspaceId,
-                                    com.xinl.easyclaw.base.profile.ScenarioProfile activeScenario) {
-        WorkspaceEntity ws = workspaceRepository.findById(workspaceId).orElse(null);
+    private String workspaceContext(WorkspaceEntity ws) {
         if (ws == null) {
-            log.debug("工作区上下文跳过：workspace 不存在 workspace={}", workspaceId);
+            log.debug("工作区上下文跳过：workspace 不存在");
             return null;
         }
         StringBuilder sb = new StringBuilder();
@@ -151,13 +153,6 @@ public class SystemPromptComposer {
             sb.append("- **描述**：").append(ws.getDescription().trim()).append('\n');
         }
         sb.append("- **形态**：").append(describeWorkspaceType(ws.getType())).append('\n');
-        if (activeScenario != null) {
-            sb.append("- **激活场景**：")
-                    .append(activeScenario.getDisplayName() != null
-                            ? activeScenario.getDisplayName()
-                            : activeScenario.getName())
-                    .append("（").append(activeScenario.getMode()).append(" 模式）\n");
-        }
         return sb.toString().stripTrailing();
     }
 
@@ -181,26 +176,24 @@ public class SystemPromptComposer {
      * 会话中途写入的新条目由 AI 用 {@code knowledge_list} 现查，与 local 模式
      * 「KNOWLEDGE.md 也是会话开始时快照」的行为一致。
      */
-    private String cloudKnowledgeIndex(String workspaceId) {
+    private String cloudKnowledgeIndex(WorkspaceEntity ws) {
         String appKey = cloudProperties.getAppKey();
         if (appKey == null || appKey.isBlank()) {
             return null; // local 模式：框架已注入本地 KNOWLEDGE.md
         }
-        Long projectId = workspaceRepository.findById(workspaceId)
-                .map(WorkspaceEntity::getProjectId)
-                .orElse(null);
+        Long projectId = ws != null ? ws.getProjectId() : null;
         if (projectId == null) {
-            log.debug("云端知识库索引跳过：工作区未绑定项目 workspace={}", workspaceId);
+            log.debug("云端知识库索引跳过：工作区未绑定项目");
             return null;
         }
         List<KnowledgeEntry> entries;
         try {
             entries = knowledgeService.list(WorkspaceContext.builder()
-                    .workspaceId(workspaceId)
+                    .workspaceId(ws.getId())
                     .projectId(projectId)
                     .build());
         } catch (Exception e) {
-            log.warn("云端知识库索引拉取失败，跳过注入: workspace={}, {}", workspaceId, e.getMessage());
+            log.warn("云端知识库索引拉取失败，跳过注入: workspace={}, {}", ws.getId(), e.getMessage());
             return null;
         }
         StringBuilder sb = new StringBuilder();
@@ -364,11 +357,14 @@ public class SystemPromptComposer {
      * 不依赖 Spring/Builder 直接校验文本渲染（模板用 {@code .formatted}，游离的 % 会在
      * 运行时炸 Agent 构建，编译期发现不了）。
      *
-     * @param teamMode      true 时省略「你是执行者」的默认定位——该定位由编排层改写为协调者
-     * @param fallbackSteps 名册内未声明 steps 时的兜底步数（来自 yml 配置）
+     * @param teamMode       true 时省略「你是执行者」的默认定位——该定位由编排层改写为协调者
+     * @param fallbackSteps  名册内未声明 steps 时的兜底步数（来自 yml 配置）
+     * @param timeoutSeconds 子 Agent 同步超时秒数（来自 {@code agentscope.agent.subagent-timeout-seconds}），
+     *                       与 {@code AgentService.subagentSyncTimeoutSeconds()} 同源，提示词里告诉主控的
+     *                       等待预算必须与实际超时一致，否则主控按错误预算估任务粒度会判断失准
      */
     static String subagentRoster(List<SubagentDeclaration> subagents, boolean teamMode,
-                                 int fallbackSteps) {
+                                 int fallbackSteps, int timeoutSeconds) {
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n## 🤝 可调度的子 Agent\n")
                 .append(teamMode
@@ -394,7 +390,7 @@ public class SystemPromptComposer {
                    派发一律**同步等待**：工具返回时结果已经在手里。这样子 Agent 的思考与
                    工具调用会实时显示给用户，进度可见；后台任务模式（`timeout_seconds=0`）
                    已被系统统一矫正为同步，传了也不生效。
-                   **`timeout_seconds` 不用传**：系统已统一注入 **1800 秒（30 分钟）** 的等待预算，
+                   **`timeout_seconds` 不用传**：系统已统一注入 **%d 秒的等待预算**，
                    你传的值会被平台覆盖、不生效，传了也没有副作用。不必再为子任务估算时间预算。
                 2. **`label` 必须传，且按「agentId-阶段号」命名**（如 `coder-s2`、`reviewer-s3`）：
                    框架按 `(父会话, agent_id, label)` 推导子 Agent 实例身份。
@@ -414,7 +410,7 @@ public class SystemPromptComposer {
                       耗尽会被强制截断、产出半成品，而半成品往往看起来像成品，最容易被误当结论。
                    ② **时间墙**——同步超时到点直接掐断，比步数耗尽更惨：
                       步数耗尽还能强行总结吐点东西，超时掐断**连最后陈述的机会都没有**。
-                      默认 1800s 对绝大多数子任务绰绰有余，正常不会撞上；真撞上说明任务本身过大，
+                      默认 %ds 对绝大多数子任务绰绰有余，正常不会撞上；真撞上说明任务本身过大，
                       应当拆阶段，而不是指望调大超时。
                       **在任务描述里给子 Agent 明确的时间/步数预算**：子 Agent 的系统提示已注入
                       步数预算（它真正能感知的），但时间预算需要你在任务描述里写清——
@@ -463,7 +459,7 @@ public class SystemPromptComposer {
                    不要直接判定「这次白干了」而原样重试。
                 5. **只记结论**：写结论、建议、风险、待决问题；不要把过程日志、中间草稿、大段代码倒进去。
                 6. **只增不改**：黑板是追加式的，没有删除工具，也不要试图否定或覆盖他人条目；有异议就追加一条说明理由。
-                """.formatted(minSteps));
+                """.formatted(timeoutSeconds, minSteps, timeoutSeconds));
         return sb.toString();
     }
 }
