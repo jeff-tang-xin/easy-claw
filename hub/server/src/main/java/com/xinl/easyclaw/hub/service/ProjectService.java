@@ -184,18 +184,19 @@ public class ProjectService {
     /**
      * 迁移项目到目标组织（跨组织）。
      * <p>
-     * <b>权限</b>：仅<b>源组织 admin</b> 可发起（owner/member/guest 均不可）；目标组织可为
-     * 任意组织，不要求发起人是目标组织成员——admin 是平台级管理角色，可跨组织迁移。
+     * <b>权限</b>：源组织 <b>owner/admin</b> 或<b>平台管理员</b>可发起（member/guest 均不可）；
+     * 目标组织可为任意组织，不要求发起人是目标组织成员——owner/admin 是组织级管理角色，
+     * 平台管理员是平台级管理角色，均可跨组织迁移。
      * <p>
      * <b>冲突</b>：目标组织内已存在同名 slug 时<b>禁止迁移</b>（不自动改名，返回 409）。
      * <p>
-     * <b>级联</b>：项目 org_id 改为目标组织，owner_user_id 改为执行迁移的 admin；
+     * <b>级联</b>：项目 org_id 改为目标组织，owner_user_id 改为执行迁移者；
      * 挂 project_id 的资源（workspaces / db_connections / ops_servers）的 org_id 冗余字段
      * 一并同步为目标组织，保证「按组织列举与鉴权」的一致性（这些表无外键，一致性由应用层保证）。
      * 仅挂 project_id 无 org_id 冗余的表（knowledge_items / blackboard_entries / 事件表）
      * 无需改动——它们只按 project_id 归类，project_id 未变。
      *
-     * @param requesterId 执行迁移的 admin（迁移后成为项目新 owner）
+     * @param requesterId 执行迁移者（迁移后成为项目新 owner）
      * @param projectId   被迁移项目
      * @param targetOrgId 目标组织
      * @return 迁移后的项目视图
@@ -208,10 +209,12 @@ public class ProjectService {
         if (sourceOrgId.equals(targetOrgId)) {
             throw ApiException.validation("目标组织与当前组织相同，无需迁移");
         }
-        // 仅源组织 admin 可迁移（owner/member/guest 均不可）
+        // 仅源组织 owner/admin 或平台管理员可迁移（member/guest 均不可）
         String sourceRole = orgService.roleOf(sourceOrgId, requesterId);
-        if (!"admin".equals(sourceRole)) {
-            throw ApiException.forbidden("仅源组织 admin 可迁移项目");
+        boolean privileged = "owner".equals(sourceRole) || "admin".equals(sourceRole)
+                || isPlatformAdmin(requesterId);
+        if (!privileged) {
+            throw ApiException.forbidden("仅源组织 owner/admin 或平台管理员可迁移项目");
         }
         // 目标组织必须存在
         if (!orgService.orgExists(targetOrgId)) {
@@ -274,6 +277,11 @@ public class ProjectService {
         if (!canEdit) {
             throw ApiException.forbidden("无权限修改该项目");
         }
+    }
+
+    /** 平台管理员：平台级管理角色，可跨组织管理（参照 ProviderService 同款判定）。 */
+    private boolean isPlatformAdmin(Long userId) {
+        return users.findById(userId).map(UserEntity::isPlatformAdmin).orElse(false);
     }
 
     /** 可见性判定：特权（owner/admin）全见；team/public 成员可见；private 仅创建者。供工作区等按 project 框定可见性的模块复用。 */

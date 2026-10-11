@@ -237,15 +237,23 @@ class ProjectIntegrationTest extends HubIntegrationTestSupport {
     }
 
     @Test
-    void transfer_ownerMemberGuestForbidden() throws Exception {
+    void transfer_ownerOk_orgAndOwnerChanged() throws Exception {
         Fixture f = newFixture("tr2");
         long pid = createProject(f.member(), f.orgId(), "tr2-p1", "team");
         long targetOrg = createTargetOrg("tr2", f.owner());
 
-        // owner 不可迁移（仅 admin）。
+        // owner 迁移成功：org_id 改为目标组织，owner 改为 owner。
         postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.owner())
-                .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orgId").value(targetOrg));
+    }
+
+    @Test
+    void transfer_memberGuestOutsiderForbidden() throws Exception {
+        Fixture f = newFixture("tr2b");
+        long pid = createProject(f.member(), f.orgId(), "tr2b-p1", "team");
+        long targetOrg = createTargetOrg("tr2b", f.owner());
+
         // member 不可迁移。
         postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.member())
                 .andExpect(status().isForbidden())
@@ -258,6 +266,20 @@ class ProjectIntegrationTest extends HubIntegrationTestSupport {
         postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), f.outsider())
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.code").value("FORBIDDEN"));
+    }
+
+    @Test
+    void transfer_platformAdminOk_orgAndOwnerChanged() throws Exception {
+        Fixture f = newFixture("tr2c");
+        long pid = createProject(f.member(), f.orgId(), "tr2c-p1", "team");
+        long targetOrg = createTargetOrg("tr2c", f.owner());
+
+        // 平台管理员（非源组织成员）迁移成功：org_id 改为目标组织，owner 改为平台管理员。
+        createPlatformAdminOk("pj_tr2c_padmin", PW);
+        String padmin = loginOk("pj_tr2c_padmin", PW).accessToken();
+        postJson("/api/projects/" + pid + "/transfer", new TransferProjectRequest(targetOrg), padmin)
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.orgId").value(targetOrg));
     }
 
     @Test

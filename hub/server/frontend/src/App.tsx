@@ -266,7 +266,7 @@ export default function App() {
             <Route path="/login" element={<Navigate to="/projects" replace />} />
             <Route
               path="/projects"
-              element={<ProjectsPage orgId={orgId} role={currentRole} meUserId={me.user.id} onOrgsNeeded={reloadMe} />}
+              element={<ProjectsPage orgId={orgId} role={currentRole} meUserId={me.user.id} platformAdmin={me.user.platformAdmin} onOrgsNeeded={reloadMe} />}
             />
             <Route
               path="/projects/:pid/*"

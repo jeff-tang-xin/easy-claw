@@ -1,13 +1,15 @@
 import {useCallback, useEffect, useMemo, useState} from 'react';
 import {useNavigate} from 'react-router-dom';
-import {createProject, listProjects, listMyOrgs, transferProject} from '../api';
+import {createProject, listProjects, listMyOrgs, listOrgOptions, transferProject} from '../api';
 import Modal from '../components/Modal';
-import type {OrgDto, ProjectDto} from '../types';
+import type {OrgOptionDto, ProjectDto} from '../types';
 
 interface Props {
   orgId: number | null;
   role: string | null;
   meUserId: number;
+  /** 平台管理员：可跨组织迁移项目（目标组织候选拉全量组织） */
+  platformAdmin: boolean;
   /** 一个组织都没有时，跳去创建组织前重新校准 me */
   onOrgsNeeded: () => void;
 }
@@ -34,7 +36,7 @@ interface ProjectForm {
 const EMPTY_FORM: ProjectForm = {name: '', description: '', visibility: 'team'};
 
 /** 项目列表：卡片 + 弹窗新建/编辑；归档/恢复在卡片上。slug 由服务端从名称派生，前端不填。 */
-export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Props) {
+export default function ProjectsPage({orgId, role, meUserId, platformAdmin, onOrgsNeeded}: Props) {
   const navigate = useNavigate();
   const [projects, setProjects] = useState<ProjectDto[] | null>(null);
   const [error, setError] = useState('');
@@ -45,11 +47,11 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
   const [busy, setBusy] = useState(false);
 
   const canCreate = role !== null && role !== 'guest';
-  // 仅源组织 admin 可迁移项目（owner/member/guest 均不可）
-  const canTransfer = role === 'admin';
+  // 源组织 owner/admin 或平台管理员可迁移项目（member/guest 均不可）
+  const canTransfer = role === 'owner' || role === 'admin' || platformAdmin;
 
   const [transferTarget, setTransferTarget] = useState<ProjectDto | null>(null);
-  const [orgOptions, setOrgOptions] = useState<OrgDto[] | null>(null);
+  const [orgOptions, setOrgOptions] = useState<OrgOptionDto[] | null>(null);
   const [transferOrgId, setTransferOrgId] = useState<number | ''>('');
   const [transferError, setTransferError] = useState('');
   const [transferBusy, setTransferBusy] = useState(false);
@@ -101,15 +103,20 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
     }
   };
 
-  /** 打开迁移弹窗：加载「我所在的组织」列表，过滤掉当前组织作为候选目标。 */
+  /** 打开迁移弹窗：加载目标组织候选。平台管理员拉全量组织；普通 owner/admin 拉「我所在的组织」，过滤掉当前组织。 */
   const openTransfer = async (p: ProjectDto) => {
     setTransferTarget(p);
     setTransferOrgId('');
     setTransferError('');
     setOrgOptions(null);
     try {
-      const orgs = await listMyOrgs();
-      setOrgOptions(orgs.filter((o) => o.id !== p.orgId));
+      if (platformAdmin) {
+        const orgs = await listOrgOptions();
+        setOrgOptions(orgs.filter((o) => o.id !== p.orgId));
+      } else {
+        const orgs = await listMyOrgs();
+        setOrgOptions(orgs.filter((o) => o.id !== p.orgId));
+      }
     } catch (err) {
       setTransferError(err instanceof Error ? err.message : '加载组织列表失败');
     }
@@ -263,7 +270,7 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
                   <button
                     type="button"
                     className="btn btn-ghost btn-sm"
-                    title="迁移到其他组织（仅 admin）"
+                    title="迁移到其他组织（仅 owner/admin/平台管理员）"
                     onClick={(e) => {
                       e.stopPropagation();
                       void openTransfer(p);
@@ -285,7 +292,7 @@ export default function ProjectsPage({orgId, role, meUserId, onOrgsNeeded}: Prop
       {transferTarget && (
         <Modal
           title="迁移项目"
-          subtitle={`将「${transferTarget.name}」迁移到其他组织（仅 admin 可操作）`}
+          subtitle={`将「${transferTarget.name}」迁移到其他组织（仅 owner/admin/平台管理员可操作）`}
           onClose={() => setTransferTarget(null)}
         >
           <form className="modal-form" onSubmit={submitTransfer}>
