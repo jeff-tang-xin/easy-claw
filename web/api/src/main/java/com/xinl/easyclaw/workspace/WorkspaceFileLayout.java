@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.base.BuiltinDbIds;
 import com.xinl.easyclaw.config.AppConstants;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,8 +44,20 @@ public class WorkspaceFileLayout {
     /** AGENTS.md 模板的 classpath 位置（jar 内置唯一来源，内容 = 平台当前默认工作规范） */
     private static final String AGENTS_TEMPLATE_RESOURCE = "/seed/AGENTS.md";
 
+    /** DB 工作区专属 AGENTS.md 模板（只读查询角色，见 {@link #agentsTemplate(String)}） */
+    private static final String AGENTS_DB_TEMPLATE_RESOURCE = "/seed/AGENTS-db.md";
+
+    /** 运维工作区专属 AGENTS.md 模板（运维角色，见 {@link #agentsTemplate(String)}） */
+    private static final String AGENTS_OPS_TEMPLATE_RESOURCE = "/seed/AGENTS-ops.md";
+
     /** AGENTS.md 模板缓存（懒加载；null 表示尚未加载过，加载失败不缓存、下次重试） */
     private volatile String agentsTemplateCache;
+
+    /** DB 工作区专属 AGENTS.md 模板缓存（懒加载；null 表示尚未加载过，加载失败不缓存、下次重试） */
+    private volatile String agentsDbTemplateCache;
+
+    /** 运维工作区专属 AGENTS.md 模板缓存（懒加载；null 表示尚未加载过，加载失败不缓存、下次重试） */
+    private volatile String agentsOpsTemplateCache;
 
     // ==================== 对外入口 ====================
 
@@ -55,6 +68,18 @@ public class WorkspaceFileLayout {
      * @throws IllegalStateException 目录创建失败（路径不可写等），调用方应中止创建流程
      */
     public void initialize(Path workspacePath, Path easyClawDir) {
+        initialize(workspacePath, easyClawDir, null);
+    }
+
+    /**
+     * 按 Easy-Claw 规范初始化工作区结构（仅首次创建或迁移时调用）：
+     * 迁移旧目录 → 创建基础目录 → 迁移根级遗留文件 → 补齐模板 → 清理遗留目录。
+     *
+     * @param workspaceType 工作区形态（{@code WorkspaceEntity.type}）；db 类型播种 DB 专属
+     *                      AGENTS.md 模板，其余（含 null）播种通用模板
+     * @throws IllegalStateException 目录创建失败（路径不可写等），调用方应中止创建流程
+     */
+    public void initialize(Path workspacePath, Path easyClawDir, String workspaceType) {
         try {
             Path agentDir = easyClawDir.resolve("agent");
 
@@ -67,7 +92,7 @@ public class WorkspaceFileLayout {
             migrateDirIfAbsent(workspacePath.resolve("skills"), agentDir.resolve("skills"));
             migrateDirIfAbsent(workspacePath.resolve("subagents"), agentDir.resolve("subagents"));
 
-            repair(agentDir);
+            repair(agentDir, workspaceType);
             cleanupLegacyDirs(workspacePath);
         } catch (IOException e) {
             log.error("初始化 Workspace 结构失败: {}", workspacePath, e);
@@ -81,9 +106,20 @@ public class WorkspaceFileLayout {
      * 供工作区创建与显式「修复」操作调用；用户误删 AGENTS.md / MEMORY.md 后可借此恢复。
      */
     public void repair(Path agentDir) {
+        repair(agentDir, null);
+    }
+
+    /**
+     * 补齐 .easyClaw/agent 下的模板文件（仅在不存在时创建，不覆盖用户修改）。
+     * <p>
+     * 供工作区创建与显式「修复」操作调用；用户误删 AGENTS.md / MEMORY.md 后可借此恢复。
+     *
+     * @param workspaceType 工作区形态；db 类型播种 DB 专属 AGENTS.md 模板，其余（含 null）播种通用模板
+     */
+    public void repair(Path agentDir, String workspaceType) {
         try {
             createAgentDirs(agentDir);
-            String agentsTemplate = agentsTemplate();
+            String agentsTemplate = agentsTemplate(workspaceType);
             if (agentsTemplate != null) {
                 // 模板缺失/读取失败时跳过本项（已记 warn），不阻断其余补齐
                 writeIfAbsent(agentDir.resolve("AGENTS.md"), agentsTemplate);
@@ -298,22 +334,57 @@ public class WorkspaceFileLayout {
 
     /**
      * AGENTS.md 模板：classpath {@code /seed/AGENTS.md} 为唯一来源（jar 内置），懒加载并缓存。
+     * <p>
+     * 专属工作区按类型播种专属模板：db 类型（{@code BuiltinDbIds.DB}）播种
+     * {@code /seed/AGENTS-db.md}（只读查询角色），ops 类型播种 {@code /seed/AGENTS-ops.md}
+     * （运维角色），其余类型播种通用编程助手模板。专属模板去掉编程/编译/子 Agent 编排内容。
      * 资源缺失或读取失败时返回 null —— {@link #repair} 跳过该项（已记 warn），不影响其余补齐。
      */
-    private String agentsTemplate() {
-        if (agentsTemplateCache == null) {
-            try (InputStream in = WorkspaceFileLayout.class.getResourceAsStream(AGENTS_TEMPLATE_RESOURCE)) {
+    private String agentsTemplate(String workspaceType) {
+        if (BuiltinDbIds.DB.equals(workspaceType)) {
+            return agentsTemplateCached(AGENTS_DB_TEMPLATE_RESOURCE, agentsDbTemplateCache,
+                    "DB 工作区", "agentsDbTemplateCache");
+        }
+        if ("ops".equals(workspaceType)) {
+            return agentsTemplateCached(AGENTS_OPS_TEMPLATE_RESOURCE, agentsOpsTemplateCache,
+                    "运维工作区", "agentsOpsTemplateCache");
+        }
+        return agentsTemplateCached(AGENTS_TEMPLATE_RESOURCE, agentsTemplateCache,
+                "AGENTS.md", "agentsTemplateCache");
+    }
+
+    /**
+     * 读取并缓存指定 AGENTS.md 模板资源；读取失败不缓存、下次重试。
+     * <p>
+     * 三个模板（通用/db/ops）各自独立缓存字段，volatile 字段无法按引用更新，
+     * 故由调用方传入缓存字段名，经 {@link #setTemplateCache} 回写。
+     */
+    private String agentsTemplateCached(String resource, String cache,
+                                        String label, String cacheFieldName) {
+        if (cache == null) {
+            try (InputStream in = WorkspaceFileLayout.class.getResourceAsStream(resource)) {
                 if (in == null) {
-                    log.warn("classpath 缺少 {}，跳过 AGENTS.md 模板补齐", AGENTS_TEMPLATE_RESOURCE);
+                    log.warn("classpath 缺少 {}，跳过 {} AGENTS.md 模板补齐", resource, label);
                     return null;
                 }
-                agentsTemplateCache = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                cache = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                setTemplateCache(cacheFieldName, cache);
             } catch (IOException e) {
-                log.warn("读取 AGENTS.md 模板失败（跳过补齐）: {}", e.toString());
+                log.warn("读取 {} AGENTS.md 模板失败（跳过补齐）: {}", label, e.toString());
                 return null;
             }
         }
-        return agentsTemplateCache;
+        return cache;
+    }
+
+    /** 按字段名回写模板缓存（volatile 字段无法直接传引用更新） */
+    private void setTemplateCache(String fieldName, String value) {
+        switch (fieldName) {
+            case "agentsTemplateCache" -> agentsTemplateCache = value;
+            case "agentsDbTemplateCache" -> agentsDbTemplateCache = value;
+            case "agentsOpsTemplateCache" -> agentsOpsTemplateCache = value;
+            default -> { /* 未知字段名忽略 */ }
+        }
     }
 
     private String memoryTemplate() {

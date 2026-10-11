@@ -61,7 +61,8 @@ public class DefaultOpsWorkspaceInitializer {
             Path opsPath = SystemHomePaths.opsWorkspaceRoot();
             Files.createDirectories(opsPath);
             // 与普通工作区一致的磁盘结构（.easyClaw/agent/state 等），幂等不破坏用户数据
-            fileLayout.initialize(opsPath, opsPath.resolve(".easyClaw"));
+            // type=ops → 播种运维专属 AGENTS.md 模板（运维角色，非通用编程助手）
+            fileLayout.initialize(opsPath, opsPath.resolve(".easyClaw"), "ops");
             upsertWorkspace(opsPath);
             bindOpsScenario();
             log.info("默认运维工作区已就绪: id={}, path={}",

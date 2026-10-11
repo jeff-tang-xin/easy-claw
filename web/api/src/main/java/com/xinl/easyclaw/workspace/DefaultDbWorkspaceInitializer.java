@@ -62,7 +62,8 @@ public class DefaultDbWorkspaceInitializer {
             Path dbPath = SystemHomePaths.dbWorkspaceRoot();
             Files.createDirectories(dbPath);
             // 与普通工作区一致的磁盘结构（.easyClaw/agent/state 等），幂等不破坏用户数据
-            fileLayout.initialize(dbPath, dbPath.resolve(".easyClaw"));
+            // type=db → 播种 DB 专属 AGENTS.md 模板（只读查询角色，非通用编程助手）
+            fileLayout.initialize(dbPath, dbPath.resolve(".easyClaw"), BuiltinDbIds.DB);
             upsertWorkspace(dbPath);
             bindDbScenario();
             log.info("默认数据库工作区已就绪: id={}, path={}",

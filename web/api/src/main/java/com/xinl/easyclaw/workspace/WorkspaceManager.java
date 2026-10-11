@@ -148,7 +148,7 @@ public class WorkspaceManager {
 
         // 按 Easy-Claw 规范初始化：AGENTS.md/MEMORY.md/skills/subagents/state 全部集中在 .easyClaw/agent
         Path easyClawDir = workspacePath.resolve(".easyClaw");
-        fileLayout.initialize(workspacePath, easyClawDir);
+        fileLayout.initialize(workspacePath, easyClawDir, normalizedType);
 
         HarnessAgent agent = agentBuilder.build(workspaceId, name, workspacePath, easyClawDir, null, normalizedType);
 
@@ -168,7 +168,7 @@ public class WorkspaceManager {
         saveWorkspaceMetadata(context, normalizedType);
 
         // 播种 AGENTS.md 模板与种子知识（幂等：已存在不覆盖；失败仅 warn，不影响创建结果）
-        workspaceSeedService.seedWorkspace(workspacePath);
+        workspaceSeedService.seedWorkspace(workspacePath, normalizedType);
 
         log.info("Workspace 创建成功: id={}, path={}, model={}",
                 workspaceId, workspacePath, agentFactory.getModelId());
@@ -206,7 +206,11 @@ public class WorkspaceManager {
     public void repairWorkspaceFiles(String workspaceId) {
         WorkspaceContext context = getWorkspace(workspaceId);
         if (context != null) {
-            fileLayout.repair(context.getPath().resolve(".easyClaw/agent"));
+            // 按工作区形态选模板：db 类型播种 DB 专属 AGENTS.md，其余播种通用模板
+            String type = workspaceRepository.findById(workspaceId)
+                    .map(WorkspaceEntity::getType)
+                    .orElse(null);
+            fileLayout.repair(context.getPath().resolve(".easyClaw/agent"), type);
         }
     }
 
@@ -230,7 +234,7 @@ public class WorkspaceManager {
         }
 
         Path easyClawDir = workspacePath.resolve(".easyClaw");
-        fileLayout.initialize(workspacePath, easyClawDir);
+        fileLayout.initialize(workspacePath, easyClawDir, meta.getType());
 
         HarnessAgent agent = agentBuilder.build(workspaceId, meta.getName(), workspacePath, easyClawDir,
                 sysPromptAugment, meta.getType());

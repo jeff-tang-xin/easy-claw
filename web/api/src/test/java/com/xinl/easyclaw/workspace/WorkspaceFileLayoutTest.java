@@ -51,6 +51,64 @@ class WorkspaceFileLayoutTest {
     }
 
     @Test
+    @DisplayName("db 类型工作区播种 DB 专属 AGENTS.md（只读查询角色），非通用编程助手")
+    void initializeDbTypeSeedsDbAgentsMd() throws IOException {
+        layout.initialize(root, root.resolve(".easyClaw"), "db");
+
+        String agents = Files.readString(agentDir().resolve("AGENTS.md"));
+        assertTrue(agents.contains("DB 只读查询助手"), "db 工作区应播种 DB 专属模板");
+        assertTrue(agents.contains("只读红线"), "DB 模板应含只读红线");
+        assertFalse(agents.contains("AI 编程助手"), "db 工作区不应播种通用编程助手模板");
+        assertFalse(agents.contains("子 Agent 编排"), "DB 模板不应含子 Agent 编排内容");
+    }
+
+    @Test
+    @DisplayName("普通类型工作区播种通用 AGENTS.md，不受 db 模板影响")
+    void initializeNormalTypeSeedsGenericAgentsMd() throws IOException {
+        layout.initialize(root, root.resolve(".easyClaw"), "single");
+
+        String agents = Files.readString(agentDir().resolve("AGENTS.md"));
+        assertTrue(agents.contains("AI 编程助手"), "普通工作区应播种通用编程助手模板");
+        assertFalse(agents.contains("DB 只读查询助手"), "普通工作区不应播种 DB 专属模板");
+    }
+
+    @Test
+    @DisplayName("db 类型 repair 播种 DB 专属 AGENTS.md（缺失时）")
+    void repairDbTypeSeedsDbAgentsMd() throws IOException {
+        layout.initialize(root, root.resolve(".easyClaw"), "db");
+        Files.delete(agentDir().resolve("AGENTS.md"));
+
+        layout.repair(agentDir(), "db");
+
+        String agents = Files.readString(agentDir().resolve("AGENTS.md"));
+        assertTrue(agents.contains("DB 只读查询助手"), "db 类型 repair 应补回 DB 专属模板");
+    }
+
+    @Test
+    @DisplayName("ops 类型工作区播种运维专属 AGENTS.md（动作优先），非通用编程助手")
+    void initializeOpsTypeSeedsOpsAgentsMd() throws IOException {
+        layout.initialize(root, root.resolve(".easyClaw"), "ops");
+
+        String agents = Files.readString(agentDir().resolve("AGENTS.md"));
+        assertTrue(agents.contains("OPS 运维助手"), "ops 工作区应播种运维专属模板");
+        assertTrue(agents.contains("remote_shell"), "运维模板应含 remote_shell 工具");
+        assertFalse(agents.contains("AI 编程助手"), "ops 工作区不应播种通用编程助手模板");
+        assertFalse(agents.contains("子 Agent 编排"), "运维模板不应含子 Agent 编排内容");
+    }
+
+    @Test
+    @DisplayName("ops 类型 repair 播种运维专属 AGENTS.md（缺失时）")
+    void repairOpsTypeSeedsOpsAgentsMd() throws IOException {
+        layout.initialize(root, root.resolve(".easyClaw"), "ops");
+        Files.delete(agentDir().resolve("AGENTS.md"));
+
+        layout.repair(agentDir(), "ops");
+
+        String agents = Files.readString(agentDir().resolve("AGENTS.md"));
+        assertTrue(agents.contains("OPS 运维助手"), "ops 类型 repair 应补回运维专属模板");
+    }
+
+    @Test
     @DisplayName("repair 不覆盖用户已修改的模板文件（幂等契约的核心）")
     void repairPreservesUserEdits() throws IOException {
         layout.initialize(root, root.resolve(".easyClaw"));

@@ -104,9 +104,19 @@ public class WorkspaceSeedService {
      * 新建工作区（{@code WorkspaceManager#createWorkspace}）与启动补播共用本入口。
      */
     public void seedWorkspace(Path workspacePath) {
+        seedWorkspace(workspacePath, null);
+    }
+
+    /**
+     * 播种单个工作区：AGENTS.md/MEMORY.md 模板 + 种子知识。
+     * 全程幂等，已存在的文件/条目一律跳过不覆盖；任一步失败仅 warn。
+     *
+     * @param workspaceType 工作区形态；db 类型播种 DB 专属 AGENTS.md 模板，其余（含 null）播种通用模板
+     */
+    public void seedWorkspace(Path workspacePath, String workspaceType) {
         try {
             // repair 的契约即「缺失才生成、绝不覆盖」；AGENTS.md 模板由 classpath /seed/AGENTS.md 提供
-            fileLayout.repair(workspacePath.resolve(".easyClaw").resolve("agent"));
+            fileLayout.repair(workspacePath.resolve(".easyClaw").resolve("agent"), workspaceType);
         } catch (Exception e) {
             log.warn("补齐工作区模板失败（可忽略，不影响主流程）: {} - {}", workspacePath, e.toString());
         }
