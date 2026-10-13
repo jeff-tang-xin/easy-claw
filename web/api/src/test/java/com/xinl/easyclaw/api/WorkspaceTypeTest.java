@@ -90,7 +90,7 @@ class WorkspaceTypeTest {
         WorkspaceManager wm = new WorkspaceManager(null, null, null, null, null, null, null, null, null);
         ScenarioService scenarioService = new ScenarioService(repo, actRepo, wm, new AgentRegistry());
         // 最后一参为 cloud 模式专属（CloudProperties），本测试只测场景兼容校验，传 null
-        return new WorkspaceController(null, null, null, null, null, scenarioService, null, null, null);
+        return new WorkspaceController(null, null, null, null, null, scenarioService, null, null, null, null);
     }
 
     private void assertCompatible(WorkspaceController controller, String scenarioName, String workspaceType)

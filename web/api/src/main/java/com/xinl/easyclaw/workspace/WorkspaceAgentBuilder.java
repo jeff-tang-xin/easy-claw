@@ -86,6 +86,22 @@ public class WorkspaceAgentBuilder {
      */
     @Autowired(required = false)
     private AgentCapabilitySource capabilitySource;
+
+    /**
+     * 内置能力类型注册表（可选）：把<b>工作区绑定的平台资源</b>派生成内置能力实例装进 toolkit。
+     * <p>
+     * 与 {@link #capabilitySource} 同样走字段注入并容忍 null——本类构造参数已多达十余个，
+     * 加一位会连带改造既有单测；没有注册表时等价于「这个工作区没绑资源」，行为完全回退到改造前。
+     */
+    @Autowired(required = false)
+    private com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry builtinMcpRegistry;
+
+    /**
+     * 读工作区资源绑定用。直连 repository 而<b>不是</b> {@code WorkspaceManager}：后者已持有
+     * 本类用于重建 Agent，反向注入即成环。同样容忍 null（无上下文时等价于「没绑资源」）。
+     */
+    @Autowired(required = false)
+    private com.xinl.easyclaw.workspace.repository.WorkspaceRepository workspaceRepository;
     private final SessionRegistry sessionRegistry;
     /** SPI 智能体注册表：模型偏好 / 人格 / 工具策略的声明来源 */
     private final com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry;
@@ -335,7 +351,7 @@ public class WorkspaceAgentBuilder {
                         ? agentFactory.createOpsToolkit()
                         : dbMode
                                 ? agentFactory.createDbToolkit()
-                                : agentFactory.createWorkspaceToolkit(mcpAllowlist))
+                                : soloToolkit(mcpAllowlist, workspaceId))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
                 .workspace(agentRoot)
                 .filesystem(fsSpec)
@@ -650,6 +666,128 @@ public class WorkspaceAgentBuilder {
             return List.of();
         }
     }
+
+    /**
+     * SOLO / TEAM 工作区的主 toolkit：通用装配 + <b>工作区资源绑定派生的内置能力实例</b>。
+     * <p>
+     * 专属 db / ops 工作区不走这里——它们在类型分支已取最小 toolkit，那套硬约束是安全底线，
+     * 不受 agent 页面绑定与工作区资源绑定的影响（绑定只能收窄，不能放宽）。
+     */
+    private io.agentscope.core.tool.Toolkit soloToolkit(List<String> mcpAllowlist, String workspaceId) {
+        io.agentscope.core.tool.Toolkit toolkit = agentFactory.createWorkspaceToolkit(mcpAllowlist);
+        bindWorkspaceResources(toolkit, workspaceId);
+        return toolkit;
+    }
+
+    /**
+     * 把工作区绑定的平台资源（数据库 / 运维服务器）派生成内置能力实例装进 toolkit。
+     * <p>
+     * 为什么派生而不是另写一套执行逻辑：绑定与「MCP 页手工创建的内置实例」语义完全相同
+     * （一个类型锁一个目标），差别只在配置来源。走同一条 {@code toolsFor} 路径后，目标解析、
+     * 只暴露能力不暴露地址、逐条强制确认、自主建连与审计上报<b>只有一份实现</b>——db 侧历史上
+     * 曾有两条通道各自漂移，教训在前。
+     */
+    private void bindWorkspaceResources(io.agentscope.core.tool.Toolkit toolkit, String workspaceId) {
+        if (builtinMcpRegistry == null || workspaceRepository == null) {
+            return;
+        }
+        com.xinl.easyclaw.workspace.entity.WorkspaceEntity entity =
+                workspaceRepository.findById(workspaceId).orElse(null);
+        if (entity == null) {
+            return;
+        }
+        registerBoundResources(toolkit, builtinMcpRegistry, workspaceId,
+                entity.getDbServerKey(), entity.getOpsServerKey());
+    }
+
+    /**
+     * 把工作区绑定的资源派生成内置能力工具装进 toolkit。
+     * <p>
+     * <b>静态且参数显式</b>：本类构造参数已十余个，实例方法在单测里几乎起不来；而「绑定了就该
+     * 有工具、没绑定就不该有、与场景实例同名要让位」这三条恰恰是最该钉住的行为，不该只能靠人工
+     * 联调来保证。
+     *
+     * @return 实际注册进 toolkit 的工具名（未绑定与让位的都不在其中）
+     */
+    static List<String> registerBoundResources(io.agentscope.core.tool.Toolkit toolkit,
+                                               com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry registry,
+                                               String workspaceId,
+                                               String dbServerKey, String opsServerKey) {
+        List<String> registered = new java.util.ArrayList<>();
+        registered.addAll(registerBoundResource(toolkit, registry, workspaceId, "db",
+                WorkspaceResourceService.KIND_DB, dbServerKey));
+        registered.addAll(registerBoundResource(toolkit, registry, workspaceId, "ops",
+                WorkspaceResourceService.KIND_OPS, opsServerKey));
+        return registered;
+    }
+
+    /**
+     * 单个资源绑定 → 工具注册。
+     *
+     * @param mcpType   内置类型标识（与 {@code BuiltinMcpType.typeId()} 对齐）
+     * @param kind      给人看的资源类别名（日志与告警用）
+     * @param serverKey 绑定的 hub 侧资源标识；空 = 本工作区无该能力，返回空清单
+     */
+    private static List<String> registerBoundResource(io.agentscope.core.tool.Toolkit toolkit,
+                                                      com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry registry,
+                                                      String workspaceId,
+                                                      String mcpType, String kind, String serverKey) {
+        if (serverKey == null || serverKey.isBlank()) {
+            return List.of();
+        }
+        com.xinl.easyclaw.mcp.type.BuiltinMcpType type = registry.find(mcpType).orElse(null);
+        if (type == null) {
+            log.warn("工作区 {} 绑定了{}资源 {}，但内置类型 [{}] 未注册，能力不生效",
+                    workspaceId, kind, serverKey, mcpType);
+            return List.of();
+        }
+        String config;
+        try {
+            // 用序列化而不是拼字符串：serverKey 由 hub 侧生成或人手填，含引号时拼接会产出坏 JSON，
+            // 而坏配置要到工具真正解析时才暴露，故障离因很远。
+            config = BINDING_JSON.writeValueAsString(Map.of("serverKey", serverKey.trim()));
+        } catch (Exception e) {
+            log.warn("工作区 {} 的{}资源绑定序列化失败，跳过: {}", workspaceId, kind, e.getMessage());
+            return List.of();
+        }
+        // 合成实例不落库：它是「工作区绑定」的运行时视图，不是用户创建的 MCP 服务。
+        // id 取负数与真实服务区分，日志里也能一眼看出来源。
+        com.xinl.easyclaw.mcp.entity.McpServiceEntity synthetic =
+                com.xinl.easyclaw.mcp.entity.McpServiceEntity.builder()
+                        .id(-1L)
+                        .name("workspace-" + mcpType + "-binding")
+                        .transport("BUILTIN")
+                        .mcpType(mcpType)
+                        .scope("WORKSPACE")
+                        .workspaceId(workspaceId)
+                        .implementationConfig(config)
+                        .isConnected(true)
+                        .build();
+        Set<String> present = toolkit.getToolSchemas().stream()
+                .map(io.agentscope.core.model.ToolSchema::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        List<String> registered = new java.util.ArrayList<>();
+        for (io.agentscope.core.tool.AgentTool tool : type.toolsFor(synthetic)) {
+            if (present.contains(tool.getName())) {
+                // 同名让位：框架 ToolRegistry 按名注册、后者覆盖前者。若场景绑定的同类实例已经
+                // 提供了这个工具，静默覆盖会让「这个 AI 到底连哪台机器」由注册顺序决定，不可解释。
+                // 选择让位并告警——两条配置冲突应由人消除，不由顺序裁决。
+                log.warn("工具 [{}] 已由场景绑定的 MCP 实例提供，工作区资源绑定让位"
+                                + "（workspaceId={}, 绑定的{}={}）；请二选一配置，避免歧义",
+                        tool.getName(), workspaceId, kind, serverKey);
+                continue;
+            }
+            toolkit.registerAgentTool(tool);
+            registered.add(tool.getName());
+            log.info("工作区资源绑定已派生内置能力工具 [{}]: workspaceId={}, {}={}",
+                    tool.getName(), workspaceId, kind, serverKey);
+        }
+        return registered;
+    }
+
+    /** 资源绑定配置的序列化载体（仅用于拼 implementationConfig，无共享状态） */
+    private static final com.fasterxml.jackson.databind.ObjectMapper BINDING_JSON =
+            new com.fasterxml.jackson.databind.ObjectMapper();
 
     /** 忽略大小写的包含判断：服务名在页面绑定与场景绑定里可能大小写不一致 */
     private static boolean containsIgnoreCase(Collection<String> names, String target) {

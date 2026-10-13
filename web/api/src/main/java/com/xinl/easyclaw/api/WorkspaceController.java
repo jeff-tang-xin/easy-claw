@@ -38,6 +38,8 @@ public class WorkspaceController {
     private final WorktreeService worktreeService;
     /** cloud 模式判据（appKey 非空即 cloud）；归属 projectId 是 spoke 本地事实，不依赖 hub 绑定 */
     private final CloudProperties cloudProperties;
+    /** 工作区资源绑定的候选下发与归属校验：只过滤不校验等于信前端提交的 key */
+    private final com.xinl.easyclaw.workspace.WorkspaceResourceService workspaceResourceService;
 
     public WorkspaceController(WorkspaceManager workspaceManager,
                                SessionHistoryService sessionHistoryService,
@@ -47,7 +49,8 @@ public class WorkspaceController {
                                com.xinl.easyclaw.scenario.service.ScenarioService scenarioService,
                                com.xinl.easyclaw.permission.service.PermissionRuleService permissionRuleService,
                                WorktreeService worktreeService,
-                               CloudProperties cloudProperties) {
+                               CloudProperties cloudProperties,
+                               com.xinl.easyclaw.workspace.WorkspaceResourceService workspaceResourceService) {
         this.workspaceManager = workspaceManager;
         this.sessionHistoryService = sessionHistoryService;
         this.agentService = agentService;
@@ -57,6 +60,7 @@ public class WorkspaceController {
         this.permissionRuleService = permissionRuleService;
         this.worktreeService = worktreeService;
         this.cloudProperties = cloudProperties;
+        this.workspaceResourceService = workspaceResourceService;
     }
 
     /**
@@ -68,10 +72,16 @@ public class WorkspaceController {
      *                     本地模式忽略）
      */
     public record CreateWorkspaceRequest(String name, String description, String path,
-                                         String scenarioName, String type, Long projectId) {
+                                         String scenarioName, String type, Long projectId,
+                                         String dbServerKey, String opsServerKey) {
     }
 
-    public record UpdateWorkspaceRequest(String name, String description, String scenarioName) {
+    /**
+     * 更新工作区。三个「可空即不改」字段的语义统一：{@code null} = 本次表单没带这个字段
+     * （老客户端），保持原值；资源绑定另用<b>空白串</b>表达「显式清空」。
+     */
+    public record UpdateWorkspaceRequest(String name, String description, String scenarioName,
+                                         String dbServerKey, String opsServerKey) {
     }
 
     public record CreateSessionRequest(String title, BranchSpec branch, String boundKey) {
@@ -166,13 +176,58 @@ public class WorkspaceController {
             // 同一 hub 项目可被多个 spoke 工作区绑定
             workspaceManager.updateProjectId(ctx.getWorkspaceId(), req.projectId());
         }
+        // 资源绑定：先校验再落库。校验以「本工作区归属的项目」为界——本地模式 projectId 为 null，
+        // 此时只有 hub 侧标为「不限定项目」的资源能通过（见 WorkspaceResourceService#visibleFor）。
+        bindResources(ctx.getWorkspaceId(), req.projectId(), req.dbServerKey(), req.opsServerKey());
         scenarioService.activateByName(ctx.getWorkspaceId(), target);
         return ctx;
+    }
+
+    /**
+     * 校验并落库工作区资源绑定（数据库 / 运维服务器）。
+     * <p>
+     * {@code null} = 本次不改，空白串 = 显式清空——与 {@code scenarioName} 的语义一致，
+     * 避免老客户端提交不带这两个字段的表单时误清掉既有绑定。
+     * <p>
+     * 顺序是「先校验后写」：不能先落库再报错，那会在库里留下一个指向别项目资源的绑定，
+     * 而 AI 装配时读到的正是它。
+     */
+    private void bindResources(String workspaceId, Long projectId, String dbServerKey, String opsServerKey) {
+        if (dbServerKey == null && opsServerKey == null) {
+            return;
+        }
+        workspaceResourceService.assertBindable(
+                com.xinl.easyclaw.workspace.WorkspaceResourceService.KIND_DB, dbServerKey, projectId);
+        workspaceResourceService.assertBindable(
+                com.xinl.easyclaw.workspace.WorkspaceResourceService.KIND_OPS, opsServerKey, projectId);
+        workspaceManager.updateResourceBindings(workspaceId, dbServerKey, opsServerKey);
+    }
+
+    /**
+     * 工作区可绑定的资源候选（按归属项目过滤）。前端表单的两个下拉取这里，
+     * <b>不要</b>用全量平台资源清单——那会让人在这个工作区里看到并选到别项目的机器。
+     */
+    @GetMapping("/{id}/resource-options")
+    public com.xinl.easyclaw.workspace.WorkspaceResourceService.ResourceOptions resourceOptions(
+            @PathVariable String id) {
+        return workspaceResourceService.options(workspaceManager.getProjectId(id));
+    }
+
+    /**
+     * 按项目取资源候选。<b>创建流程专用</b>：那时工作区还不存在，没有 id 可查，
+     * 但表单里已经选了归属项目，直接按它过滤。
+     */
+    @GetMapping("/resource-options")
+    public com.xinl.easyclaw.workspace.WorkspaceResourceService.ResourceOptions resourceOptionsByProject(
+            @org.springframework.web.bind.annotation.RequestParam(required = false) Long projectId) {
+        return workspaceResourceService.options(projectId);
     }
 
     @PutMapping("/{id}")
     public WorkspaceSummary update(@PathVariable String id, @RequestBody UpdateWorkspaceRequest req) {
         WorkspaceSummary summary = workspaceManager.updateWorkspace(id, req.name(), req.description());
+        // 资源绑定走同一套「先校验后写」；projectId 取工作区当前归属（本请求不改项目绑定）
+        bindResources(id, summary.getProjectId(), req.dbServerKey(), req.opsServerKey());
         // 编辑时未传场景 = 该表单没带这个字段（老客户端），保持原绑定不动
         if (req.scenarioName() != null && !req.scenarioName().isBlank()) {
             String target = req.scenarioName().trim();

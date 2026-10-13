@@ -19,6 +19,10 @@ public class WorkspaceSummary {
     private String type;
     /** 归属的 hub 项目（cloud 模式；本地模式恒 null），列表页据此显示绑定状态 */
     private Long projectId;
+    /** 绑定的数据库资源 serverKey（空 = 无数据库能力）；显示名由前端按 resource-options 映射 */
+    private String dbServerKey;
+    /** 绑定的运维服务器 serverKey（空 = 无远程执行能力） */
+    private String opsServerKey;
     private Instant createdAt;
     private Instant lastAccessed;
 }

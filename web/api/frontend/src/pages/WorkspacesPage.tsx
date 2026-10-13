@@ -17,12 +17,21 @@ interface WorkspaceSummary {
   type?: string;
   /** 归属的 hub 项目（cloud 模式；本地模式恒 null） */
   projectId?: number | null;
+  /** 绑定的数据库资源 serverKey（空 = 无数据库能力） */
+  dbServerKey?: string | null;
+  /** 绑定的运维服务器 serverKey（空 = 无远程执行能力） */
+  opsServerKey?: string | null;
   createdAt: string;
 }
 
 interface PermRule { id: number; toolName: string; createdAt: string; }
 interface ToolDef { name: string; displayName: string; requiresConfirm: boolean; }
 interface ScenarioOption { id: number; name: string; displayName: string; icon?: string; active: boolean; mode?: string; }
+
+/** 工作区可绑定的平台资源（对应后端 WorkspaceResourceService.ResourceOption）。
+ *  label 只有业务名——主机、端口、账号不进前端。 */
+interface ResourceOption { key: string; label: string; autoConnectable: boolean; }
+interface ResourceOptions { databases: ResourceOption[]; servers: ResourceOption[]; }
 
 /** 工作区形态分类（与场景 mode 同值域）到中文标签/图标的映射，顺序即侧边栏顺序。
  * 运维（ops）是系统内置唯一固定 workspace，不在此列表（不展示、不可创建），
@@ -56,6 +65,12 @@ export default function WorkspacesPage() {
   const cloudMode = useCloudConfig().cloudMode;
   const [projects, setProjects] = useState<CloudProject[]>([]);
   const [projectId, setProjectId] = useState<number | ''>('');
+  /** 可绑定资源候选：按「当前表单选的归属项目」拉取，切换项目时重新加载 */
+  const [resourceOptions, setResourceOptions] = useState<ResourceOptions | null>(null);
+  const [dbKey, setDbKey] = useState('');
+  const [opsKey, setOpsKey] = useState('');
+  const [editDbKey, setEditDbKey] = useState('');
+  const [editOpsKey, setEditOpsKey] = useState('');
   const navigate = useNavigate();
 
   /** 当前类型可选的场景：仅取已启用且 mode 与工作区类型一致的场景 */
@@ -133,6 +148,90 @@ export default function WorkspacesPage() {
       .catch(() => setProjects([]));
   }, [cloudMode]);
 
+  /**
+   * 可绑定资源候选：跟着「表单当前选的归属项目」走。
+   * <p>切项目就重新拉——候选清单必须限定在本项目内，否则人在这个项目的工作区里会看到、
+   * 甚至选到别项目的机器与库（后端写入时还会再校验一次，过滤是体验，校验才是边界）。
+   * <p>未选项目时只请求「不限定项目」的那部分资源；本地模式通常两者皆空，UI 据此收起整块。
+   */
+  const activeProjectId = editing ? editProjectId : projectId;
+  useEffect(() => {
+    const url = activeProjectId === ''
+      ? '/api/workspaces/resource-options'
+      : `/api/workspaces/resource-options?projectId=${activeProjectId}`;
+    getJson<ResourceOptions>(url)
+      .then(setResourceOptions)
+      .catch(() => setResourceOptions(null));
+  }, [activeProjectId]);
+
+  /**
+   * 资源绑定表单块（创建 / 编辑共用）：两个可空单选下拉。
+   * <p>候选由后端按归属项目过滤，label 只有业务名——主机、端口、账号不进浏览器。
+   * <p>已绑定的资源可能因授权撤销而不在候选里，这里<b>保留原值并标注</b>：否则下拉会把它
+   * 静默显示成「未绑定」，人以为绑错了，实际是授权没了——那种表现最难排查。
+   */
+  const resourceFields = (
+    db: string, onDb: (v: string) => void,
+    ops: string, onOps: (v: string) => void,
+  ) => {
+    if (!cloudMode) {
+      return null;   // 本地模式没有平台资源来源，整块不渲染
+    }
+    const dbs = resourceOptions?.databases ?? [];
+    const svrs = resourceOptions?.servers ?? [];
+    if (dbs.length === 0 && svrs.length === 0) {
+      return (
+        <div className="field">
+          <label>资源绑定（数据库 / 服务器）</label>
+          <div className="hint">
+            本项目下暂无可绑定的数据库或服务器。需要 AI 具备查库 / 远程执行能力，
+            请先在平台把资源授权到该项目。
+          </div>
+        </div>
+      );
+    }
+    return (
+      <>
+        <div className="field">
+          <label>绑定数据库（可选）</label>
+          <select value={db} onChange={(e) => onDb(e.target.value)}>
+            <option value="">（不绑定 — 该工作区没有查库能力）</option>
+            {dbs.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}{o.autoConnectable ? '' : '（需人工先连）'}
+              </option>
+            ))}
+            {db && !dbs.some((o) => o.key === db) && (
+              <option value={db}>{db}（当前绑定，已不在本项目清单内）</option>
+            )}
+          </select>
+          <div className="hint">
+            绑定后本工作区的智能体获得 db_query / db_schema / db_status，目标锁定为该库；
+            模型看不到也无法指定连接地址。不绑定则这些工具根本不出现。
+          </div>
+        </div>
+        <div className="field">
+          <label>绑定服务器（可选）</label>
+          <select value={ops} onChange={(e) => onOps(e.target.value)}>
+            <option value="">（不绑定 — 该工作区没有远程执行能力）</option>
+            {svrs.map((o) => (
+              <option key={o.key} value={o.key}>
+                {o.label}{o.autoConnectable ? '' : '（需人工先连）'}
+              </option>
+            ))}
+            {ops && !svrs.some((o) => o.key === ops) && (
+              <option value={ops}>{ops}（当前绑定，已不在本项目清单内）</option>
+            )}
+          </select>
+          <div className="hint">
+            每条命令仍逐条弹确认（不可被白名单或「永久允许」跳过）；
+            当你当前终端连的是另一台机器时会拒绝执行，不会悄悄切换目标。
+          </div>
+        </div>
+      </>
+    );
+  };
+
   /** 该类型的默认选中场景：优先内置「通用编程」（仅 single 类型内置），否则取同类型首个 */
   function defaultScenarioOf(list: ScenarioOption[], type: WsType): string {
     const sameType = list.filter((s) => (s.mode || 'single') === type);
@@ -158,12 +257,17 @@ export default function WorkspacesPage() {
         type: currentType,
         // cloud 模式必填（后端强制校验）；本地模式忽略
         projectId: cloudMode ? projectId : undefined,
+        // 资源绑定非必须：空串 = 明确不绑定（后端据此不装相应能力）
+        dbServerKey: dbKey,
+        opsServerKey: opsKey,
       });
       setName('');
       setPath('');
       setDescription('');
       setScenarioName(defaultScenarioOf(scenarios, currentType));
       setProjectId('');
+      setDbKey('');
+      setOpsKey('');
       setShowCreate(false);
       await load();
     } catch (e) {
@@ -176,6 +280,8 @@ export default function WorkspacesPage() {
     setEditName(ws.name);
     setEditDesc(ws.description || '');
     setEditProjectId(ws.projectId ?? '');
+    setEditDbKey(ws.dbServerKey ?? '');
+    setEditOpsKey(ws.opsServerKey ?? '');
     // 回显当前绑定：查不到（未绑定/接口异常）时落到该类型默认场景，不阻塞编辑
     setEditScenario(defaultScenarioOf(scenarios, currentType));
     getJson<ScenarioOption | null>(`/api/scenarios/active/${ws.workspaceId}`)
@@ -191,6 +297,9 @@ export default function WorkspacesPage() {
         name: editName.trim(),
         description: editDesc,
         scenarioName: editScenario,
+        // 总是提交：空串是「选回不绑定」的显式表达（后端 null 才表示不改，那是给老客户端留的）
+        dbServerKey: editDbKey,
+        opsServerKey: editOpsKey,
       });
       // cloud 模式：项目归属变更时同步 hub 绑定（'' 表示解除绑定）
       if (cloudMode) {
@@ -363,6 +472,7 @@ export default function WorkspacesPage() {
               )}
             </div>
           )}
+          {resourceFields(dbKey, setDbKey, opsKey, setOpsKey)}
           <div className="field">
             <label>描述（可选）</label>
             <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} />
@@ -466,6 +576,7 @@ export default function WorkspacesPage() {
               <div className="hint">换绑后该工作区后续写入云端的数据归属新项目；历史数据仍留在原项目</div>
             </div>
           )}
+          {resourceFields(editDbKey, setEditDbKey, editOpsKey, setEditOpsKey)}
           <div className="field">
             <label>描述（可选）</label>
             <textarea value={editDesc} onChange={(e) => setEditDesc(e.target.value)} rows={2} />
@@ -559,6 +670,14 @@ export default function WorkspacesPage() {
               {cloudMode && (
                 <div className="hint" style={{ marginTop: 6 }}>
                   {ws.projectId != null ? `📦 归属项目：${projectName(ws.projectId)}` : '📦 未绑定 hub 项目'}
+                  {/* 资源绑定徽章：显示 serverKey（hub 侧 ASCII 标识，稳定唯一）；
+                      业务名要另拉候选才能映射，列表页不值得为此多发请求 */}
+                  {(ws.dbServerKey || ws.opsServerKey) ? (
+                    <>
+                      {ws.dbServerKey ? ` · 🗄 ${ws.dbServerKey}` : ''}
+                      {ws.opsServerKey ? ` · 🖥 ${ws.opsServerKey}` : ''}
+                    </>
+                  ) : null}
                 </div>
               )}
             </div>

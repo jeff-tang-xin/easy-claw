@@ -250,6 +250,8 @@ public class WorkspaceManager {
                 .lastAccessed(Instant.now())
                 .restored(true)
                 .projectId(meta.getProjectId())
+                .dbServerKey(meta.getDbServerKey())
+                .opsServerKey(meta.getOpsServerKey())
                 .build();
     }
 
@@ -442,6 +444,38 @@ public class WorkspaceManager {
         log.info("Workspace 项目归属已更新: id={}, projectId={}", workspaceId, saved.getProjectId());
     }
 
+    /**
+     * 更新工作区的资源绑定（数据库 / 运维服务器，各自单选）。
+     * <p>
+     * 入参语义与 {@code scenarioName} 保持一致：<b>null = 本次不改</b>（老客户端不传该字段时
+     * 不能误清空既有绑定），<b>空白串 = 显式清空</b>（用户在下拉里选回「不绑定」）。
+     * <p>
+     * 这里<b>不做项目归属校验</b>：校验要用 hub 下发的资源清单，属于业务判断，收口在
+     * {@code WorkspaceController}（它同时负责候选下发）。Manager 只做持久化 + 缓存同步，
+     * 与 {@link #updateProjectId} 的分层一致。绑定变更只影响后续装配（新会话 / 重建 Agent），
+     * 不中断已运行的会话——与改场景绑定的既有行为一致。
+     */
+    @Transactional
+    public void updateResourceBindings(String workspaceId, String dbServerKey, String opsServerKey) {
+        WorkspaceEntity entity = workspaceRepository.findById(workspaceId)
+                .orElseThrow(() -> new IllegalArgumentException("工作区不存在: " + workspaceId));
+        if (dbServerKey != null) {
+            entity.setDbServerKey(dbServerKey.isBlank() ? null : dbServerKey.trim());
+        }
+        if (opsServerKey != null) {
+            entity.setOpsServerKey(opsServerKey.isBlank() ? null : opsServerKey.trim());
+        }
+        entity.setUpdatedAt(Instant.now());
+        WorkspaceEntity saved = workspaceRepository.save(entity);
+        WorkspaceContext ctx = workspaceCache.get(workspaceId);
+        if (ctx != null) {
+            ctx.setDbServerKey(saved.getDbServerKey());
+            ctx.setOpsServerKey(saved.getOpsServerKey());
+        }
+        log.info("Workspace 资源绑定已更新: id={}, db={}, ops={}",
+                workspaceId, saved.getDbServerKey(), saved.getOpsServerKey());
+    }
+
     public List<WorkspaceSummary> getUserWorkspaces(String userId) {
         return workspaceRepository.findByUserIdOrderByCreatedAtDesc(userId)
                 .stream()
@@ -614,6 +648,8 @@ public class WorkspaceManager {
                 // 存量工作区在加列前已存在（理论上 ddl-default=single），这里再兜底一次
                 .type(entity.getType() == null ? "single" : entity.getType())
                 .projectId(entity.getProjectId())
+                .dbServerKey(entity.getDbServerKey())
+                .opsServerKey(entity.getOpsServerKey())
                 .createdAt(entity.getCreatedAt())
                 .lastAccessed(entity.getLastAccessedAt())
                 .build();
