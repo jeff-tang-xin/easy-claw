@@ -50,9 +50,9 @@ public class DbConnectionEntity extends BaseEntity {
     @Column(nullable = false, length = 255)
     private String description = "";
 
-    /** 录入时提示「必须只读账号」的勾选标记；随目录下发注入提示词（物理防线提醒）。 */
+    /** 平台声明「该连接使用只读账号」的勾选标记；随目录下发，spoke 侧作为事实提示注入模型（物理防线仍是 DB 账号权限本身）。V32 起默认不勾——db_dml/db_ddl 已是合法工具，默认只读会系统性误导模型拒绝写操作。 */
     @Column(name = "readonly_hint", nullable = false)
-    private Boolean readonlyHint = true;
+    private Boolean readonlyHint = false;
 
     @Column(name = "sort_order", nullable = false)
     private Integer sortOrder = 0;

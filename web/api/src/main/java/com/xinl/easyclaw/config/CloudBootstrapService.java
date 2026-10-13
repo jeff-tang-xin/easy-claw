@@ -404,7 +404,8 @@ public class CloudBootstrapService {
                         attrs.path("databaseName").asText(""),
                         attrs.path("username").asText(""),
                         attrs.path("description").asText(""),
-                        attrs.path("readonlyHint").asBoolean(true),
+                        // V32：缺省 false——hub 总是下发该字段；缺省 true 会让未标记的连接被模型当只读而拒绝 db_dml
+                        attrs.path("readonlyHint").asBoolean(false),
                         attrs.hasNonNull("projectId") ? attrs.path("projectId").asLong() : null,
                         // V30：hub 解密后随目录下发；未设置/旧 hub 下发时保持 null
                         n.hasNonNull("password") ? n.path("password").asText() : null,

@@ -189,7 +189,7 @@ public class DbConnectionService {
                 + " 主机=" + s.host() + ":" + s.port()
                 + " 库=" + s.database()
                 + (s.schemaHint() == null ? "" : " 有表的schema=" + s.schemaHint())
-                + (s.readonlyHint() ? " 只读模式（仅允许 SELECT/WITH 查询）" : "")
+                + (s.readonlyHint() ? " 连接标记为只读账号（写操作可能被数据库权限拒绝，如遇权限错误请如实告知用户）" : "")
                 + "。表名可用 db_schema 工具查询，查询时使用 schema.table 限定名。";
     }
 

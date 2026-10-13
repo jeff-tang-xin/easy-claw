@@ -73,7 +73,9 @@ public class DbTools {
                     .append(", ").append(c.dbType()).append(")");
         }
         return DbSchemaRenderer.banner(session) + "\n状态: 已连接"
-                + "\n只读提示: " + (session.readonlyHint() ? "是（连接配置标记为只读，请只执行查询）" : "未标记（仍请只执行查询，写操作由数据库账号权限兜底）")
+                + "\n只读标记: " + (session.readonlyHint()
+                        ? "是（平台将该连接标记为只读账号——写操作可能被数据库权限拒绝；若用户确需写数据，请提示平台管理员核对账号权限或调整只读标记）"
+                        : "否（写操作走 db_dml/db_ddl，每次执行都会弹窗请用户确认）")
                 + "\n活跃连接清单（跨库看板/查询引用 connKey 用）:" + conns;
     }
 
@@ -102,7 +104,7 @@ public class DbTools {
 
     @Tool(name = "db_query", description = "在当前会话绑定的库上执行一条只读 SQL 查询（SELECT/WITH），返回 Markdown 表格（敏感列已脱敏，超长已截断）。\n"
             + "【何时用】查数据、统计、核对业务问题。作用域锁定本会话的库——跨 schema 查询用 SQL 限定名（如 hub.table）。\n"
-            + "【边界】仅允许只读查询；写操作（INSERT/UPDATE/DELETE/DDL）会被只读防线拒绝，数据库账号本身也是只读。\n"
+            + "【边界】仅允许只读查询（SELECT/WITH）；数据变更用 db_dml，结构变更用 db_ddl。\n"
             + "【注意】结果最多 500 行，需要聚合分析请写好 SQL；空结果会明确标注 0 rows。")
     public String dbQuery(
             @ToolParam(name = "sql", description = "要执行的只读 SQL（单条 SELECT/WITH 语句）") String sql,

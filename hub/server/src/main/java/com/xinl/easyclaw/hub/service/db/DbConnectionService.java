@@ -182,7 +182,7 @@ public class DbConnectionService implements SpokeResourceCatalog {
         e.setDatabaseName(req.databaseName().trim());
         e.setUsername(req.username().trim());
         e.setDescription(req.description() == null ? "" : req.description().trim());
-        e.setReadonlyHint(req.readonlyHint() == null ? Boolean.TRUE : req.readonlyHint());
+        e.setReadonlyHint(req.readonlyHint() == null ? Boolean.FALSE : req.readonlyHint());
         e.setSortOrder(req.sortOrder() == null ? 0 : req.sortOrder());
         e.setEnabled(req.enabled() == null ? Boolean.TRUE : req.enabled());
         e.setOrgId(orgId);

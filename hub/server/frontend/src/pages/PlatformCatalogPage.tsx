@@ -1923,7 +1923,7 @@ const emptyDbConnectionForm = (): DbConnectionForm => ({
   databaseName: '',
   username: '',
   description: '',
-  readonlyHint: true,
+  readonlyHint: false,
   sortOrder: 0,
   enabled: true,
   orgId: 0,
@@ -2361,8 +2361,8 @@ function DbConnectionFormModal({
             checked={form.readonlyHint}
             onChange={(e) => setField('readonlyHint', e.target.checked)}
           />
-          只读提示
-          <span className="field-hint">请使用只读账号，物理防线</span>
+          只读账号
+          <span className="field-hint">勾选表示该连接使用只读账号，AI 会被如实告知（写操作可能被数据库权限拒绝）；不勾则 AI 可执行写操作（每次仍需人工确认）</span>
         </label>
         <label>
           排序
