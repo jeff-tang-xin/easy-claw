@@ -7,6 +7,7 @@ import org.springframework.stereotype.Component;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.List;
 
 /**
  * DB 查询编排器（V30.1 收口）：db_query 的完整编排序列——只读防线 → 审计入队 →
@@ -69,6 +70,50 @@ public class DbQueryExecutor {
         } catch (SQLException e) {
             log.warn("db_query 执行失败: serverKey={}, db={}, err={}",
                     session.serverKey(), session.database(), e.getMessage());
+            return banner + "\n\n❌ 执行失败: " + e.getMessage();
+        }
+    }
+
+    /**
+     * db_dml / db_ddl 编排：写语句校验 → 审计入队 → 执行 → 结果渲染。
+     * 与 {@link #executeQuery} 同一编排纪律：任何失败都返回可读错误文本（不抛异常）。
+     * <p>
+     * 危险等级由工具描述向模型与人声明；本方法负责把「执行了什么、影响多少行」
+     * 如实写进审计与返回值。确认环节在权限层（{@code ToolPermissionPolicy.NON_BYPASSABLE}：
+     * 永久允许也每次弹窗），不在本方法内——执行到这里时人已经放行过了。
+     *
+     * @param kind 语句类别：{@code DML} / {@code DDL}（校验白名单、审计与返回值标注用）
+     */
+    public String executeWrite(DbConnectionService.DbSession session, String sql, String kind, String source) {
+        List<String> allowed = "DDL".equalsIgnoreCase(kind)
+                ? DbQueryGuard.DDL_FIRST_WORDS : DbQueryGuard.DML_FIRST_WORDS;
+        DbQueryGuard.Verdict verdict = guard.checkWrite(sql, allowed, kind);
+        if (!verdict.allowed()) {
+            return "❌ " + verdict.reason();
+        }
+        // 审计：执行前入队（与查询同口径——记录的是「执行了什么」，成败都记）
+        queryLogReporter.enqueue(session.serverKey(), session.serverName(), session.dbType(),
+                session.host(), session.database(), sql, source);
+        String banner = DbSchemaRenderer.banner(session);
+        try {
+            Integer affected = session.withConnection(conn -> {
+                try (Statement st = conn.createStatement()) {
+                    st.setQueryTimeout(QUERY_TIMEOUT_SECONDS);
+                    // DDL 走 executeUpdate 同样合法（返回 0）；影响行数是模型向用户
+                    // 复述改动范围的核心事实，必须如实返回
+                    return st.executeUpdate(sql);
+                }
+            });
+            String level = "DDL".equalsIgnoreCase(kind)
+                    ? "🔴 极高（结构变更，多数数据库隐式提交、不可回滚）"
+                    : "⚠️ 高（数据变更，请核对影响范围）";
+            return banner + "\n\n✅ " + kind.toUpperCase() + " 执行成功，影响 "
+                    + (affected == null ? 0 : affected) + " 行"
+                    + "\n危险等级：" + level
+                    + "\n（本次操作已审计上报；如需撤销请立即告知用户，由人决定回滚方案）";
+        } catch (SQLException e) {
+            log.warn("{} 执行失败: serverKey={}, db={}, err={}",
+                    kind, session.serverKey(), session.database(), e.getMessage());
             return banner + "\n\n❌ 执行失败: " + e.getMessage();
         }
     }

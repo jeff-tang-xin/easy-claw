@@ -90,21 +90,22 @@ class DbMcpTypeTest {
     void typeContract() {
         assertThat(type.typeId()).isEqualTo("db");
         assertThat(type.configSchema()).extracting(f -> f.get("key"))
-                .containsExactly("serverKey", "database");
+                .containsExactly("serverKey", "database", "enableDdl");
         assertThat(type.configSchema().get(0).get("optionsSource"))
                 .isEqualTo("hub-db-connections");
     }
 
     @Test
-    @DisplayName("参数面只有业务参数：db_query=sql、db_schema=table、db_status 无参")
+    @DisplayName("参数面只有业务参数：db_query/db_dml=sql、db_schema=table、db_status 无参；db_ddl 默认不装配")
     void parametersOnlyCarryBusinessArgs() {
         List<AgentTool> tools = type.toolsFor(instance(LOCKED));
 
         assertThat(tools).extracting(AgentTool::getName)
-                .containsExactly("db_status", "db_schema", "db_query");
+                .containsExactly("db_status", "db_schema", "db_query", "db_dml");
         assertThat(propsOf(tools, "db_query")).containsExactly("sql");
         assertThat(propsOf(tools, "db_schema")).containsExactly("table");
         assertThat(propsOf(tools, "db_status")).isEmpty();
+        assertThat(propsOf(tools, "db_dml")).containsExactly("sql");
     }
 
     @Test
@@ -142,19 +143,19 @@ class DbMcpTypeTest {
     void legacySingletonWithoutConfigStillHidesLocators() {
         List<AgentTool> tools = type.toolsFor(instance(null));
 
-        assertThat(tools).hasSize(3);
+        assertThat(tools).hasSize(4);
         assertThat(surfaceOf(tools)).doesNotContain("connkey").doesNotContain("serverkey");
         assertThat(requiredOf(tools, "db_query")).containsExactly("sql");
     }
 
     @Test
-    @DisplayName("hub 快照取不到默认库 → 照常装配三工具，不因此冒出连接参数")
+    @DisplayName("hub 快照取不到默认库 → 照常装配四工具，不因此冒出连接参数")
     void missingDefaultDatabaseDoesNotReintroduceConnKey() {
         when(cloudBootstrap.findDbConnection(anyString())).thenReturn(Optional.empty());
 
         List<AgentTool> tools = type.toolsFor(instance("{\"serverKey\":\"prod-mysql\"}"));
 
-        assertThat(tools).hasSize(3);
+        assertThat(tools).hasSize(4);
         assertThat(surfaceOf(tools)).doesNotContain("connkey");
     }
 
@@ -167,13 +168,54 @@ class DbMcpTypeTest {
 
         List<AgentTool> tools = type.toolsFor(instance("{\"serverKey\":\"prod-mysql\"}"));
 
-        assertThat(tools).hasSize(3);
+        assertThat(tools).hasSize(4);
         assertThat(requiredOf(tools, "db_query")).containsExactly("sql");
     }
 
     @Test
     @DisplayName("配置脏数据（非法 JSON）不抛异常，降级为未锁定")
     void malformedConfigDegradesWithoutThrowing() {
-        assertThat(type.toolsFor(instance("{not-json"))).hasSize(3);
+        assertThat(type.toolsFor(instance("{not-json"))).hasSize(4);
+    }
+
+    @Test
+    @DisplayName("DDL 开关：默认不装配 db_ddl，实例配置显式开放后才出现（fail-closed）")
+    void ddlToolOnlyAssembledWhenExplicitlyEnabled() {
+        // 默认（无 enableDdl 字段）：不装配
+        assertThat(toolNames(type.toolsFor(instance(LOCKED)))).doesNotContain("db_ddl");
+
+        // 字符串 "true"（前端 checkbox 以字符串存取）：装配
+        assertThat(toolNames(type.toolsFor(instance(
+                "{\"serverKey\":\"prod-mysql\",\"database\":\"orders_db\",\"enableDdl\":\"true\"}"))))
+                .contains("db_ddl");
+
+        // JSON boolean true：装配
+        assertThat(toolNames(type.toolsFor(instance(
+                "{\"serverKey\":\"prod-mysql\",\"enableDdl\":true}")))).contains("db_ddl");
+
+        // "false" / 无法识别的值 / 脏 JSON：一律不装配
+        assertThat(toolNames(type.toolsFor(instance(
+                "{\"serverKey\":\"prod-mysql\",\"enableDdl\":\"false\"}")))).doesNotContain("db_ddl");
+        assertThat(toolNames(type.toolsFor(instance(
+                "{\"serverKey\":\"prod-mysql\",\"enableDdl\":\"yes\"}")))).doesNotContain("db_ddl");
+        assertThat(toolNames(type.toolsFor(instance("{not-json")))).doesNotContain("db_ddl");
+    }
+
+    @Test
+    @DisplayName("开放 DDL 后工具面仍不泄漏连接标识")
+    void ddlEnabledSurfaceStillHidesLocators() {
+        String surface = surfaceOf(type.toolsFor(instance(
+                "{\"serverKey\":\"prod-mysql\",\"database\":\"orders_db\",\"enableDdl\":\"true\"}")));
+
+        assertThat(surface)
+                .doesNotContain("connkey")
+                .doesNotContain("serverkey")
+                .doesNotContain("host")
+                .doesNotContain("port")
+                .doesNotContain("password");
+    }
+
+    private static List<String> toolNames(List<AgentTool> tools) {
+        return tools.stream().map(AgentTool::getName).toList();
     }
 }

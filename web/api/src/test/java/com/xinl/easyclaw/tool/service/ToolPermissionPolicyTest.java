@@ -56,6 +56,24 @@ class ToolPermissionPolicyTest {
     }
 
     @Test
+    @DisplayName("db_dml/db_ddl 不可绕过：回合/永久授权都摘不掉确认，且绝不静默放行")
+    void dbWriteToolsAreNonBypassable() {
+        // 必须同时在 EXPLICIT_ASK（注册 system ASK 规则）与 NON_BYPASSABLE（永久允许不跳过）：
+        // 只进 EXPLICIT_ASK 时，用户「永久允许」后 ASK 规则被跳过、user ALLOW 生效 → 免确认
+        assertThat(ToolPermissionPolicy.nonBypassable())
+                .contains("remote_shell", "db_dml", "db_ddl");
+        for (String tool : ToolPermissionPolicy.nonBypassable()) {
+            assertThat(ToolPermissionPolicy.explicitAsk())
+                    .as("不可绕过工具 %s 必须显式注册 ASK 规则", tool).contains(tool);
+            assertThat(ToolPermissionPolicy.requiresConfirm(tool))
+                    .as("高危工具 %s 必须征求确认", tool).isTrue();
+        }
+        // 静默放行清单与不可绕过清单不相交：静默放行会直接绕过确认引擎
+        assertThat(ToolPermissionPolicy.silentlyAllowed())
+                .doesNotContainAnyElementsOf(ToolPermissionPolicy.nonBypassable());
+    }
+
+    @Test
     @DisplayName("未知工具名 fail-closed：一律需要确认")
     void unknownToolsRequireConfirm() {
         // MCP 动态工具不在任何清单里，必须默认弹确认而不是默认放行

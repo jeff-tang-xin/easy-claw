@@ -874,7 +874,20 @@ export default function McpPage() {
                       return (
                         <div className="field" key={field.key}>
                           <label>{field.label || field.key}{field.required ? ' *' : ''}</label>
-                          {options.length > 0 ? (
+                          {/* switch：高危能力开关（如 db 实例的「开放 DDL」）。值以字符串存取
+                              （builtinForm 是 Record<string,string>），后端按字面量 "true" 判定 */}
+                          {field.type === 'switch' ? (
+                            <label style={{display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer'}}>
+                              <input
+                                type="checkbox"
+                                checked={builtinForm[field.key] === 'true'}
+                                onChange={e => setBuiltinForm({...builtinForm, [field.key]: e.target.checked ? 'true' : 'false'})}
+                              />
+                              <span style={{fontSize: 13}}>
+                                {builtinForm[field.key] === 'true' ? '已开放（每次执行仍需确认）' : '未开放（默认）'}
+                              </span>
+                            </label>
+                          ) : options.length > 0 ? (
                             <select
                               value={builtinForm[field.key] || ''}
                               onChange={e => {

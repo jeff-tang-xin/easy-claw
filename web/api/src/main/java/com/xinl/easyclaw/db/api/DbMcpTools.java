@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 import reactor.core.publisher.Mono;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -79,7 +80,7 @@ public class DbMcpTools implements BuiltinMcpType {
 
     @Override
     public String displayName() {
-        return "数据库查询（只读）";
+        return "数据库操作";
     }
 
     /**
@@ -96,19 +97,34 @@ public class DbMcpTools implements BuiltinMcpType {
                         "description", "平台下发的已授权数据库连接（serverKey）"),
                 Map.of("key", "database", "label", "库 / schema", "type", "select",
                         "required", false, "optionsSource", "hub-db-databases",
-                        "description", "缺省用该连接配置的默认库"));
+                        "description", "缺省用该连接配置的默认库"),
+                Map.of("key", "enableDdl", "label", "开放 DDL（结构变更）", "type", "switch",
+                        "required", false, "default", "false",
+                        "description", "默认关闭。开启后本实例才装配 db_ddl 工具"
+                                + "（CREATE/ALTER/DROP/TRUNCATE 等，危险等级极高）；"
+                                + "即使开放，每次执行仍需人工确认，无法被回合/永久授权跳过"));
     }
 
-    /** 三个内置 MCP 工具（实例激活时装配）；目标连接由实例配置决定默认值 */
+    /** 内置 MCP 工具（实例激活时装配）；目标连接由实例配置决定默认值。
+     *  db_dml 为高危写操作：权限层 NON_BYPASSABLE 强制每次人工确认。
+     *  db_ddl 默认<b>不装配</b>——用户在实例配置里手动「开放 DDL」后才出现，开放后仍每次确认。 */
     @Override
     public List<AgentTool> toolsFor(McpServiceEntity instance) {
         String defaultConnKey = resolveDefaultConnKey(instance);
-        log.info("装配 db 内置工具面: service={}, defaultConnKey={}",
+        boolean enableDdl = resolveEnableDdl(instance);
+        log.info("装配 db 内置工具面: service={}, defaultConnKey={}, ddl={}",
                 instance == null ? "-" : instance.getName(),
-                defaultConnKey == null ? "(未锁定，回退会话绑定)" : defaultConnKey);
-        return List.of(new StatusTool(defaultConnKey),
-                new SchemaTool(defaultConnKey),
-                new QueryTool(defaultConnKey));
+                defaultConnKey == null ? "(未锁定，回退会话绑定)" : defaultConnKey,
+                enableDdl ? "已开放" : "未开放");
+        List<AgentTool> tools = new ArrayList<>();
+        tools.add(new StatusTool(defaultConnKey));
+        tools.add(new SchemaTool(defaultConnKey));
+        tools.add(new QueryTool(defaultConnKey));
+        tools.add(new DmlTool(defaultConnKey));
+        if (enableDdl) {
+            tools.add(new DdlTool(defaultConnKey));
+        }
+        return List.copyOf(tools);
     }
 
     /**
@@ -142,6 +158,36 @@ public class DbMcpTools implements BuiltinMcpType {
                     .orElse(null);
         }
         return database == null ? null : serverKey + "/" + database;
+    }
+
+    /**
+     * 解析实例配置里的 DDL 开关（{@code enableDdl}）。默认关闭（fail-closed）：
+     * 配置缺失、脏 JSON、值不是字面量 {@code true} 一律视为未开放。
+     * <p>
+     * DDL 是极高危操作（多数库隐式提交不可回滚），必须用户在实例上显式手动开放才装配
+     * {@code db_ddl}；开放后每次执行仍走 {@code ToolPermissionPolicy.NON_BYPASSABLE}
+     * 强制人工确认——「手动开放」解决的是「有没有这个工具」，「每次确认」解决的是
+     * 「执行时人是否知情」，两道闸门独立生效。
+     */
+    private boolean resolveEnableDdl(McpServiceEntity instance) {
+        if (instance == null || instance.getImplementationConfig() == null
+                || instance.getImplementationConfig().isBlank()) {
+            return false;
+        }
+        try {
+            JsonNode node = CONFIG_MAPPER.readTree(instance.getImplementationConfig()).get("enableDdl");
+            if (node == null || node.isNull()) {
+                return false;
+            }
+            if (node.isBoolean()) {
+                return node.asBoolean();
+            }
+            return "true".equalsIgnoreCase(node.asText().trim());
+        } catch (Exception e) {
+            log.warn("解析内置 db 服务 DDL 开关失败 (service={}): {}",
+                    instance.getName(), e.getMessage());
+            return false;
+        }
     }
 
     private static String text(JsonNode node) {
@@ -373,6 +419,127 @@ public class DbMcpTools implements BuiltinMcpType {
             }).onErrorResume(ex -> {
                 log.error("db_query(MCP) 异常", ex);
                 return Mono.just(error("db_query 失败: " + ex.getMessage()));
+            });
+        }
+    }
+
+    // ==================== db_dml ====================
+
+    /**
+     * 数据变更工具（INSERT/UPDATE/DELETE/MERGE）。危险等级「高」：
+     * 权限层挂在 {@code ToolPermissionPolicy.NON_BYPASSABLE}——用户即使点了「永久允许」，
+     * 每次调用仍会弹人工确认；本类描述里如实告知模型这一约束，让它提前向用户说明。
+     */
+    private class DmlTool implements AgentTool {
+        private final String defaultConnKey;
+
+        DmlTool(String defaultConnKey) {
+            this.defaultConnKey = defaultConnKey;
+        }
+
+        @Override public String getName() { return "db_dml"; }
+        @Override public String getDescription() {
+            return "在本服务的目标库上执行一条数据变更语句（INSERT/UPDATE/DELETE/MERGE），返回影响行数。\n"
+                    + "【危险等级】⚠️ 高：直接修改生产数据。每次执行都会弹出人工确认，且该确认无法被永久授权跳过——"
+                    + "请在调用前向用户说明将要执行的语句与预期影响范围。\n"
+                    + "【何时用】用户明确要求修改数据时。先 db_query 核对目标行，再提交变更，执行后如实转述影响行数。\n"
+                    + "【边界】仅允许单条 DML 语句；查询用 db_query，结构变更用 db_ddl。目标库由平台装配决定，无法在参数里指定。";
+        }
+        @Override public Map<String, Object> getParameters() {
+            Map<String, Object> props = new LinkedHashMap<>();
+            props.put("sql", Map.of("type", "string",
+                    "description", "要执行的单条 DML 语句（INSERT/UPDATE/DELETE/MERGE）"));
+            Map<String, Object> schema = new LinkedHashMap<>();
+            schema.put("type", "object");
+            schema.put("properties", props);
+            schema.put("required", List.of("sql"));
+            return schema;
+        }
+        @Override public boolean isReadOnly() { return false; }
+        @Override public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.fromCallable(() -> {
+                String wid = workspaceId(param);
+                String sql = str(param.getInput().get("sql"));
+                if (wid == null) {
+                    return text("❌ 无法确定工作区上下文。");
+                }
+                if (sql == null || sql.isBlank()) {
+                    return text("❌ sql 不能为空。");
+                }
+                String connKey = resolveConnKey(param, defaultConnKey, wid);
+                if (connKey == null) {
+                    return text(noTarget());
+                }
+                DbConnectionService.DbSession session = db.session(wid, connKey);
+                if (session == null) {
+                    return text("❌ 目标库连接不存在或已断开：" + databaseOf(connKey)
+                            + "。请让用户在 DB 页面重新连接。");
+                }
+                // 编排（写语句校验/审计/执行/渲染）与查询同一份 DbQueryExecutor
+                return text(queryExecutor.executeWrite(session, sql, "DML", "ai"));
+            }).onErrorResume(ex -> {
+                log.error("db_dml(MCP) 异常", ex);
+                return Mono.just(error("db_dml 失败: " + ex.getMessage()));
+            });
+        }
+    }
+
+    // ==================== db_ddl ====================
+
+    /**
+     * 结构变更工具（CREATE/ALTER/DROP/TRUNCATE/RENAME/COMMENT）。危险等级「极高」：
+     * 多数数据库的 DDL 隐式提交、不可回滚，DROP/TRUNCATE 直接丢数据。
+     * 与 {@link DmlTool} 同样挂在 NON_BYPASSABLE——每次执行强制人工确认。
+     */
+    private class DdlTool implements AgentTool {
+        private final String defaultConnKey;
+
+        DdlTool(String defaultConnKey) {
+            this.defaultConnKey = defaultConnKey;
+        }
+
+        @Override public String getName() { return "db_ddl"; }
+        @Override public String getDescription() {
+            return "在本服务的目标库上执行一条结构变更语句（CREATE/ALTER/DROP/TRUNCATE/RENAME/COMMENT）。\n"
+                    + "【危险等级】🔴 极高：修改数据库结构，多数数据库隐式提交、不可回滚，DROP/TRUNCATE 会直接丢失数据。"
+                    + "每次执行都会弹出人工确认，且该确认无法被永久授权跳过——请在调用前向用户完整说明语句内容与后果。\n"
+                    + "【何时用】用户明确要求变更表结构/索引等数据库对象时。能不用就不用；能用 ALTER ADD COLUMN 完成的不要 DROP 重建。\n"
+                    + "【边界】仅允许单条 DDL 语句；数据变更用 db_dml，查询用 db_query。目标库由平台装配决定，无法在参数里指定。";
+        }
+        @Override public Map<String, Object> getParameters() {
+            Map<String, Object> props = new LinkedHashMap<>();
+            props.put("sql", Map.of("type", "string",
+                    "description", "要执行的单条 DDL 语句（CREATE/ALTER/DROP/TRUNCATE/RENAME/COMMENT）"));
+            Map<String, Object> schema = new LinkedHashMap<>();
+            schema.put("type", "object");
+            schema.put("properties", props);
+            schema.put("required", List.of("sql"));
+            return schema;
+        }
+        @Override public boolean isReadOnly() { return false; }
+        @Override public Mono<ToolResultBlock> callAsync(ToolCallParam param) {
+            return Mono.fromCallable(() -> {
+                String wid = workspaceId(param);
+                String sql = str(param.getInput().get("sql"));
+                if (wid == null) {
+                    return text("❌ 无法确定工作区上下文。");
+                }
+                if (sql == null || sql.isBlank()) {
+                    return text("❌ sql 不能为空。");
+                }
+                String connKey = resolveConnKey(param, defaultConnKey, wid);
+                if (connKey == null) {
+                    return text(noTarget());
+                }
+                DbConnectionService.DbSession session = db.session(wid, connKey);
+                if (session == null) {
+                    return text("❌ 目标库连接不存在或已断开：" + databaseOf(connKey)
+                            + "。请让用户在 DB 页面重新连接。");
+                }
+                return text(queryExecutor.executeWrite(session, sql, "DDL", "ai"));
+            }).onErrorResume(ex -> {
+                log.error("db_ddl(MCP) 异常", ex);
+                return Mono.just(error("db_ddl 失败: " + ex.getMessage()));
             });
         }
     }

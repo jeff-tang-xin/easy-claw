@@ -999,11 +999,22 @@ const UserMessage = memo(function UserMessage({ msg }: { msg: ChatMessage }) {
 });
 
 // ============ 确认弹窗 ============
+// 高危工具映射：确认弹窗展示危险等级徽章，并隐藏「本回合/永久允许」按钮。
+// 清单必须与后端 ToolPermissionPolicy.NON_BYPASSABLE 保持同步（增删两边同步）——
+// 后端对清单内工具无条件保留 ASK 规则（回合/永久授权都摘不掉），前端隐藏按钮
+// 只是让 UI 诚实：点了也没用的按钮不该出现。
+const DANGEROUS_TOOLS: Record<string, string> = {
+  db_dml: '⚠️ 高危 · 数据变更',
+  db_ddl: '🔴 极高危 · 结构变更（多数隐式提交不可回滚）',
+  remote_shell: '⚠️ 高危 · 远程命令执行',
+};
+
 function ConfirmDialog({ pending, onDecide, onClose }: {
   pending: PendingConfirm;
   onDecide: (action: 'once' | 'turn' | 'always' | 'deny') => void;
   onClose: () => void;
 }) {
+  const nonBypassable = pending.tools.some((t) => !!DANGEROUS_TOOLS[t.name]);
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1013,21 +1024,35 @@ function ConfirmDialog({ pending, onDecide, onClose }: {
         </div>
         {pending.tools.map((t, i) => (
           <div key={i} className="tool-card">
-            <div className="tool-name">{t.name}</div>
+            <div className="tool-name">
+              {t.name}
+              {DANGEROUS_TOOLS[t.name] && (
+                <span className="danger-badge">{DANGEROUS_TOOLS[t.name]}</span>
+              )}
+            </div>
             <pre>{t.input}</pre>
           </div>
         ))}
         <div className="modal-actions">
           <button className="btn primary" onClick={() => onDecide('once')}>✅ 允许这一次</button>
-          <button className="btn" onClick={() => onDecide('turn')}>🔄 本回合允许</button>
-          <button className="btn" onClick={() => onDecide('always')}>♾️ 永久允许</button>
+          {!nonBypassable && <button className="btn" onClick={() => onDecide('turn')}>🔄 本回合允许</button>}
+          {!nonBypassable && <button className="btn" onClick={() => onDecide('always')}>♾️ 永久允许</button>}
           <button className="btn danger" onClick={() => onDecide('deny')}>🚫 拒绝</button>
         </div>
         <div className="modal-hint">
           · 允许这一次：仅当前这次调用
-          · 本回合允许：本次对话中同类操作不再询问
-          · 永久允许：本工作区以后都不再询问（可在会话侧栏「🔐 授权」撤销）
+          {!nonBypassable && (
+            <>
+              <br />· 本回合允许：本次对话中同类操作不再询问
+              <br />· 永久允许：本工作区以后都不再询问（可在会话侧栏「🔐 授权」撤销）
+            </>
+          )}
         </div>
+        {nonBypassable && (
+          <div className="modal-hint" style={{ color: '#b91c1c', fontWeight: 600 }}>
+            ⚠️ 本次包含高危操作：不提供回合/永久授权，每次执行都需要人工确认。
+          </div>
+        )}
       </div>
     </div>
   );

@@ -80,7 +80,11 @@ public final class ToolPermissionPolicy {
             // 运维远程执行：命令在用户服务器上真实生效，必须每次显式确认。
             // 仅注册 ASK 规则还不够「无法绕过」——ops 场景同时停用白名单机制
             // （ScenarioResolver.whitelistEnabled），回合/永久授权都不会摘掉这条 ASK 规则
-            "remote_shell"
+            "remote_shell",
+            // 数据库写操作（DML/DDL）：语句在目标库真实生效。必须与 NON_BYPASSABLE 成对出现——
+            // 只进本清单时用户「永久允许」后 ASK 规则会被跳过（见 buildPermissionContext），
+            // 写库就变成免确认；NON_BYPASSABLE 让 ASK 规则无条件保留
+            "db_dml", "db_ddl"
     );
 
     /**
@@ -91,10 +95,17 @@ public final class ToolPermissionPolicy {
      * 对 write_file / execute 这是合理的（本地沙箱内，用户自愿承担就不再打断）；
      * 但 {@code remote_shell} 现在能被内置能力实例带进 solo 场景，同一条跳过逻辑会让
      * 「在生产服务器上执行任意命令」变成免确认 —— 那是安全降级，不是便利。
+     * {@code db_dml}/{@code db_ddl} 同理：语句在目标库真实生效，DDL 多数隐式提交不可回滚，
+     * 「永久允许后免确认写生产库」不可接受。
      * <p>
      * 清单内工具<b>无条件</b>保留 ASK，忽略用户永久允许：确认强度不低于专属 ops 工作区。
+     * <p>
+     * <b>同步义务</b>：前端确认弹窗按工具名识别本清单成员（隐藏「永久允许」按钮并展示
+     * 危险等级徽章），映射表在 {@code ChatPage.tsx} 的 {@code DANGEROUS_TOOLS}——
+     * 两边增删必须同步。
      */
-    private static final List<String> NON_BYPASSABLE = List.of("remote_shell");
+    private static final List<String> NON_BYPASSABLE =
+            List.of("remote_shell", "db_dml", "db_ddl");
 
     /** 不可被「永久允许」摘掉确认的工具名（保持声明顺序） */
     public static List<String> nonBypassable() {
