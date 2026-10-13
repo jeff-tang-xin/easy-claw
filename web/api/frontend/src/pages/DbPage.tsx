@@ -101,6 +101,13 @@ interface PendingConfirm {
   tools: { id: string; name: string; input: unknown }[];
 }
 
+/** 高危工具 → 危险等级徽章（与后端 NON_BYPASSABLE 清单同步：这些工具每次执行都必须人工确认） */
+const DANGEROUS_TOOLS: Record<string, string> = {
+  db_dml: '⚠️ 高危 · 数据变更',
+  db_ddl: '🔴 极高危 · 结构变更（多数隐式提交不可回滚）',
+  remote_shell: '⚠️ 高危 · 远程命令',
+};
+
 /** 右侧栏「库选择」展开状态：serverKey → 该连接实例的库清单（懒加载） */
 interface DbPickerState {
   serverKey: string;
@@ -918,13 +925,18 @@ export default function DbPage() {
           </div>
           )}
 
-          {/* 确认条：真实 SQL + 允许一次/拒绝（db 场景无白名单机制，不渲染永久授权按钮） */}
+          {/* 确认条：真实 SQL + 危险等级徽章 + 允许一次/拒绝（db 场景无白名单机制，不渲染永久授权按钮） */}
           {activeConfirm && activeTab && (
             <div className="ops-confirm db-confirm">
               <div className="db-confirm-body">
                 <strong>⏸ 待确认（{activeConfirm.tools.map((t) => t.name).join('、')}）</strong>
                 {activeConfirm.tools.map((t) => (
-                  <pre key={t.id} className="db-confirm-sql">{toolInputText(t.input)}</pre>
+                  <div key={t.id}>
+                    {DANGEROUS_TOOLS[t.name] && (
+                      <span className="db-confirm-risk">{DANGEROUS_TOOLS[t.name]}</span>
+                    )}
+                    <pre className="db-confirm-sql">{toolInputText(t.input)}</pre>
+                  </div>
                 ))}
               </div>
               <button className="ops-confirm-allow" onClick={() => sendConfirm('once')}>允许一次</button>

@@ -233,6 +233,19 @@
   margin-bottom: 8px;
 }
 
+/* 高危工具危险等级徽章（db_dml/db_ddl/remote_shell，与后端 NON_BYPASSABLE 清单同步） */
+.db-confirm-risk {
+  display: inline-block;
+  margin: 4px 0;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #d4380d;
+  background: #fff2e8;
+  border: 1px solid #ffbb96;
+}
+
 /* 待确认 SQL：警告淡底三件套（执行前的人工闸口） */
 .db-confirm-sql {
   margin: 4px 0;

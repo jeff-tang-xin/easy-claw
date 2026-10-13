@@ -54,7 +54,7 @@ public class SystemDataSeeder {
         seedDingtalkTemplate();
         seedFeishuTemplate();
         seedWecomTemplate();
-        seedBuiltinDbService();
+        removeBuiltinDbService();
         seedBuiltinSubagents();
         seedScenarios();
         backfillWorkspaceType();
@@ -62,30 +62,20 @@ public class SystemDataSeeder {
     }
 
     /**
-     * 播种内置数据库 MCP 服务 {@code easyclaw-db}（设计定稿 §4.0.1 双消费壳之二）。
+     * 清理存量内置数据库 MCP 服务 {@code easyclaw-db}（V32 定稿：db 能力不走 MCP）。
      * <p>
-     * 与 HTTP_TOOL 模板不同：它不是「可复制模板」而是直接可用的 SYSTEM 服务——
-     * transport=BUILTIN，connect 时由 McpConnectionServiceImpl 进程内装配 DbMcpTools
-     * 的三个工具（db_status/db_schema/db_query），工具实现委托 db 服务层，
-     * 连接数据来自 hub 下发快照（授权闭环由 DbConnectionGuard 兜底）。
+     * db 的 AI 能力改为两条直供通道：SOLO 工作区绑定数据库资源 → 直注册 DbTools
+     * （db_query/db_dml）；DB 工作台（专属 db 工作区）→ 直注册 DbTools 全量（含 db_ddl）。
+     * 内置 MCP 类型 db 已删除，存量 SYSTEM 单例留着会显示在 MCP 页面（半成品观感）、
+     * 激活会报「类型未注册」——启动时直接清理。场景绑定清单里若还引用它，
+     * 装配时因服务不存在自然跳过（getActivatedToolsByService 无此条目），无需迁移。
      */
-    private void seedBuiltinDbService() {
+    private void removeBuiltinDbService() {
         Optional<McpServiceEntity> existing = mcpRepo.findByNameAndScope("easyclaw-db", "SYSTEM");
-        if (existing.isPresent()) {
-            return;
-        }
-        McpServiceEntity entity = McpServiceEntity.builder()
-                .name("easyclaw-db")
-                .description("【内置】数据库查询服务：db_status / db_schema / db_query。"
-                        + "连接来自平台下发的授权数据库（DB 页面建立连接后可用），仅允许只读查询，"
-                        + "所有 AI 查询都会上报平台审计。")
-                .transport("BUILTIN")
-                .mcpType("db")
-                .scope("SYSTEM")
-                .isConnected(false)
-                .build();
-        mcpRepo.save(entity);
-        log.info("播种内置数据库 MCP 服务: easyclaw-db");
+        existing.ifPresent(e -> {
+            mcpRepo.delete(e);
+            log.info("已清理存量内置数据库 MCP 服务: easyclaw-db（db 能力改由工作区绑定与 DB 工作台直供，不走 MCP）");
+        });
     }
 
     /**

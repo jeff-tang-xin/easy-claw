@@ -14,23 +14,35 @@ import org.springframework.stereotype.Component;
 /**
  * 数据库场景工具（仅在激活「DB 工作区」场景的工作区装配，见 WorkspaceAgentBuilder）。
  * <p>
- * 三个工具（设计定稿）：
+ * 六个工具：
  * <ul>
  *   <li>{@code db_status}：当前连接的数据库类型/版本/只读状态；</li>
  *   <li>{@code db_schema}：看表结构——保留 database 参数（看别的库结构合理）；</li>
  *   <li>{@code db_query}：执行只读查询——<b>无 database 参数</b>，作用域锁定会话绑定库，
- *       跨库 JOIN 用 SQL 限定名。</li>
+ *       跨库 JOIN 用 SQL 限定名；</li>
+ *   <li>{@code db_dml}：数据变更（INSERT/UPDATE/DELETE/MERGE）——⚠️ 高危；</li>
+ *   <li>{@code db_ddl}：结构变更（CREATE/ALTER/DROP/TRUNCATE 等）——🔴 极高危；</li>
+ *   <li>{@code db_report} / {@code db_dashboard}：分析产出保存。</li>
  * </ul>
- * 权限语义（V31）：三工具静默放行（ToolPermissionPolicy SILENTLY_ALLOWED）——
- * db_status/db_schema 是纯元数据读取；db_query 有 {@link DbQueryGuard} 只读防线
- * （首词白名单 + 危险子句定位匹配），物理防线是 DB 只读账号，行为层不再逐次弹确认。
+ * 权限语义（V31/V32）：db_status/db_schema 静默放行（纯元数据读取）；db_query 有
+ * {@link DbQueryGuard} 只读防线（首词白名单 + 危险子句定位匹配），物理防线是 DB 只读账号，
+ * 行为层不再逐次弹确认。<b>db_dml/db_ddl 是写通道</b>：语句白名单防线
+ * （{@code DbQueryGuard.checkWrite}：顶层 WHERE 强制、多语句/可执行注释/库级/代码与权限对象拒）
+ * + {@code ToolPermissionPolicy} 的 EXPLICIT_ASK + NON_BYPASSABLE——每次执行必弹人工确认，
+ * 回合/永久授权都摘不掉（与 remote_shell 同款）。物理防线仍是 DB 账号权限：
+ * 只读账号下写语句会被数据库本身拒绝，本防线是行为层。
  * <p>
  * 呈现双通道（设计定稿）：给 AI 的查询结果经 {@link DbResultSanitizer} 脱敏 + 三重截断；
  * 用户在确认弹窗看真实 SQL、在聊天流看渲染后的 Markdown。
  * <p>
  * V30.1：查询/表结构的编排序列（guard → 审计 → 执行 → 渲染）收口到
- * {@link DbQueryExecutor} 单实现，本类只保留上下文解析与工具声明——与内置 MCP 通道
- * （{@code DbMcpTools}）共享同一份编排，杜绝双份拷贝漂移。
+ * {@link DbQueryExecutor} 单实现，本类只保留上下文解析与工具声明——DB 工作台与
+ * SOLO 绑定共用同一份编排，杜绝双份拷贝漂移。V32：写操作走同一编排器的
+ * {@code executeWrite}（校验 → 审计 → executeUpdate → 影响行数如实返回）。
+ * <p>
+ * <b>V32 定稿：db 能力不走内置 MCP 类型</b>——本类既是 DB 工作台（专属 db 工作区，
+ * 全量工具）也是 SOLO 工作区绑定数据库资源后的工具来源（直注册后裁剪到
+ * db_query/db_dml，见 {@code WorkspaceAgentBuilder.registerDbBinding}）。
  */
 @Component
 public class DbTools {
@@ -104,6 +116,44 @@ public class DbTools {
             return notConnected();
         }
         return queryExecutor.executeQuery(session, sql, "ai");
+    }
+
+    // ==================== db_dml ====================
+
+    @Tool(name = "db_dml", description = "在当前会话绑定的库上执行一条数据变更（INSERT/UPDATE/DELETE/MERGE），返回影响行数。⚠️ 高危：每次执行都会弹窗请用户确认，无法被回合/永久授权跳过。\n"
+            + "【何时用】用户明确要求改数据时。调用前先向用户说明要执行的语句与影响范围；UPDATE/DELETE 必须带 WHERE（防全表改/删，缺 WHERE 会被拒绝）。\n"
+            + "【边界】仅允许单条 DML；SELECT 请用 db_query，DDL（CREATE/ALTER/DROP 等）会被拒绝——结构变更用 db_ddl。多语句拼接、MySQL 可执行注释、库级与函数/存储过程/触发器/用户/角色操作一律拒绝。")
+    public String dbDml(
+            @ToolParam(name = "sql", description = "要执行的单条 DML 语句（INSERT/UPDATE/DELETE/MERGE，必须带 WHERE）") String sql,
+            WorkspaceContext workspace,
+            RuntimeContext rc) {
+        if (sql == null || sql.isBlank()) {
+            return "❌ sql 不能为空。";
+        }
+        DbConnectionService.DbSession session = resolveSession(workspace, rc);
+        if (session == null) {
+            return notConnected();
+        }
+        return queryExecutor.executeWrite(session, sql, "DML", "ai");
+    }
+
+    // ==================== db_ddl ====================
+
+    @Tool(name = "db_ddl", description = "在当前会话绑定的库上执行一条结构变更（CREATE/ALTER/DROP/TRUNCATE/RENAME/COMMENT），返回执行结果。🔴 极高危：多数 DDL 隐式提交不可回滚；每次执行都会弹窗请用户确认，无法被回合/永久授权跳过。\n"
+            + "【何时用】用户明确要求改表结构时。先 db_schema 看清现状再动手，并向用户说明变更内容与不可回滚风险。\n"
+            + "【边界】仅允许单条 DDL；库级操作（CREATE/ALTER/DROP DATABASE/SCHEMA）、函数/存储过程/触发器/事件/用户/角色/会话/实例级操作会被拒绝——此类变更请让用户评审后手动执行。")
+    public String dbDdl(
+            @ToolParam(name = "sql", description = "要执行的单条 DDL 语句（CREATE/ALTER/DROP/TRUNCATE/RENAME/COMMENT）") String sql,
+            WorkspaceContext workspace,
+            RuntimeContext rc) {
+        if (sql == null || sql.isBlank()) {
+            return "❌ sql 不能为空。";
+        }
+        DbConnectionService.DbSession session = resolveSession(workspace, rc);
+        if (session == null) {
+            return notConnected();
+        }
+        return queryExecutor.executeWrite(session, sql, "DDL", "ai");
     }
 
     // ==================== db_report ====================

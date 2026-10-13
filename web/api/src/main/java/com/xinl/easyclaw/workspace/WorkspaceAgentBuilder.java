@@ -102,6 +102,23 @@ public class WorkspaceAgentBuilder {
      */
     @Autowired(required = false)
     private com.xinl.easyclaw.workspace.repository.WorkspaceRepository workspaceRepository;
+
+    /**
+     * db 直注册工具集（可选，V32 定稿）：工作区绑定数据库资源后，SOLO 工具面<b>直接注册</b>
+     * {@code db_query/db_dml}——db 能力不走内置 MCP 类型（那条路对 db 而言是半成品：
+     * 实例管理、授权收窄、连接建立三个环节割裂）。
+     */
+    @Autowired(required = false)
+    private com.xinl.easyclaw.tools.DbTools dbTools;
+
+    /** 绑定数据库资源的装配期自动建连（密码取 hub 下发快照，不经模型）；容忍 null */
+    @Autowired(required = false)
+    private com.xinl.easyclaw.db.service.DbConnectionService dbConnectionService;
+
+    /** hub 下发资源快照（自动建连时解析默认库与密码）；容忍 null */
+    @Autowired(required = false)
+    private com.xinl.easyclaw.config.CloudBootstrapService cloudBootstrapService;
+
     private final SessionRegistry sessionRegistry;
     /** SPI 智能体注册表：模型偏好 / 人格 / 工具策略的声明来源 */
     private final com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry;
@@ -680,15 +697,11 @@ public class WorkspaceAgentBuilder {
     }
 
     /**
-     * 把工作区绑定的平台资源（数据库 / 运维服务器）派生成内置能力实例装进 toolkit。
-     * <p>
-     * 为什么派生而不是另写一套执行逻辑：绑定与「MCP 页手工创建的内置实例」语义完全相同
-     * （一个类型锁一个目标），差别只在配置来源。走同一条 {@code toolsFor} 路径后，目标解析、
-     * 只暴露能力不暴露地址、逐条强制确认、自主建连与审计上报<b>只有一份实现</b>——db 侧历史上
-     * 曾有两条通道各自漂移，教训在前。
+     * 把工作区绑定的平台资源装进 toolkit：数据库 → 直注册 DbTools（V32 定稿，不走 MCP）；
+     * 运维服务器 → 派生内置能力实例（ops 仍走 MCP 机制）。
      */
     private void bindWorkspaceResources(io.agentscope.core.tool.Toolkit toolkit, String workspaceId) {
-        if (builtinMcpRegistry == null || workspaceRepository == null) {
+        if (workspaceRepository == null) {
             return;
         }
         com.xinl.easyclaw.workspace.entity.WorkspaceEntity entity =
@@ -697,28 +710,98 @@ public class WorkspaceAgentBuilder {
             return;
         }
         registerBoundResources(toolkit, builtinMcpRegistry, workspaceId,
-                entity.getDbServerKey(), entity.getOpsServerKey());
+                entity.getDbServerKey(), entity.getOpsServerKey(), dbTools);
+        ensureDbConnection(workspaceId, entity.getDbServerKey());
     }
 
     /**
-     * 把工作区绑定的资源派生成内置能力工具装进 toolkit。
+     * 绑定数据库资源的装配期自动建连：密码取 hub 下发快照（仅服务端持有，不经模型），
+     * 与 ops 内置能力的自主建连同款语义。失败只告警不阻断装配——工具仍在，AI 调用时报未连接。
+     * {@code DbConnectionService.connect} 对同 (workspaceId, connKey) 幂等复用，Agent 重建不会重复建连。
+     */
+    private void ensureDbConnection(String workspaceId, String serverKey) {
+        if (serverKey == null || serverKey.isBlank()
+                || dbConnectionService == null || cloudBootstrapService == null) {
+            return;
+        }
+        try {
+            com.xinl.easyclaw.config.SpokeDbConnectionView cfg =
+                    cloudBootstrapService.findDbConnection(serverKey.trim()).orElse(null);
+            if (cfg == null) {
+                log.warn("工作区 {} 绑定的数据库 {} 不在平台下发清单中，跳过自动建连", workspaceId, serverKey);
+                return;
+            }
+            dbConnectionService.connect(workspaceId, serverKey.trim(), cfg.databaseName(), cfg.password());
+            log.info("工作区 {} 绑定的数据库 {} 已自动建连（默认库 {}）",
+                    workspaceId, serverKey, cfg.databaseName());
+        } catch (Exception ex) {
+            log.warn("工作区 {} 绑定数据库 {} 自动建连失败（库不可达或授权变化；AI 调用 db 工具时会报未连接）: {}",
+                    workspaceId, serverKey, ex.getMessage());
+        }
+    }
+
+    /**
+     * 把工作区绑定的资源装进 toolkit。
      * <p>
      * <b>静态且参数显式</b>：本类构造参数已十余个，实例方法在单测里几乎起不来；而「绑定了就该
      * 有工具、没绑定就不该有、与场景实例同名要让位」这三条恰恰是最该钉住的行为，不该只能靠人工
      * 联调来保证。
      *
+     * @param dbTools db 直注册工具集（可为 null——无 Spring 上下文时 db 绑定不生效）
      * @return 实际注册进 toolkit 的工具名（未绑定与让位的都不在其中）
      */
     static List<String> registerBoundResources(io.agentscope.core.tool.Toolkit toolkit,
                                                com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry registry,
                                                String workspaceId,
-                                               String dbServerKey, String opsServerKey) {
+                                               String dbServerKey, String opsServerKey,
+                                               com.xinl.easyclaw.tools.DbTools dbTools) {
         List<String> registered = new java.util.ArrayList<>();
-        registered.addAll(registerBoundResource(toolkit, registry, workspaceId, "db",
-                WorkspaceResourceService.KIND_DB, dbServerKey));
-        registered.addAll(registerBoundResource(toolkit, registry, workspaceId, "ops",
-                WorkspaceResourceService.KIND_OPS, opsServerKey));
+        registered.addAll(registerDbBinding(toolkit, workspaceId, dbServerKey, dbTools));
+        if (registry != null) {
+            registered.addAll(registerBoundResource(toolkit, registry, workspaceId, "ops",
+                    WorkspaceResourceService.KIND_OPS, opsServerKey));
+        }
         return registered;
+    }
+
+    /** SOLO 工具面保留的 db 工具（V32 定稿）：查询 + 数据变更 + 表结构辅助；结构变更（db_ddl）只属于 DB 工作台 */
+    private static final Set<String> SOLO_DB_TOOLS = Set.of("db_query", "db_dml", "db_schema");
+
+    /**
+     * 工作区绑定的数据库资源 → 直注册 DbTools（V32 定稿：db 能力不走内置 MCP 类型）。
+     * <p>
+     * DbTools 是 @Tool 注解 bean：整 bean 注册后移除 SOLO 工具面之外的
+     * （db_ddl 只属于 DB 工作台；db_schema/db_status/db_report/db_dashboard 不进 SOLO）。
+     * 场景绑定已提供 db 工具时整体让位（场景边界优先，与 ops 同一语义）。
+     */
+    private static List<String> registerDbBinding(io.agentscope.core.tool.Toolkit toolkit,
+                                                  String workspaceId, String serverKey,
+                                                  com.xinl.easyclaw.tools.DbTools dbTools) {
+        if (serverKey == null || serverKey.isBlank()) {
+            return List.of();
+        }
+        if (dbTools == null) {
+            log.warn("工作区 {} 绑定了数据库资源 {}，但 DbTools 未装配，能力不生效", workspaceId, serverKey);
+            return List.of();
+        }
+        Set<String> present = toolkit.getToolSchemas().stream()
+                .map(io.agentscope.core.model.ToolSchema::getName)
+                .collect(java.util.stream.Collectors.toSet());
+        if (present.contains("db_query") || present.contains("db_dml") || present.contains("db_schema")) {
+            log.warn("工具 db_query/db_dml 已由场景绑定的 MCP 实例提供，工作区数据库绑定让位"
+                            + "（workspaceId={}, 绑定的db={}）；请二选一配置，避免歧义",
+                    workspaceId, serverKey);
+            return List.of();
+        }
+        toolkit.registration().tool(dbTools).apply();
+        for (String name : toolkit.getToolNames()) {
+            if (name.startsWith("db_") && !SOLO_DB_TOOLS.contains(name)) {
+                toolkit.removeTool(name);
+            }
+        }
+        log.info("工作区资源绑定已直注册 db 工具 {}: workspaceId={}, dbServerKey={}",
+                SOLO_DB_TOOLS, workspaceId, serverKey);
+        return List.copyOf(SOLO_DB_TOOLS);
     }
 
     /**
