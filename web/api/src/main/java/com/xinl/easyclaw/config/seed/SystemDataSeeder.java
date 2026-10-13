@@ -80,6 +80,7 @@ public class SystemDataSeeder {
                         + "连接来自平台下发的授权数据库（DB 页面建立连接后可用），仅允许只读查询，"
                         + "所有 AI 查询都会上报平台审计。")
                 .transport("BUILTIN")
+                .mcpType("db")
                 .scope("SYSTEM")
                 .isConnected(false)
                 .build();

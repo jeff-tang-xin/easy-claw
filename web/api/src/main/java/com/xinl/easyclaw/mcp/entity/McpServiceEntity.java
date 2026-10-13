@@ -61,6 +61,17 @@ public class McpServiceEntity {
     private String transport;
 
     /**
+     * 内置能力类型（{@code transport = BUILTIN} 时必填），取值见
+     * {@link com.xinl.easyclaw.mcp.type.BuiltinMcpType#typeId()}，如 {@code db}。
+     * <p>
+     * <b>为什么需要这一列</b>：内置服务历史上靠 {@code name} 字符串识别，等于「内置即单例」——
+     * 用户建不出第二个数据库服务，也无法把能力绑定到指定智能体。类型标识让同一类型
+     * 可以实例化成 N 个服务，各自带配置、各自可绑定。
+     */
+    @Column(name = "mcp_type", length = 32)
+    private String mcpType;
+
+    /**
      * HTTP 传输时的 MCP 端点 URL（STREAMABLE_HTTP 或 SSE）
      */
     @Column(name = "url", length = 500)
@@ -226,6 +237,11 @@ public class McpServiceEntity {
     public String resolveTransport() {
         if (transport != null && !transport.isBlank()) {
             return transport.toUpperCase();
+        }
+        // 内置能力类型优先于其余推断：mcpType 有值即声明「这是进程内直调的本地能力实例」，
+        // 必须落到 BUILTIN 分支，不能被当成外部 MCP 去建连（无 command/url 会直接报错）。
+        if (mcpType != null && !mcpType.isBlank()) {
+            return "BUILTIN";
         }
         if (implementationConfig != null && !implementationConfig.isBlank()) {
             return "HTTP_TOOL";

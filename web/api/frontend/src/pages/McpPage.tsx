@@ -16,6 +16,7 @@ interface McpService {
   timeoutSeconds?: number;
   initTimeoutSeconds?: number;
   implementationConfig?: string;
+  mcpType?: string;
   isConnected?: boolean;
   serverName?: string;
   serverTitle?: string;
@@ -27,6 +28,33 @@ interface McpService {
   isTemplate?: boolean;
   scope?: string;
   workspaceId?: string;
+}
+
+/** 内置能力类型的配置字段（后端 BuiltinMcpType.configSchema 下发，前端按描述渲染） */
+interface BuiltinTypeField {
+  key: string;
+  label?: string;
+  type?: string;
+  required?: boolean;
+  description?: string;
+  placeholder?: string;
+  /** 候选源标识：由后端展开成实际选项（如 hub 下发的数据库连接） */
+  optionsSource?: string;
+  options?: { value: string; label: string; database?: string; hasPassword?: boolean }[];
+}
+
+/** 内置能力类型：数据库实例等「进程内能力」的可配置外壳 */
+interface BuiltinType {
+  typeId: string;
+  displayName: string;
+  configSchema: BuiltinTypeField[];
+}
+
+/** 智能体能力绑定条目（后端 AgentCapabilityController.CapabilityView） */
+interface CapabilityView {
+  kind: string;
+  name: string;
+  enabled: boolean;
 }
 
 interface WorkspaceRef {
@@ -152,6 +180,34 @@ function buildHttpToolConfig(form: HttpToolForm): string {
   return JSON.stringify(obj);
 }
 
+/**
+ * 内置能力实例的配置：implementationConfig 就是一个扁平的 {字段: 值} 对象
+ * （存的是 serverKey / database 这类<b>引用</b>，凭证永远不落在这一层）。
+ */
+function parseBuiltinConfig(json: string | undefined): Record<string, string> {
+  if (!json) return {};
+  try {
+    const obj = JSON.parse(json);
+    const out: Record<string, string> = {};
+    Object.entries(obj || {}).forEach(([k, v]) => {
+      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+        out[k] = String(v);
+      }
+    });
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function buildBuiltinConfig(form: Record<string, string>): string {
+  const obj: Record<string, string> = {};
+  Object.entries(form).forEach(([k, v]) => {
+    if (k.trim() && v !== undefined && v !== '') obj[k.trim()] = v;
+  });
+  return Object.keys(obj).length ? JSON.stringify(obj) : '';
+}
+
 const PARAM_TYPES = ['string', 'integer', 'number', 'boolean', 'array', 'object'];
 const PARAM_IN = ['query', 'path', 'body'] as const;
 
@@ -165,6 +221,14 @@ export default function McpPage() {
   const [editMode, setEditMode] = useState<'form' | 'json' | 'copy'>('form');
   const [jsonText, setJsonText] = useState('');
   const [httpForm, setHttpForm] = useState<HttpToolForm>({method: 'GET', url: '', bodyMode: 'json', params: []});
+  /** 内置能力类型清单：决定「内置实例」表单渲染哪些字段与候选项 */
+  const [builtinTypes, setBuiltinTypes] = useState<BuiltinType[]>([]);
+  /** 内置实例的配置值：字段 key → 值 */
+  const [builtinForm, setBuiltinForm] = useState<Record<string, string>>({});
+  /** 可绑定的智能体（含主控）：能力绑定选择器的数据源 */
+  const [agents, setAgents] = useState<{ agentId: string; displayName: string }[]>([]);
+  /** MCP 服务名 → 已获授权的 agentId 列表（反向索引，卡片直接按服务名查） */
+  const [agentGrants, setAgentGrants] = useState<Record<string, string[]>>({});
   const [copyTarget, setCopyTarget] = useState<{templateId: number; scope: string; workspaceId: string} | null>(null);
   const [toolStates, setToolStates] = useState<Record<number, {available: string[]; enabled: string[]}>>({});
 
@@ -200,7 +264,37 @@ export default function McpPage() {
       setError(String(e));
     }
   };
-  useEffect(() => { load(); loadTemplates(); loadWorkspaces(); }, []);
+  const loadBuiltinTypes = async () => {
+    try {
+      setBuiltinTypes(await getJson<BuiltinType[]>('/api/mcp/builtin-types'));
+    } catch { /* 拉不到就只显示外部传输类型，不影响既有服务管理 */ }
+  };
+  /**
+   * 拉智能体名单并汇总「谁被授权了哪个 MCP 服务」。
+   * 主控 main 也要列进来：/api/agents 刻意排除 main（避免把工作流执行节点选成主控自己），
+   * 但能力绑定需要能直接给主控授权。
+   */
+  const loadAgents = async () => {
+    try {
+      const list = await getJson<{ agentId: string; displayName: string }[]>('/api/agents');
+      const all = [{agentId: 'main', displayName: '主控'}, ...list];
+      setAgents(all);
+      const per = await Promise.all(all.map(async a => {
+        try {
+          const caps = await getJson<CapabilityView[]>(`/api/agents/${a.agentId}/capabilities?kind=mcp`);
+          return [a.agentId, caps.filter(c => c.enabled).map(c => c.name)] as const;
+        } catch {
+          return [a.agentId, [] as string[]] as const;
+        }
+      }));
+      const grants: Record<string, string[]> = {};
+      per.forEach(([id, names]) => names.forEach(n => {
+        (grants[n] ||= []).push(id);
+      }));
+      setAgentGrants(grants);
+    } catch { /* 名单拉不到时绑定区块不显示，不影响服务管理 */ }
+  };
+  useEffect(() => { load(); loadTemplates(); loadWorkspaces(); loadBuiltinTypes(); loadAgents(); }, []);
 
   const loadToolsForService = async (id: number) => {
     try {
@@ -231,6 +325,35 @@ export default function McpPage() {
     }
   };
 
+  /**
+   * 勾选 / 取消「本服务授权给某智能体」。
+   * <p>
+   * 提交的是<b>该智能体的服务全集</b>（整组覆盖），不是单条增量：后端 replace 语义按 kind
+   * 整组替换，只发增量会把该 agent 其他服务的绑定一起冲掉。
+   */
+  const toggleGrant = async (serviceName: string, agentId: string, checked: boolean) => {
+    const current = Object.keys(agentGrants).filter(n => (agentGrants[n] || []).includes(agentId));
+    const next = checked
+      ? [...new Set([...current, serviceName])]
+      : current.filter(n => n !== serviceName);
+    try {
+      await putJson(`/api/agents/${agentId}/capabilities?kind=mcp`,
+        next.map(n => ({name: n, enabled: true})));
+      setAgentGrants(prev => {
+        const copy: Record<string, string[]> = {...prev};
+        Object.keys(copy).forEach(n => {
+          copy[n] = (copy[n] || []).filter(a => a !== agentId);
+        });
+        next.forEach(n => {
+          (copy[n] ||= []).push(agentId);
+        });
+        return copy;
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
   const save = async () => {
     if (!editing) return;
     const toSave: McpService = {...editing};
@@ -246,6 +369,24 @@ export default function McpPage() {
       toSave.implementationConfig = buildHttpToolConfig(httpForm);
       toSave.url = httpForm.url;
       toSave.command = ''; toSave.args = ''; toSave.env = ''; toSave.cwd = '';
+    }
+    // 内置能力实例：配置里只存「引用」（serverKey / database），凭证一律不落在这一层
+    if (transport === 'BUILTIN') {
+      const type = builtinTypes.find(t => t.typeId === toSave.mcpType);
+      if (!type) {
+        alert('请选择内置能力类型');
+        return;
+      }
+      const missing = type.configSchema
+        .filter(f => f.required && !(builtinForm[f.key] || '').trim())
+        .map(f => f.label || f.key);
+      if (missing.length) {
+        alert(`内置实例缺少必填配置：${missing.join('、')}`);
+        return;
+      }
+      toSave.implementationConfig = buildBuiltinConfig(builtinForm);
+      toSave.url = ''; toSave.command = ''; toSave.args = ''; toSave.env = ''; toSave.cwd = '';
+      toSave.headers = '';
     }
     try {
       if (toSave.id) await putJson(`/api/mcp/${toSave.id}`, toSave);
@@ -342,18 +483,21 @@ export default function McpPage() {
     if (s.transport) return s.transport;
     if (s.implementationConfig) return 'HTTP_TOOL';
     if (s.command) return 'STDIO';
+    // 内置能力实例：transport=BUILTIN 或带类型标识都按内置处理（不发起网络连接）
+    if (s.transport === 'BUILTIN' || s.mcpType) return 'BUILTIN';
     if (s.url) return s.url.toLowerCase().endsWith('/sse') ? 'SSE' : 'STREAMABLE_HTTP';
     return 'STREAMABLE_HTTP';
   };
 
   const openNewForm = () => {
     setEditing({
-      id: 0, name: '', description: '', transport: 'STDIO',
+      id: 0, name: '', description: '', transport: 'STDIO', mcpType: '',
       command: '', args: '[]', env: '{}', cwd: '',
       url: '', headers: '{}',
       scope: 'GLOBAL', workspaceId: '',
     });
     setHttpForm({method: 'GET', url: '', bodyMode: 'json', params: []});
+    setBuiltinForm({});
     setEditMode('form');
   };
 
@@ -362,6 +506,8 @@ export default function McpPage() {
     if (inferTransport(m) === 'HTTP_TOOL') {
       setHttpForm(parseHttpToolConfig(m.implementationConfig, m.url));
     }
+    // 内置实例：配置回填到表单，编辑时不会让用户直接面对 JSON 文本
+    setBuiltinForm(parseBuiltinConfig(m.implementationConfig));
     setEditMode('form');
   };
 
@@ -403,7 +549,12 @@ export default function McpPage() {
       {tab === 'services' && (
         <div className="mcp-card-grid">
           {items.map((m) => {
-            const transportLabel = m.transport?.toLowerCase()
+            // 内置实例显示成「内置·数据库」而不是裸的 builtin：用户关心的是它提供什么能力
+            const builtinLabel = (m.transport === 'BUILTIN' || m.mcpType)
+              ? `内置·${builtinTypes.find(t => t.typeId === m.mcpType)?.displayName || m.mcpType || '能力'}`
+              : '';
+            const transportLabel = builtinLabel
+              || m.transport?.toLowerCase()
               || (m.implementationConfig ? 'http_tool' : m.command ? 'stdio' : 'http');
             const transportBadgeClass = transportLabel === 'stdio' ? 'blue'
               : transportLabel === 'http_tool' ? 'orange' : '';
@@ -447,6 +598,28 @@ export default function McpPage() {
                 )}
                 {m.isConnected && tools.length === 0 && (
                   <div className="hint" style={{fontSize: 12, padding: '4px 0'}}>无可用工具</div>
+                )}
+                {/* 能力授权：决定「哪些智能体的白名单里会出现这个服务的工具」。
+                    内置实例即便未连接也可先授权——工具面由实例配置静态推导，不依赖连接。 */}
+                {agents.length > 0 && (
+                  <div className="mcp-tools-section">
+                    <div className="mcp-tools-title">授权智能体</div>
+                    <div className="mcp-tools-list">
+                      {agents.map(a => (
+                        <label key={a.agentId} className="mcp-tool-item" title={a.displayName}>
+                          <input
+                            type="checkbox"
+                            checked={(agentGrants[m.name] || []).includes(a.agentId)}
+                            onChange={e => toggleGrant(m.name, a.agentId, e.target.checked)}
+                          />
+                          <span>{a.agentId}</span>
+                        </label>
+                      ))}
+                    </div>
+                    <div className="hint" style={{fontSize: 12}}>
+                      场景若已绑定 MCP 服务，仍需场景包含本服务才生效（页面绑定只能收窄，不能越过场景边界）。
+                    </div>
+                  </div>
                 )}
                 <div className="mcp-card-actions">
                   {m.scope !== 'SYSTEM' && (
@@ -592,6 +765,9 @@ export default function McpPage() {
                     <option value="STREAMABLE_HTTP">Streamable HTTP（远程 MCP）</option>
                     <option value="SSE">SSE（旧版兼容）</option>
                     <option value="HTTP_TOOL">REST API 桥接（内置）</option>
+                    {builtinTypes.length > 0 && (
+                      <option value="BUILTIN">🧩 内置能力实例（数据库 / 服务器）</option>
+                    )}
                   </select>
                 </div>
               </div>
@@ -666,6 +842,69 @@ export default function McpPage() {
                            onChange={e => setEditing({...editing, cwd: e.target.value})}
                            placeholder="可选，如 D:/workspace" />
                   </div>
+                </>
+              )}
+
+              {/* 内置能力实例配置 */}
+              {transport === 'BUILTIN' && (
+                <>
+                  <div style={{background: '#e8f5e9', padding: '8px 12px', borderRadius: 6, fontSize: 12, color: '#1b5e20'}}>
+                    💡 内置能力实例把平台自带能力包装成「按实例配置」的工具：锁定目标后工具不再需要连接参数，
+                    可创建多个实例分别授权给不同智能体。这里只保存<b>引用</b>，不保存密码；
+                    「连接」= 装配工具，真正连库发生在首次调用时。
+                  </div>
+                  <div className="field">
+                    <label>能力类型 *</label>
+                    <select
+                      value={editing.mcpType || ''}
+                      onChange={e => {
+                        setEditing({...editing, mcpType: e.target.value});
+                        // 换类型必须清空配置：旧类型的字段值串进新类型会产出脏配置
+                        setBuiltinForm({});
+                      }}>
+                      <option value="">— 请选择 —</option>
+                      {builtinTypes.map(t => (
+                        <option key={t.typeId} value={t.typeId}>{t.displayName}</option>
+                      ))}
+                    </select>
+                  </div>
+                  {(builtinTypes.find(t => t.typeId === editing.mcpType)?.configSchema || [])
+                    .map(field => {
+                      const options = field.options || [];
+                      return (
+                        <div className="field" key={field.key}>
+                          <label>{field.label || field.key}{field.required ? ' *' : ''}</label>
+                          {options.length > 0 ? (
+                            <select
+                              value={builtinForm[field.key] || ''}
+                              onChange={e => {
+                                const opt = options.find(o => o.value === e.target.value);
+                                const next: Record<string, string> = {...builtinForm, [field.key]: e.target.value};
+                                // 选定连接后带出它的默认库名：省一步常见操作，用户仍可手工改
+                                if (opt?.database && !next.database) next.database = opt.database;
+                                setBuiltinForm(next);
+                              }}>
+                              <option value="">— 请选择 —</option>
+                              {options.map(o => (
+                                <option key={o.value} value={o.value}>
+                                  {o.label}{o.hasPassword ? '' : '（无存储密码，连接时需输入）'}
+                                </option>
+                              ))}
+                            </select>
+                          ) : (
+                            <input
+                              value={builtinForm[field.key] || ''}
+                              onChange={e => setBuiltinForm({...builtinForm, [field.key]: e.target.value})}
+                              placeholder={field.placeholder || ''}
+                            />
+                          )}
+                          {field.description && <span className="hint">{field.description}</span>}
+                          {options.length === 0 && field.optionsSource && (
+                            <span className="hint">候选为空：先在「平台目录 → 数据库连接」完成下发与授权。</span>
+                          )}
+                        </div>
+                      );
+                    })}
                 </>
               )}
 

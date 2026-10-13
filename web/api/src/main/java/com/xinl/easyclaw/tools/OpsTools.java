@@ -41,6 +41,18 @@ public class OpsTools {
             @ToolParam(name = "command", description = "要执行的 shell 命令（单条；多条用 && 或 ; 串联）") String command,
             WorkspaceContext workspace,
             RuntimeContext rc) {
+        return runOnConn(command, workspace, rc, 0);
+    }
+
+    /**
+     * 真正执行一条远程命令。{@code forcedConnId > 0} 时固定跑在该连接上——供内置 ops 能力实例
+     * （{@code OpsMcpTools}）复用：它按实例锁定的 serverKey 解析出目标连接，但<b>执行、审计、
+     * 渲染、截断必须与专属 ops 工作区共用同一份实现</b>，否则两条通道行为会各自漂移
+     * （db 侧历史上就因两份实现漂移过，后来才抽出 DbQueryExecutor）。
+     *
+     * @param forcedConnId 指定连接；{@code <=0} = 沿用「会话绑定 &gt; 工作区最近连接」的原有解析
+     */
+    public String runOnConn(String command, WorkspaceContext workspace, RuntimeContext rc, long forcedConnId) {
         if (workspace == null || workspace.getWorkspaceId() == null) {
             return "❌ 当前没有可用的工作区。";
         }
@@ -50,7 +62,8 @@ public class OpsTools {
         String workspaceId = workspace.getWorkspaceId();
         // 运维多 tab：一个连接一个会话。会话绑定了连接 → 固定执行在该连接上；
         // 未绑定（如 REST 入口）→ 回退工作区最近建立的连接
-        long boundConn = ssh.connIdForSession(rc == null ? null : rc.getSessionId(), workspaceId);
+        long boundConn = forcedConnId > 0 ? forcedConnId
+                : ssh.connIdForSession(rc == null ? null : rc.getSessionId(), workspaceId);
         // 命令审计：执行前入队（无论执行成败都记——记录的是「执行了什么」）。
         // 服务器信息取自目标连接的运行时元数据；info 为 null（本地模式/连接不存在）时不记
         long targetConn = boundConn > 0 ? boundConn : ssh.primaryConnId(workspaceId);
@@ -100,12 +113,18 @@ public class OpsTools {
         }
     }
 
-    /** 结果首行的服务器信息横幅：osType 为空时省略该段 */
+    /**
+     * 结果首行的服务器信息横幅：只报业务名与系统类型。
+     * <p>
+     * 刻意不拼 {@code username@host}：这段文本会进模型上下文，等于把服务器地址与登录账号
+     * 交给模型——它既不需要，也可能在转述结论或生成脚本时把地址带出去。人若要知道当前连的
+     * 是哪台机器，看 OpsPage 的服务器列表即可，那是给人看的通道；给模型的那一份只留能力标识。
+     */
     private static String serverBanner(SshConnectionService.OpsServerInfo info) {
         String os = info.osType() == null || info.osType().isBlank() ? null : info.osType().trim();
         return os == null
-                ? "[服务器: " + info.name() + " | " + info.username() + "@" + info.host() + "]"
-                : "[服务器: " + info.name() + " | " + os + " | " + info.username() + "@" + info.host() + "]";
+                ? "[服务器: " + info.name() + "]"
+                : "[服务器: " + info.name() + " | " + os + "]";
     }
 
     // ==================== 终端上下文（AI 的「眼睛」） ====================

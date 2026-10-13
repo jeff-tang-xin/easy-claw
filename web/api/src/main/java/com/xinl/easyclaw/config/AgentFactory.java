@@ -185,15 +185,32 @@ public class AgentFactory {
             log.info("已禁用工具: {}", removed);
         }
 
-        // 注册 MCP HTTP_TOOL 桥接（REST API 包装成 AgentTool）
-        List<AgentTool> httpTools = mcpConnectionService.getHttpTools();
-        for (AgentTool tool : httpTools) {
-            toolkit.registerAgentTool(tool);
-            log.info("已注册 HTTP_TOOL 桥接: {}", tool.getName());
+        // 场景绑定的 MCP 服务白名单（空 = 不限制，保持既有行为，未配置场景零回退）
+        Set<String> mcpAllowlist = normalizedServiceNames(allowedMcpServices);
+
+        // 注册进程内工具：HTTP_TOOL 桥接 + 内置能力实例（db 等）。
+        // 两者都必须过白名单——历史上这里<b>无条件注册</b>，导致内置服务一旦激活，它的工具
+        // 就出现在所有工作区，即使场景明确没绑定它，所谓「硬隔离」形同虚设。
+        // 服务级 enabledTools 同时生效，与外部 MCP 的 getEnabledTools 口径对齐。
+        for (Map.Entry<Long, List<AgentTool>> entry
+                : mcpConnectionService.getActivatedToolsByService().entrySet()) {
+            if (!mcpAllowlist.isEmpty() && !isMcpServiceAllowed(entry.getKey(), mcpAllowlist)) {
+                log.info("场景未绑定该 MCP 服务，跳过进程内工具注册 (serviceId={}, tools={})",
+                        entry.getKey(), entry.getValue().stream().map(AgentTool::getName).toList());
+                continue;
+            }
+            List<String> enabled = mcpConnectionService.getEnabledTools(entry.getKey());
+            for (AgentTool tool : entry.getValue()) {
+                if (!enabled.isEmpty() && !enabled.contains(tool.getName())) {
+                    log.info("工具未在该服务启用清单内，跳过注册: {}", tool.getName());
+                    continue;
+                }
+                toolkit.registerAgentTool(tool);
+                log.info("已注册 MCP 进程内工具: {} (serviceId={})", tool.getName(), entry.getKey());
+            }
         }
 
         // 注册已连接的外部 MCP 工具（STDIO / STREAMABLE_HTTP / SSE）
-        Set<String> mcpAllowlist = normalizedServiceNames(allowedMcpServices);
         Map<Long, McpClientWrapper> mcpClients = mcpConnectionService.getConnectedWrappers();
         mcpClients.forEach((serviceId, client) -> {
             try {

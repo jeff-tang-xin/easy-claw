@@ -168,6 +168,7 @@ class ManageCloudProxyTest {
     private ManageController controller(CloudProperties props, WorkspaceManager wm) {
         return new ManageController(mock(AgentRegistry.class), mock(ToolManagementService.class),
                 mock(ToolRegistryService.class), mock(McpConnectionService.class),
+                new com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry(java.util.List.of()),
                 mock(MemorySettingsService.class), wm,
                 new CloudBootstrapService(props), mock(SkillScriptTools.class),
                 new HubSpokeClient(props));

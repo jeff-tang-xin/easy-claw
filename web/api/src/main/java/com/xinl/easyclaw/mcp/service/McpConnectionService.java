@@ -38,6 +38,16 @@ public interface McpConnectionService {
     List<AgentTool> getHttpTools();
 
     /**
+     * 按服务分组返回已激活的进程内工具（HTTP_TOOL 桥接 + 内置能力实例）。
+     * <p>
+     * 与 {@link #getHttpTools()} 的区别是<b>保留 serviceId</b>：Toolkit 必须能按场景
+     * 绑定的服务白名单过滤，否则内置服务一旦激活就会出现在所有工作区，绕过绑定。
+     *
+     * @return key = serviceId，value = 该服务产出的工具
+     */
+    Map<Long, List<AgentTool>> getActivatedToolsByService();
+
+    /**
      * 获取指定服务的启用工具列表（null/空 = 全部启用）
      */
     List<String> getEnabledTools(Long serviceId);

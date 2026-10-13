@@ -233,6 +233,21 @@ public class SubagentLoader {
      */
     private final AgentRegistry agentRegistry;
 
+    /**
+     * 智能体级能力绑定来源（{@code kind=mcp} 的页面绑定）。
+     * <p>
+     * <b>字段注入且允许 null</b>：既有单测直接 {@code new SubagentLoader(props)}，构造签名
+     * 不宜再加参数；没有 Spring 上下文时必须等价于「没人做过 agent 级绑定」，
+     * 让行为完全回退到改造前。
+     */
+    @Autowired(required = false)
+    private AgentCapabilitySource capabilitySource;
+
+    /** 供单测与诊断注入能力绑定来源（生产由 Spring 装配）。 */
+    public void setCapabilitySource(AgentCapabilitySource capabilitySource) {
+        this.capabilitySource = capabilitySource;
+    }
+
     /** 兼容构造器：不接 SPI，仅供单测使用。Spring 装配走两参构造器。 */
     public SubagentLoader(AgentScopeProperties properties) {
         this(properties, null);
@@ -497,11 +512,19 @@ public class SubagentLoader {
      */
     private List<String> restrictTools(String agentId, List<String> declared,
                                        ScenarioBinding binding) {
+        // agent 级 MCP 绑定：该智能体自己在能力绑定页勾选的内置实例，展开成工具名
+        List<String> agentMcpTools = agentMcpToolNames(agentId);
+        if ((binding == null || !binding.hasToolBinding()) && agentMcpTools.isEmpty()) {
+            return declared;
+        }
         if (binding == null || !binding.hasToolBinding()) {
+            // 只有 agent 绑定、场景不裁剪：工具已由主控 toolkit 侧的并集授予，子 Agent 继承即可。
+            // 这里不凭空构造裁剪名单——那会把该子 Agent 原本继承的 read_file 等工具一并裁掉，
+            // 表现为「配了绑定反而更不能用」，比不生效更糟。
             return declared;
         }
         Set<String> allowed = new LinkedHashSet<>(binding.tier().toolNames());
-        allowed.addAll(binding.mcpTools());
+        allowed.addAll(mcpToolsFor(agentId, binding, agentMcpTools));
         if (allowed.isEmpty()) {
             // NONE 档位且无 MCP 绑定：给空名单会被 harness 当作「不限制」原样放行，
             // 与用户意图相反。此处保留声明值并告警，避免产生「配了却没生效」的错觉。
@@ -530,6 +553,64 @@ public class SubagentLoader {
             log.info("子 Agent [{}] tools 被场景档位收窄: {} -> {}", agentId, declared, intersection);
         }
         return intersection;
+    }
+
+    /**
+     * 读取该智能体的 agent 级 MCP 工具名。
+     * <p>
+     * 无来源、无绑定、<b>读库异常</b>一律返回空列表：绑定是「附加指定」，读取失败不能
+     * 演变成把子 Agent 的工具裁光——那会让一次数据库抖动表现为「智能体突然失能」。
+     */
+    private List<String> agentMcpToolNames(String agentId) {
+        if (capabilitySource == null || agentId == null || agentId.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> tools = capabilitySource.mcpToolNames(agentId);
+            return tools == null ? List.of() : tools;
+        } catch (Exception e) {
+            log.warn("读取子 Agent [{}] 的能力绑定失败，按无绑定处理: {}", agentId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 合成该子 Agent 可用的 MCP 工具名。
+     * <p>
+     * <b>agent 绑定只能收窄，不能放宽</b>（与「工作区硬约束 &gt; 场景绑定 &gt; agent 绑定」的
+     * 优先级一致）：
+     * <ul>
+     *   <li>场景绑了 MCP：取两者交集，agent 不得越过场景给出的运行时边界；交集为空时回退
+     *       场景全量并告警——「两处配置互斥」是配置错误，不该升级成子 Agent 无工具可用</li>
+     *   <li>场景没绑 MCP（只配了档位）：agent 绑定独立生效，工具已由主控侧并集授予</li>
+     *   <li>agent 没绑：原样采用场景展开结果</li>
+     * </ul>
+     */
+    private List<String> mcpToolsFor(String agentId, ScenarioBinding binding, List<String> agentMcpTools) {
+        if (agentMcpTools.isEmpty()) {
+            return binding.mcpTools();
+        }
+        if (!binding.hasMcpBinding()) {
+            log.info("子 Agent [{}] 采用 agent 级 MCP 绑定（场景未绑定 MCP）: {} 个工具",
+                    agentId, agentMcpTools.size());
+            return agentMcpTools;
+        }
+        List<String> narrowed = new ArrayList<>();
+        for (String tool : binding.mcpTools()) {
+            if (containsIgnoreCase(agentMcpTools, tool)) {
+                narrowed.add(tool);
+            }
+        }
+        if (narrowed.isEmpty()) {
+            log.warn("子 Agent [{}] 的 agent 级 MCP 绑定与场景绑定的 MCP 工具无交集，已按场景绑定处理"
+                    + "（agent 绑定只能收窄，不能越过场景边界）", agentId);
+            return binding.mcpTools();
+        }
+        if (narrowed.size() < binding.mcpTools().size()) {
+            log.info("子 Agent [{}] MCP 工具被 agent 级绑定收窄: {} -> {}",
+                    agentId, binding.mcpTools().size(), narrowed);
+        }
+        return narrowed;
     }
 
     /**

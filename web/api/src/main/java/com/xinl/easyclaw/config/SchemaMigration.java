@@ -26,7 +26,7 @@ public class SchemaMigration {
 
     private static final Logger log = LoggerFactory.getLogger(SchemaMigration.class);
 
-    private static final int CURRENT_VERSION = 3;
+    private static final int CURRENT_VERSION = 4;
 
     public SchemaMigration(DataSource dataSource) {
         try (Connection conn = dataSource.getConnection()) {
@@ -51,6 +51,12 @@ public class SchemaMigration {
             if (applied < 3) {
                 migrateV3(conn);
                 setVersion(conn, 3);
+            }
+
+            // v4: mcp_services 补 mcp_type 列 + 回填存量内置服务（内置能力类型化）
+            if (applied < 4) {
+                migrateV4(conn);
+                setVersion(conn, 4);
             }
 
         } catch (Exception e) {
@@ -114,7 +120,30 @@ public class SchemaMigration {
         addColumnIfAbsent(conn, "scenarios", "capability_tier", "TEXT");
     }
 
-    /** 幂等加列：已存在则跳过，避免重复迁移报错 */
+    /**
+     * v4: mcp_services 补 mcp_type 列（内置能力类型标识），并回填存量内置服务。
+     * <p>
+     * 内置服务此前靠<b>服务名</b>识别（历史实现按 {@code name=easyclaw-db} 分派）。改成按
+     * 类型分派后，存量记录若没有 mcp_type，会掉进外部 MCP 分支并报「无法推断传输类型」——
+     * 所以补列之外<b>必须回填</b>，否则升级后老的内置服务直接连不上。
+     */
+    private void migrateV4(Connection conn) throws Exception {
+        if (!tableExists(conn, "mcp_services")) {
+            log.info("[SchemaMigration.v4] mcp_services 不存在，跳过（Hibernate 会按实体建）。");
+            return;
+        }
+        addColumnIfAbsent(conn, "mcp_services", "mcp_type", "TEXT");
+        try (Statement stmt = conn.createStatement()) {
+            int backfilled = stmt.executeUpdate(
+                    "UPDATE mcp_services SET mcp_type = 'db' "
+                            + "WHERE name = 'easyclaw-db' AND (mcp_type IS NULL OR mcp_type = '')");
+            if (backfilled > 0) {
+                log.info("[SchemaMigration.v4] 已回填 {} 条存量内置服务的 mcp_type=db。", backfilled);
+            }
+        }
+    }
+
+    /** 幂等加列：已存在则跳过，避免重复迁移报错（各版本共用，日志不带版本号） */
     private void addColumnIfAbsent(Connection conn, String table, String column, String type)
             throws Exception {
         if (columnExists(conn, table, column)) {
@@ -123,7 +152,7 @@ public class SchemaMigration {
         try (Statement stmt = conn.createStatement()) {
             stmt.executeUpdate("ALTER TABLE " + table + " ADD COLUMN " + column + " " + type);
         }
-        log.info("[SchemaMigration.v3] 已添加 {}.{} 列。", table, column);
+        log.info("[SchemaMigration] 已添加 {}.{} 列。", table, column);
     }
 
     // ======================== 工具方法 ========================

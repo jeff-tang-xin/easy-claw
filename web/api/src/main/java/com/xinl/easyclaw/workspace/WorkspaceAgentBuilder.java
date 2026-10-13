@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.agent.AgentCapabilitySource;
 import com.xinl.easyclaw.agent.SessionRegistry;
 import com.xinl.easyclaw.agent.SubagentLoader;
 import com.xinl.easyclaw.base.BuiltinDbIds;
@@ -38,11 +39,14 @@ import io.agentscope.harness.agent.transcript.ObjectStoreTranscriptStore;
 import io.agentscope.harness.agent.workspace.LocalFsMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -73,6 +77,15 @@ public class WorkspaceAgentBuilder {
     private final AgentScopeProperties agentScopeProperties;
     private final ScenarioResolver scenarioResolver;
     private final McpToolExpander mcpToolExpander;
+
+    /**
+     * 智能体级能力绑定来源（可选）。
+     * <p>
+     * <b>字段注入且允许 null</b>：本类构造参数已多达十余个，再加一位会让既有单测全部连带
+     * 改造；没有 Spring 上下文时必须等价于「没人做过 agent 级绑定」，行为完全回退到改造前。
+     */
+    @Autowired(required = false)
+    private AgentCapabilitySource capabilitySource;
     private final SessionRegistry sessionRegistry;
     /** SPI 智能体注册表：模型偏好 / 人格 / 工具策略的声明来源 */
     private final com.xinl.easyclaw.agent.spi.AgentRegistry agentRegistry;
@@ -300,6 +313,11 @@ public class WorkspaceAgentBuilder {
         // 场景 roleName 优先，其次模式主控声明（ops → ops），最后 main。
         String effectiveAgentId = resolveEffectiveAgentId(activeScenario);
 
+        // 主控 toolkit 的 MCP 服务白名单：决定「哪些 MCP 服务的工具会进入本工作区」。
+        // 专属 db/ops 工作区在上面的类型分支已走最小 toolkit，压根不读这个名单——
+        // 工作区硬约束天然强于页面绑定，这里无需再加判断。
+        List<String> mcpAllowlist = resolveMcpAllowlist(binding, effectiveAgentId, subagents);
+
         // 记忆账簿用户级设置（memory_settings 表，缺省按实体默认值落库一行）。
         // 读出的配置决定本 Agent 的压缩窗、记忆提取触发器与子 Agent 记忆 hooks 开关。
         com.xinl.easyclaw.memory.settings.MemorySettingsEntity memorySettings =
@@ -317,8 +335,7 @@ public class WorkspaceAgentBuilder {
                         ? agentFactory.createOpsToolkit()
                         : dbMode
                                 ? agentFactory.createDbToolkit()
-                                : agentFactory.createWorkspaceToolkit(
-                                        binding.hasMcpBinding() ? binding.mcpServices() : null))
+                                : agentFactory.createWorkspaceToolkit(mcpAllowlist))
                 // workspace 根 = .easyClaw/agent：AGENTS.md/MEMORY.md/skills/运行时数据全部集中于此
                 .workspace(agentRoot)
                 .filesystem(fsSpec)
@@ -576,6 +593,77 @@ public class WorkspaceAgentBuilder {
      * roleName 未在 SPI 注册时告警并跳过（绑定失效，回退模式主控/main），
      * 与 {@code SystemPromptComposer#resolveMainPersona} 的解析链保持一致。
      */
+    /**
+     * 计算主控 toolkit 的 MCP 服务白名单。
+     * <p>
+     * <b>优先级：场景绑定 &gt; agent 级绑定 &gt; 不限制</b>。
+     * <ul>
+     *   <li>场景显式绑了 MCP：只放行场景内的服务。agent 绑定越界（选了场景外的服务）在此
+     *       丢弃并告警——页面绑定只能收窄，不能绕过场景给出的运行时边界。</li>
+     *   <li>场景没绑：用主控与各子 Agent 绑定的<b>并集</b>。子 Agent 继承主控 toolkit，
+     *       父侧不注册，子侧的绑定就永远是空壳。</li>
+     *   <li>两者皆空：返回 {@code null} = 不限制，保持既有行为（零回退）。</li>
+     * </ul>
+     */
+    private List<String> resolveMcpAllowlist(ScenarioBinding binding, String effectiveAgentId,
+                                             List<SubagentDeclaration> subagents) {
+        if (binding.hasMcpBinding()) {
+            List<String> agentBound = agentBoundServices(effectiveAgentId, subagents);
+            List<String> outside = agentBound.stream()
+                    .filter(name -> !containsIgnoreCase(binding.mcpServices(), name))
+                    .toList();
+            if (!outside.isEmpty()) {
+                log.warn("agent 级绑定的 MCP 服务 {} 不在场景绑定 {} 范围内，已忽略"
+                                + "（agent 绑定只能收窄，不能越过场景边界）",
+                        outside, binding.mcpServices());
+            }
+            return binding.mcpServices();
+        }
+        List<String> agentBound = agentBoundServices(effectiveAgentId, subagents);
+        if (!agentBound.isEmpty()) {
+            log.info("MCP 服务白名单取自 agent 级绑定（场景未绑定 MCP）: {}", agentBound);
+        }
+        return agentBound.isEmpty() ? null : agentBound;
+    }
+
+    /** 主控 + 各子 Agent 的 agent 级 MCP 绑定并集；无来源时为空（等价于改造前行为） */
+    private List<String> agentBoundServices(String effectiveAgentId, List<SubagentDeclaration> subagents) {
+        if (capabilitySource == null) {
+            return List.of();
+        }
+        Set<String> agentIds = new LinkedHashSet<>();
+        agentIds.add(SubagentLoader.MAIN_AGENT_ID);
+        if (effectiveAgentId != null && !effectiveAgentId.isBlank()) {
+            agentIds.add(effectiveAgentId);
+        }
+        if (subagents != null) {
+            subagents.forEach(decl -> {
+                if (decl != null && decl.getName() != null && !decl.getName().isBlank()) {
+                    agentIds.add(decl.getName());
+                }
+            });
+        }
+        try {
+            return capabilitySource.mcpServiceNamesFor(agentIds);
+        } catch (Exception e) {
+            log.warn("读取 agent 级 MCP 绑定失败，按无绑定处理（不因此收紧工具集）: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** 忽略大小写的包含判断：服务名在页面绑定与场景绑定里可能大小写不一致 */
+    private static boolean containsIgnoreCase(Collection<String> names, String target) {
+        if (names == null || target == null) {
+            return false;
+        }
+        for (String name : names) {
+            if (name != null && name.equalsIgnoreCase(target)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private String resolveEffectiveAgentId(
             com.xinl.easyclaw.base.profile.ScenarioProfile activeScenario) {
         if (activeScenario != null) {
@@ -725,7 +813,10 @@ public class WorkspaceAgentBuilder {
         // ASK 规则优先于 ALLOW 命中 —— 已授权工具必须【不加】system ASK 规则，
         // 否则 ALLOW 永远轮不到判断，出现"已授权仍反复弹窗"
         for (String tool : ToolPermissionPolicy.explicitAsk()) {
-            if (alwaysAllowed.contains(tool)) {
+            // 不可绕过的工具（remote_shell）即使被「永久允许」也必须保留 ASK：
+            // 它现在能经内置 ops 能力实例进入 solo 场景，沿用下面的跳过逻辑，
+            // 「在生产服务器上免确认执行命令」就成了一个配置层面就能触发的安全降级
+            if (alwaysAllowed.contains(tool) && !ToolPermissionPolicy.nonBypassable().contains(tool)) {
                 continue;
             }
             pb.addAskRule(tool, new PermissionRule(tool, null, PermissionBehavior.ASK, "system"));

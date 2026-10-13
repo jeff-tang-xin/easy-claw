@@ -8,6 +8,7 @@ import com.xinl.easyclaw.config.HubSpokeClient;
 import com.xinl.easyclaw.config.SystemHomePaths;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.service.McpConnectionService;
+import com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry;
 import com.xinl.easyclaw.memory.settings.MemorySettingsEntity;
 import com.xinl.easyclaw.memory.settings.MemorySettingsService;
 import com.xinl.easyclaw.tool.entity.ToolDefinitionEntity;
@@ -30,6 +31,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -44,6 +46,7 @@ public class ManageController {
     private final ToolManagementService toolService;
     private final ToolRegistryService toolRegistryService;
     private final McpConnectionService mcpService;
+    private final BuiltinMcpRegistry builtinMcpRegistry;
     private final MemorySettingsService memorySettingsService;
     private final WorkspaceManager workspaceManager;
     private final CloudBootstrapService cloudBootstrapService;
@@ -54,6 +57,7 @@ public class ManageController {
                             ToolManagementService toolService,
                             ToolRegistryService toolRegistryService,
                             McpConnectionService mcpService,
+                            BuiltinMcpRegistry builtinMcpRegistry,
                             MemorySettingsService memorySettingsService,
                             WorkspaceManager workspaceManager,
                             CloudBootstrapService cloudBootstrapService,
@@ -63,6 +67,7 @@ public class ManageController {
         this.toolService = toolService;
         this.toolRegistryService = toolRegistryService;
         this.mcpService = mcpService;
+        this.builtinMcpRegistry = builtinMcpRegistry;
         this.memorySettingsService = memorySettingsService;
         this.workspaceManager = workspaceManager;
         this.cloudBootstrapService = cloudBootstrapService;
@@ -464,6 +469,72 @@ public class ManageController {
     }
 
     // ================= MCP =================
+
+    /**
+     * 内置 MCP 能力类型清单 —— 前端「创建 MCP 服务」的类型下拉与配置表单描述。
+     * <p>
+     * 类型只提供字段与候选源（{@code optionsSource}），实际选项在此按 hub 下发快照补齐：
+     * 内置能力实例的配置是「选一条平台授权下来的库」，不该让用户手抄 serverKey。
+     * cloud 未配置时候选为空列表，前端据此提示「先在平台完成授权」。
+     */
+    @GetMapping("/mcp/builtin-types")
+    public List<BuiltinTypeView> builtinMcpTypes() {
+        List<Map<String, Object>> dbOptions = cloudBootstrapService.cloudConfig().dbConnections().stream()
+                .map(c -> {
+                    Map<String, Object> opt = new LinkedHashMap<>();
+                    opt.put("value", c.serverKey());
+                    opt.put("label", c.name() + " · " + c.dbType() + " · " + c.databaseName());
+                    opt.put("database", c.databaseName());
+                    opt.put("hasPassword", c.hasPassword());
+                    return opt;
+                })
+                .toList();
+        List<Map<String, Object>> opsOptions = cloudBootstrapService.cloudConfig().opsServers().stream()
+                .map(s -> {
+                    Map<String, Object> opt = new LinkedHashMap<>();
+                    opt.put("value", s.serverKey());
+                    // 只给业务名：主机与端口不进候选——人在这里选的是「哪台机器」，不是「哪个地址」
+                    opt.put("label", s.name() + (s.osType() == null || s.osType().isBlank()
+                            ? "" : " · " + s.osType()));
+                    // 免手输密码可用性：没有它，智能体侧无法自动建连（前端据此提示去补密码或先手动连）
+                    opt.put("hasPassword", Boolean.TRUE.equals(s.hasPassword()));
+                    return opt;
+                })
+                .toList();
+        return builtinMcpRegistry.all().stream()
+                .map(t -> new BuiltinTypeView(t.typeId(), t.displayName(),
+                        t.configSchema().stream()
+                                .map(f -> withOptions(f, dbOptions, opsOptions))
+                                .toList()))
+                .toList();
+    }
+
+    /**
+     * 按 {@code optionsSource} 把候选项填进字段描述；无对应源的字段原样返回。
+     * <p>
+     * 候选源是「平台下发给本 spoke 的资源清单」，不是「让用户填地址」：
+     * db 与 ops 都只列业务名，主机、端口、账号一律不出现在候选里。
+     */
+    private static Map<String, Object> withOptions(Map<String, Object> field,
+                                                   List<Map<String, Object>> dbOptions,
+                                                   List<Map<String, Object>> opsOptions) {
+        String source = String.valueOf(field.get("optionsSource"));
+        List<Map<String, Object>> options = switch (source) {
+            case "hub-db-connections" -> dbOptions;
+            case "hub-ops-servers" -> opsOptions;
+            default -> null;
+        };
+        if (options == null) {
+            return field;
+        }
+        Map<String, Object> enriched = new LinkedHashMap<>(field);
+        enriched.put("options", options);
+        return enriched;
+    }
+
+    /** 内置类型视图：标识 + 显示名 + 配置表单（含候选项） */
+    public record BuiltinTypeView(String typeId, String displayName,
+                                  List<Map<String, Object>> configSchema) {}
 
     @GetMapping("/mcp")
     public List<McpServiceEntity> mcp() {

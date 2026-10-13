@@ -2,9 +2,10 @@ package com.xinl.easyclaw.mcp.service;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.xinl.easyclaw.db.api.DbMcpTools;
 import com.xinl.easyclaw.mcp.entity.McpServiceEntity;
 import com.xinl.easyclaw.mcp.repository.McpServiceRepository;
+import com.xinl.easyclaw.mcp.type.BuiltinMcpRegistry;
+import com.xinl.easyclaw.mcp.type.BuiltinMcpType;
 import com.xinl.easyclaw.tools.http.HttpAgentTool;
 import io.agentscope.core.tool.AgentTool;
 import io.agentscope.core.tool.mcp.McpAsyncClientWrapper;
@@ -36,22 +37,22 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     private static final ObjectMapper mapper = new ObjectMapper();
     private static final Duration DEFAULT_TIMEOUT = Duration.ofSeconds(30);
     private static final Duration DEFAULT_INIT_TIMEOUT = Duration.ofSeconds(60);
-    /** 内置数据库 MCP 服务名（SYSTEM scope 播种，进程内直调 DbMcpTools） */
-    private static final String BUILTIN_DB_SERVICE = "easyclaw-db";
+    /** 内置能力传输标识：进程内直调本地服务，不发起任何网络连接 */
+    private static final String TRANSPORT_BUILTIN = "BUILTIN";
 
     private final McpServiceRepository repository;
     /** 已建立连接的外部 MCP 客户端缓存 */
     private final Map<Long, McpClientWrapper> clientCache = new ConcurrentHashMap<>();
     /** 已激活的 HTTP_TOOL 桥接工具缓存（Easy-Claw 内部构建，不走 MCP 协议） */
     private final Map<Long, AgentTool> httpToolCache = new ConcurrentHashMap<>();
-    /** 内置 MCP 服务（easyclaw-db 等）的进程内工具缓存：一个服务对应多个工具 */
+    /** 内置 MCP 实例的进程内工具缓存：一个服务对应多个工具 */
     private final Map<Long, List<AgentTool>> builtinToolsCache = new ConcurrentHashMap<>();
 
-    private final DbMcpTools dbMcpTools;
+    private final BuiltinMcpRegistry builtinTypes;
 
-    public McpConnectionServiceImpl(McpServiceRepository repository, DbMcpTools dbMcpTools) {
+    public McpConnectionServiceImpl(McpServiceRepository repository, BuiltinMcpRegistry builtinTypes) {
         this.repository = repository;
-        this.dbMcpTools = dbMcpTools;
+        this.builtinTypes = builtinTypes;
     }
 
     @Override
@@ -64,6 +65,18 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         }
         if ("SYSTEM".equals(scope)) {
             throw new IllegalStateException("SYSTEM 级别的 MCP 服务只能由系统内置，禁止手动创建");
+        }
+        // 内置能力实例：mcpType 有值即声明为 BUILTIN（前端可不填 transport）；
+        // 且必须命中已注册类型——否则创建成功却永远激活不了，故障推迟到调用时才暴露。
+        if (service.getMcpType() != null && !service.getMcpType().isBlank()) {
+            service.setMcpType(service.getMcpType().trim().toLowerCase());
+            service.setTransport(TRANSPORT_BUILTIN);
+        }
+        if (TRANSPORT_BUILTIN.equals(service.getTransport() == null
+                ? "" : service.getTransport().toUpperCase())
+                && !builtinTypes.supports(service.getMcpType())) {
+            throw new IllegalArgumentException("未知的内置 MCP 类型: " + service.getMcpType()
+                    + "（可用类型: " + registeredTypeIds() + "）");
         }
         if (repository.findByNameAndScope(service.getName(), scope).isPresent()) {
             throw new IllegalArgumentException("同 scope 下 MCP 服务名称已存在: " + service.getName() + " (" + scope + ")");
@@ -88,6 +101,17 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                     }
                     existing.setDescription(service.getDescription());
                     existing.setTransport(service.getTransport());
+                    // 内置实例的类型可换但必须已注册；表单未回传 mcpType 时保留原值，
+                    // 避免「编辑备注就把内置类型清空」这类静默降级。
+                    if (service.getMcpType() != null && !service.getMcpType().isBlank()) {
+                        String typeId = service.getMcpType().trim().toLowerCase();
+                        if (!builtinTypes.supports(typeId)) {
+                            throw new IllegalArgumentException("未知的内置 MCP 类型: " + typeId
+                                    + "（可用类型: " + registeredTypeIds() + "）");
+                        }
+                        existing.setMcpType(typeId);
+                        existing.setTransport(TRANSPORT_BUILTIN);
+                    }
                     existing.setUrl(service.getUrl());
                     existing.setCommand(service.getCommand());
                     existing.setArgs(service.getArgs());
@@ -164,8 +188,10 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                 .map(existing -> {
                     String transport = existing.resolveTransport();
                     try {
-                        if (BUILTIN_DB_SERVICE.equals(existing.getName())) {
-                            return connectBuiltinDb(existing);
+                        // 内置能力按「传输类型 + 类型标识」分派，不再按服务名硬编码——
+                        // 名字判断曾让「内置」等同于系统单例：建不出第二个实例、改名即静默失效。
+                        if (TRANSPORT_BUILTIN.equals(transport)) {
+                            return connectBuiltin(existing);
                         }
                         if ("HTTP_TOOL".equals(transport)) {
                             return connectHttpTool(existing);
@@ -182,17 +208,25 @@ public class McpConnectionServiceImpl implements McpConnectionService {
     }
 
     /**
-     * 激活内置数据库 MCP 服务（设计定稿 §4.0.1 双消费壳之二）：
-     * 不发起网络连接，把 DbMcpTools 的三个工具（db_status/db_schema/db_query）装配进
-     * 进程内工具缓存——通用场景 mcpServices 绑定即用，走现有 MCP 白名单 / CapabilityTier 联动。
+     * 激活内置能力实例：不发起网络连接，按 {@code mcpType} 从 {@link BuiltinMcpRegistry}
+     * 取类型，用<b>本实例自己的配置</b>产出工具面装进进程内工具缓存。
+     * <p>
+     * 类型未注册（拼错 / 对应模块未上 classpath）时<b>明确报错</b>而非静默跳过：内置实例
+     * 「激活成功却没有工具」会让用户以为能力已授予，直到真调用才失败，故障极隐蔽。
      */
-    private McpServiceEntity connectBuiltinDb(McpServiceEntity entity) throws Exception {
-        List<AgentTool> tools = dbMcpTools.tools();
+    private McpServiceEntity connectBuiltin(McpServiceEntity entity) throws Exception {
+        BuiltinMcpType type = builtinTypes.find(entity.getMcpType())
+                .orElseThrow(() -> new IllegalArgumentException("内置 MCP 类型未注册: mcpType="
+                        + entity.getMcpType() + "（已注册: " + registeredTypeIds() + "）"));
+        List<AgentTool> tools = type.toolsFor(entity);
+        if (tools.isEmpty()) {
+            throw new IllegalStateException("内置 MCP 类型 [" + type.typeId() + "] 未产出任何工具");
+        }
         builtinToolsCache.put(entity.getId(), tools);
         entity.setIsConnected(true);
         entity.setLastConnected(Instant.now());
         entity.setServerName(entity.getName());
-        entity.setServerVersion("builtin-db-bridge");
+        entity.setServerVersion("builtin-" + type.typeId());
         entity.setServerInstructions(entity.getDescription());
         // 把工具 schema 存到 availableTools 里方便展示
         List<Map<String, Object>> schemas = new ArrayList<>();
@@ -206,9 +240,15 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         entity.setAvailableTools(mapper.writeValueAsString(schemas));
 
         McpServiceEntity updated = repository.save(entity);
-        log.info("激活内置数据库 MCP 服务: id={}, tools={}", entity.getId(),
+        log.info("激活内置 MCP 实例: id={}, name={}, type={}, tools={}", entity.getId(),
+                entity.getName(), type.typeId(),
                 tools.stream().map(AgentTool::getName).toList());
         return updated;
+    }
+
+    /** 已注册类型清单（错误信息与 create 校验共用） */
+    private String registeredTypeIds() {
+        return String.join(", ", builtinTypes.all().stream().map(BuiltinMcpType::typeId).toList());
     }
 
     /** 连接外部 MCP Server（STDIO / STREAMABLE_HTTP / SSE） */
@@ -279,6 +319,16 @@ public class McpConnectionServiceImpl implements McpConnectionService {
         List<AgentTool> all = new ArrayList<>(httpToolCache.values());
         builtinToolsCache.values().forEach(all::addAll);
         return all;
+    }
+
+    @Override
+    public Map<Long, List<AgentTool>> getActivatedToolsByService() {
+        Map<Long, List<AgentTool>> byService = new LinkedHashMap<>();
+        httpToolCache.forEach((serviceId, tool) ->
+                byService.computeIfAbsent(serviceId, k -> new ArrayList<>()).add(tool));
+        builtinToolsCache.forEach((serviceId, tools) ->
+                byService.computeIfAbsent(serviceId, k -> new ArrayList<>()).addAll(tools));
+        return byService;
     }
 
     @Override
@@ -486,6 +536,7 @@ public class McpConnectionServiceImpl implements McpConnectionService {
                 .name(template.getName() + "-" + UUID.randomUUID().toString().substring(0, 6))
                 .description(template.getDescription().replace("【内置模板】", ""))
                 .transport(template.getTransport())
+                .mcpType(template.getMcpType())
                 .implementationConfig(template.getImplementationConfig())
                 .headers(template.getHeaders())
                 .url(template.getUrl())

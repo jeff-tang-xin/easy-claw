@@ -83,6 +83,24 @@ public final class ToolPermissionPolicy {
             "remote_shell"
     );
 
+    /**
+     * <b>任何授权都不允许摘掉确认</b>的工具（不可绕过清单）。
+     * <p>
+     * 为什么单独一份而不并入 {@code EXPLICIT_ASK}：EXPLICIT_ASK 里的工具在启用白名单机制的场景下
+     * 用户可以「永久允许」——{@code buildPermissionContext} 会因命中 alwaysAllowed 而跳过 ASK 注册。
+     * 对 write_file / execute 这是合理的（本地沙箱内，用户自愿承担就不再打断）；
+     * 但 {@code remote_shell} 现在能被内置能力实例带进 solo 场景，同一条跳过逻辑会让
+     * 「在生产服务器上执行任意命令」变成免确认 —— 那是安全降级，不是便利。
+     * <p>
+     * 清单内工具<b>无条件</b>保留 ASK，忽略用户永久允许：确认强度不低于专属 ops 工作区。
+     */
+    private static final List<String> NON_BYPASSABLE = List.of("remote_shell");
+
+    /** 不可被「永久允许」摘掉确认的工具名（保持声明顺序） */
+    public static List<String> nonBypassable() {
+        return NON_BYPASSABLE;
+    }
+
     /** 静默放行的只读工具名（不可变） */
     public static Set<String> silentlyAllowed() {
         return SILENTLY_ALLOWED;
