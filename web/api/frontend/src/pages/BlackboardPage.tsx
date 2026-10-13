@@ -1,5 +1,6 @@
 import {useEffect, useState} from 'react';
 import {getJson, postJson} from '../api';
+import Markdown from '../components/Markdown';
 
 interface WorkspaceSummary {
   workspaceId: string;
@@ -306,7 +307,8 @@ export default function BlackboardPage() {
                     <span className="hint" style={{ fontWeight: 600 }}>{e.author}</span>
                     <span className="hint" style={{ marginLeft: 'auto' }}>{e.ts}</span>
                   </div>
-                  <div style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{e.content}</div>
+                  {/* 条目内容是 AI 写的 markdown（结论/风险常带列表与代码块），按 markdown 渲染 */}
+                  <Markdown text={e.content} />
                 </div>
               );
             })}

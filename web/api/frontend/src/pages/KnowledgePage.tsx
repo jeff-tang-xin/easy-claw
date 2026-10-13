@@ -1,5 +1,6 @@
 import {useEffect, useState} from 'react';
 import {getJson} from '../api';
+import Markdown from '../components/Markdown';
 
 interface WorkspaceSummary {
   workspaceId: string;
@@ -160,13 +161,8 @@ export default function KnowledgePage() {
           {activeTopic && (
             <>
               <h3 style={{ marginTop: 0, wordBreak: 'break-all' }}>{activeTopic}</h3>
-              <pre style={{
-                whiteSpace: 'pre-wrap',
-                wordBreak: 'break-word',
-                margin: 0,
-                fontFamily: 'inherit',
-                lineHeight: 1.6,
-              }}>{content}</pre>
+              {/* 知识条目正文由 knowledge_write 以 markdown 写入，按 markdown 渲染 */}
+              <Markdown text={content} />
             </>
           )}
         </div>

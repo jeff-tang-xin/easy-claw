@@ -2232,7 +2232,8 @@ export default function ChatPage() {
                       <span className="bb-entry-type">{BB_TYPE[e.type] || e.type}</span>
                       <span className="bb-entry-meta">#{e.seq} · {e.author}{e.sessionId ? ` · ${e.sessionId.slice(-6)}` : ''} · {fmtBbTime(e.ts)}</span>
                     </div>
-                    <div className="bb-entry-content">{e.content}</div>
+                    {/* 黑板条目是 AI 写的 markdown，走与聊天消息同一套 md() 渲染（含消毒与缓存） */}
+                    <div className="bb-entry-content md-content" dangerouslySetInnerHTML={{__html: md(e.content)}} />
                   </div>
                 ))
               )}

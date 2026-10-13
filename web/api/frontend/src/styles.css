@@ -646,7 +646,10 @@ tr:hover td { background: rgba(22, 119, 255, 0.025); }
   border-top-left-radius: 6px;
 }
 
-.md-content { width: 100%; min-width: 0; }
+/* white-space: normal：markdown 渲染后是块级结构，不保留源码空白。
+   父级带 pre-wrap 时（如黑板条目 .bb-entry-content）若不显式归位，块级 margin 会
+   叠加源码换行造成双倍行距。streaming-plain 变体（纯文本流式）特异性更高，不受影响 */
+.md-content { width: 100%; min-width: 0; white-space: normal; }
 .md-content-wrap { width: 100%; min-width: 0; }
 /* 流式期间的纯文本正文：不做 md 解析，保留换行，回合结束切回完整排版 */
 .md-content.streaming-plain { white-space: pre-wrap; word-break: break-word; }
