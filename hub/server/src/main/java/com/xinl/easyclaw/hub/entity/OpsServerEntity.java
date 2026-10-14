@@ -57,10 +57,6 @@ public class OpsServerEntity extends BaseEntity {
     @Column(name = "org_id", nullable = false)
     private Long orgId = 0L;
 
-    /** 归属项目（V18）：0 = 未归属遗留行；org_id 冗余口径对齐 V11 workspaces（无外键，应用层保证一致）。 */
-    @Column(name = "project_id", nullable = false)
-    private Long projectId = 0L;
-
     /** 登录密码密文（V19，AES-256-GCM）；NULL = 未设置。仅用于下发 spoke 直连，绝不在平台回显。 */
     @Column(name = "password_enc", length = 1024)
     private String passwordEnc;

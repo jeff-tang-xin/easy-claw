@@ -20,7 +20,7 @@ public interface SpokeResourceCatalog {
     /**
      * spoke 下发清单：仅启用 + 归属当前组织 + 项目过滤 + 当前用户未过期授权，按 sort_order,id 保序。
      *
-     * @param projectId 工作区绑定项目（null = 不过滤；条目 projectId<=0 = 不限定项目对所有项目可见）
+     * @param projectId 工作区绑定项目（null = 不过滤；V31 N:N——资源未绑定任何项目 = 对所有项目可见）
      */
     List<SpokeResourceItem> listEnabledForSpoke(AppKeyContext ctx, Long projectId);
 

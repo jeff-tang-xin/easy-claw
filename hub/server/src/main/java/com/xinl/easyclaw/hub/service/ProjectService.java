@@ -2,6 +2,7 @@ package com.xinl.easyclaw.hub.service;
 
 import com.xinl.easyclaw.hub.common.AuditModule;
 import com.xinl.easyclaw.hub.common.ApiException;
+import com.xinl.easyclaw.hub.contract.project.BindProjectResourcesRequest;
 import com.xinl.easyclaw.hub.contract.project.CreateProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.ProjectDto;
 import com.xinl.easyclaw.hub.contract.project.UpdateProjectRequest;
@@ -12,17 +13,20 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import com.xinl.easyclaw.hub.entity.ProjectEntity;
+import com.xinl.easyclaw.hub.entity.ProjectResourceEntity;
 import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.entity.WorkspaceEntity;
 import com.xinl.easyclaw.hub.entity.DbConnectionEntity;
 import com.xinl.easyclaw.hub.entity.OpsServerEntity;
 import com.xinl.easyclaw.hub.repository.ProjectRepository;
+import com.xinl.easyclaw.hub.repository.ProjectResourceRepository;
 import com.xinl.easyclaw.hub.repository.UserRepository;
 import com.xinl.easyclaw.hub.repository.WorkspaceRepository;
 import com.xinl.easyclaw.hub.repository.DbConnectionRepository;
@@ -30,13 +34,17 @@ import com.xinl.easyclaw.hub.repository.OpsServerRepository;
 
 /**
  * 项目管理：组织内归类锚点。可见性 private|team|public，按角色 + 归属过滤；归档=status:archived。
- * 项目的新建/修改/归档记审计。
+ * 项目的新建/修改/归档记审计。V31 起承担资源绑定收口（project_resources N:N，整组覆盖）。
  */
 @Service
 public class ProjectService {
 
     private static final Set<String> VALID_VISIBILITY = Set.of("private", "team", "public");
     private static final Set<String> VALID_STATUS = Set.of("active", "archived");
+
+    /** project_resources.resource_type 取值（与 V31 迁移脚本、各资源服务批查口径一致）。 */
+    public static final String RESOURCE_TYPE_DB = "db";
+    public static final String RESOURCE_TYPE_OPS = "ops";
 
     private final ProjectRepository projects;
     private final UserRepository users;
@@ -45,10 +53,12 @@ public class ProjectService {
     private final WorkspaceRepository workspaces;
     private final DbConnectionRepository dbConnections;
     private final OpsServerRepository opsServers;
+    private final ProjectResourceRepository projectResources;
 
     public ProjectService(ProjectRepository projects, UserRepository users, OrgService orgService,
                           AuditService auditService, WorkspaceRepository workspaces,
-                          DbConnectionRepository dbConnections, OpsServerRepository opsServers) {
+                          DbConnectionRepository dbConnections, OpsServerRepository opsServers,
+                          ProjectResourceRepository projectResources) {
         this.projects = projects;
         this.users = users;
         this.orgService = orgService;
@@ -56,6 +66,7 @@ public class ProjectService {
         this.workspaces = workspaces;
         this.dbConnections = dbConnections;
         this.opsServers = opsServers;
+        this.projectResources = projectResources;
     }
 
     /** 组织下项目列表：owner/admin 全量；member/guest 见 team+public+自己拥有的 private。 */
@@ -235,13 +246,20 @@ public class ProjectService {
             w.setOrgId(targetOrgId);
             workspaces.save(w);
         });
-        for (DbConnectionEntity c : dbConnections.findByProjectId(projectId)) {
-            c.setOrgId(targetOrgId);
-            dbConnections.save(c);
-        }
-        for (OpsServerEntity s : opsServers.findByProjectId(projectId)) {
-            s.setOrgId(targetOrgId);
-            opsServers.save(s);
+        // V31 N:N：经 project_resources 绑定的资源同样跟随迁移（org_id 冗余同步；
+        // 资源可能同时绑定同组织其他项目，迁移后绑定关系保留、org_id 以最后迁移为准）
+        for (ProjectResourceEntity b : projectResources.findByProjectId(projectId)) {
+            if (RESOURCE_TYPE_DB.equals(b.getResourceType())) {
+                dbConnections.findById(b.getResourceId()).ifPresent(c -> {
+                    c.setOrgId(targetOrgId);
+                    dbConnections.save(c);
+                });
+            } else if (RESOURCE_TYPE_OPS.equals(b.getResourceType())) {
+                opsServers.findById(b.getResourceId()).ifPresent(s -> {
+                    s.setOrgId(targetOrgId);
+                    opsServers.save(s);
+                });
+            }
         }
 
         auditService.record(AuditModule.PROJECT, "transfer_project", requesterId, targetOrgId, "project",
@@ -249,6 +267,66 @@ public class ProjectService {
                 "fromOrg=" + sourceOrgId + ",toOrg=" + targetOrgId + ",slug=" + p.getSlug(),
                 AuditModule.SUCCESS);
         return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
+    }
+
+    /**
+     * 项目资源绑定（V31 N:N）：整组覆盖该项目绑定的数据库连接与运维服务器。
+     * <p>
+     * <b>权限</b>：owner/admin 或项目创建者（同 update 口径）。
+     * <b>校验</b>：资源必须存在且归属项目所在组织（跨组织绑定拒绝——下发按组织过滤，
+     * 跨组织绑定永远不可见，属配置错误）。
+     * <b>语义</b>：请求里的两个清单即该项目的最终绑定全集（未列出的既有绑定被解除；
+     * 空清单 = 清空该类绑定）。资源未绑定任何项目 = 对所有项目可见（下发口径）。
+     */
+    @Transactional
+    public ProjectDto bindResources(Long requesterId, Long projectId, BindProjectResourcesRequest req) {
+        ProjectEntity p = projects.findById(projectId)
+                .orElseThrow(() -> ApiException.notFound("项目不存在"));
+        requireCanEdit(p, requesterId);
+        List<String> dbKeys = req.dbServerKeys() == null ? List.of() : req.dbServerKeys();
+        List<String> opsKeys = req.opsServerKeys() == null ? List.of() : req.opsServerKeys();
+
+        // 校验：存在 + 同组织（serverKey 去重保序，重复 key 幂等）
+        List<Long> dbIds = new ArrayList<>();
+        for (String key : new LinkedHashSet<>(dbKeys)) {
+            DbConnectionEntity c = dbConnections.findByServerKey(key)
+                    .orElseThrow(() -> ApiException.notFound("数据库连接不存在：" + key));
+            if (!p.getOrgId().equals(c.getOrgId())) {
+                throw ApiException.validation("数据库连接不属于该项目所在组织：" + key);
+            }
+            dbIds.add(c.getId());
+        }
+        List<Long> opsIds = new ArrayList<>();
+        for (String key : new LinkedHashSet<>(opsKeys)) {
+            OpsServerEntity s = opsServers.findByServerKey(key)
+                    .orElseThrow(() -> ApiException.notFound("运维服务器不存在：" + key));
+            if (!p.getOrgId().equals(s.getOrgId())) {
+                throw ApiException.validation("运维服务器不属于该项目所在组织：" + key);
+            }
+            opsIds.add(s.getId());
+        }
+
+        // 整组覆盖：先清后写（唯一约束 uk_project_resource 兜底幂等）
+        projectResources.deleteByProjectAndType(projectId, RESOURCE_TYPE_DB);
+        projectResources.deleteByProjectAndType(projectId, RESOURCE_TYPE_OPS);
+        for (Long id : dbIds) {
+            projectResources.save(newBinding(projectId, RESOURCE_TYPE_DB, id));
+        }
+        for (Long id : opsIds) {
+            projectResources.save(newBinding(projectId, RESOURCE_TYPE_OPS, id));
+        }
+        auditService.record(AuditModule.PROJECT, "bind_project_resources", requesterId, p.getOrgId(),
+                "project", String.valueOf(projectId),
+                "db=" + dbIds.size() + ",ops=" + opsIds.size(), AuditModule.SUCCESS);
+        return toDto(p, resolveUsernames(Set.of(p.getOwnerUserId())));
+    }
+
+    private static ProjectResourceEntity newBinding(Long projectId, String type, Long resourceId) {
+        ProjectResourceEntity b = new ProjectResourceEntity();
+        b.setProjectId(projectId);
+        b.setResourceType(type);
+        b.setResourceId(resourceId);
+        return b;
     }
 
     /** 显式 slug 校验组织内唯一；留空则从名称派生（纯中文名兜底 "proj"），重名自动追加 -2/-3…。 */
@@ -305,9 +383,19 @@ public class ProjectService {
     }
 
     private ProjectDto toDto(ProjectEntity p, Map<Long, String> names) {
+        // V31 N:N：绑定的资源按 serverKey 回填（单项目两次小查询；项目数少，不做批查优化）
+        List<String> dbKeys = new ArrayList<>();
+        List<String> opsKeys = new ArrayList<>();
+        for (ProjectResourceEntity b : projectResources.findByProjectId(p.getId())) {
+            if (RESOURCE_TYPE_DB.equals(b.getResourceType())) {
+                dbConnections.findById(b.getResourceId()).map(DbConnectionEntity::getServerKey).ifPresent(dbKeys::add);
+            } else if (RESOURCE_TYPE_OPS.equals(b.getResourceType())) {
+                opsServers.findById(b.getResourceId()).map(OpsServerEntity::getServerKey).ifPresent(opsKeys::add);
+            }
+        }
         return new ProjectDto(p.getId(), p.getOrgId(), p.getSlug(), p.getName(), p.getDescription(),
                 p.getVisibility(), p.getOwnerUserId(), names.get(p.getOwnerUserId()), p.getStatus(),
-                ldt(p.getCreatedAt()), ldt(p.getUpdatedAt()));
+                dbKeys, opsKeys, ldt(p.getCreatedAt()), ldt(p.getUpdatedAt()));
     }
 
     /** 批量回填创建者展示名（displayName 优先，回落 username），缺失用户留 null。 */

@@ -125,14 +125,19 @@ public class DbConnectionService {
      * 连接参数一律按 serverKey 从 hub 快照解析（前端传参不采信）；密码优先级同 ops：
      * 前端加密密码 > hub 下发密码。
      * <p>
+     * <b>库边界（V33 定稿）</b>：hub 指定库名 = 锁定，强制用它（忽略前端传参）；
+     * 未指定 = 用前端传参（可为空 = 实例级连接）。{@code schema} 可选——库内默认命名空间：
+     * PG=SET search_path、Oracle=ALTER SESSION SET CURRENT_SCHEMA（物理生效）；
+     * MySQL/SQLServer 无会话级等价物，仅注入上下文提示（AI 查询用 schema.table 限定）。
+     * <p>
      * 并发口径：同一 connKey 的并发 connect 以 {@code putIfAbsent} 定胜负——输家立即
      * 关闭自己刚建的物理连接，杜绝 check-then-act 覆盖导致的连接句柄泄漏。
      *
      * @return 连接键（serverKey + "/" + database），前端与工具层凭它引用会话
      */
-    public String connect(String workspaceId, String serverKey, String database, String password) {
+    public String connect(String workspaceId, String serverKey, String database, String schema, String password) {
         SpokeDbConnectionView cfg = requireConfig(serverKey);
-        String db = database == null || database.isBlank() ? cfg.databaseName() : database.trim();
+        String db = resolveTargetDatabase(cfg, database);
         String connKey = connKey(serverKey, db);
         Map<String, DbSession> ws = sessions.computeIfAbsent(workspaceId, k -> new ConcurrentHashMap<>());
         DbSession existing = ws.get(connKey);
@@ -148,19 +153,51 @@ public class DbConnectionService {
         }
         try {
             Connection conn = openConnection(cfg, db, password);
-            DbSession session = new DbSession(conn, cfg, db, connKey);
+            applyDefaultSchema(conn, cfg.dbType(), schema);
+            DbSession session = new DbSession(conn, cfg, db, schema, connKey);
             DbSession prev = ws.putIfAbsent(connKey, session);
             if (prev != null) {
                 // 并发 connect 同一 connKey：对方已抢先注册，立即关闭本线程刚建的连接
                 session.closeQuietly();
                 return prev.connKey();
             }
-            log.info("数据库连接建立: workspace={}, serverKey={}, db={}, product={}",
-                    workspaceId, serverKey, db, session.product());
+            log.info("数据库连接建立: workspace={}, serverKey={}, db={}, schema={}, product={}",
+                    workspaceId, serverKey, db, schema, session.product());
             return connKey;
         } catch (SQLException e) {
             log.warn("数据库连接失败: workspace={}, serverKey={}, db={}", workspaceId, serverKey, db, e);
             throw new IllegalStateException("数据库连接失败: " + describe(e), e);
+        }
+    }
+
+    /**
+     * 设置会话默认 schema（V33）：仅物理可设的库型执行——PG 的 search_path 与 Oracle 的
+     * CURRENT_SCHEMA 都是会话级、轻量、标准做法；MySQL（库即 schema）与 SQLServer（无
+     * 会话级等价物，ALTER USER 是持久变更不可用）跳过，schema 仅注入上下文提示。
+     * schema 名来自前端选择，拼接前强制标识符校验（防注入）。
+     */
+    private static void applyDefaultSchema(Connection conn, String dbType, String schema) throws SQLException {
+        if (schema == null || schema.isBlank()) {
+            return;
+        }
+        String s = schema.trim();
+        if (!s.matches("[A-Za-z_][A-Za-z0-9_$]*")) {
+            throw new IllegalStateException("非法 schema 名: " + s);
+        }
+        switch (dbType) {
+            case "postgresql" -> {
+                try (Statement st = conn.createStatement()) {
+                    st.execute("SET search_path TO \"" + s + "\"");
+                }
+            }
+            case "oracle" -> {
+                try (Statement st = conn.createStatement()) {
+                    st.execute("ALTER SESSION SET CURRENT_SCHEMA = \"" + s + "\"");
+                }
+            }
+            // mysql：库即 schema（连接目标已含库）；sqlserver：无会话级等价物，仅上下文提示
+            default -> {
+            }
         }
     }
 
@@ -188,6 +225,7 @@ public class DbConnectionService {
                 + " 版本=" + version
                 + " 主机=" + s.host() + ":" + s.port()
                 + " 库=" + s.database()
+                + (s.schema() == null ? "" : " 默认schema=" + s.schema())
                 + (s.schemaHint() == null ? "" : " 有表的schema=" + s.schemaHint())
                 + (s.readonlyHint() ? " 连接标记为只读账号（写操作可能被数据库权限拒绝，如遇权限错误请如实告知用户）" : "")
                 + "。表名可用 db_schema 工具查询，查询时使用 schema.table 限定名。";
@@ -237,25 +275,37 @@ public class DbConnectionService {
     }
 
     /**
-     * 列出该连接实例上可用的库/schema 清单（前端「库」二级选择器数据源）。
-     * 用目录库（hub 下发的默认 databaseName）建<b>临时</b>连接查询，查完即关——
-     * 不占用活跃连接槽位。四库查询（设计定稿）：
-     * MySQL=information_schema.schemata；PostgreSQL=pg_namespace；
-     * SQLServer=sys.databases；Oracle=all_users（schema 语义）。
+     * 列出可用的<b>库</b>清单（前端「库」一级选择器数据源，V33 统一模型）。
+     * <p>
+     * <b>边界语义（定稿）</b>：hub 录入的 databaseName 是平台划定的库边界——
+     * 非空 = 锁定该库（直接返回单元素清单，连临时连接都不建）；为空 = 实例级连接，
+     * spoke 自由选库（建临时连接查实例清单，查完即关）。
+     * 自由模式的实例清单口径（各库各自适配，无统一方案）：
+     * MySQL=information_schema.schemata（schema 即库）；PostgreSQL=pg_database（真库清单，
+     * V33 修正——原 pg_namespace 列的是 schema，被当库连接必然失败）；
+     * SQLServer=sys.databases；Oracle 不会走到自由模式（service_name 必填=永远锁定）。
      */
     public List<String> databases(String serverKey, String password) {
         SpokeDbConnectionView cfg = requireConfig(serverKey);
+        // 锁定模式：hub 指定了库名，可选项只有它（不建临时连接、不需要密码）
+        if (cfg.databaseName() != null && !cfg.databaseName().isBlank()) {
+            return List.of(cfg.databaseName().trim());
+        }
         String sql = switch (cfg.dbType()) {
             case "mysql" -> "SELECT schema_name FROM information_schema.schemata "
                     + "WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY 1";
-            case "postgresql" -> "SELECT nspname FROM pg_namespace "
-                    + "WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND nspname NOT LIKE 'pg_temp%' ORDER BY 1";
+            case "postgresql" -> "SELECT datname FROM pg_database "
+                    + "WHERE datistemplate = false AND datallowconn ORDER BY 1";
             case "sqlserver" -> "SELECT name FROM sys.databases WHERE state = 0 "
                     + "AND name NOT IN ('master','tempdb','model','msdb') ORDER BY 1";
-            case "oracle" -> "SELECT username FROM all_users ORDER BY 1";
+            // Oracle：service_name 必填（hub 强制），不存在自由模式；防御性返回空
+            case "oracle" -> null;
             default -> throw new IllegalStateException("不支持的数据库类型: " + cfg.dbType());
         };
-        try (Connection conn = openConnection(cfg, cfg.databaseName(), password);
+        if (sql == null) {
+            return List.of();
+        }
+        try (Connection conn = openConnection(cfg, null, password);
              Statement st = conn.createStatement();
              ResultSet rs = st.executeQuery(sql)) {
             List<String> out = new ArrayList<>();
@@ -267,6 +317,58 @@ public class DbConnectionService {
             log.warn("查询库清单失败: serverKey={}", serverKey, e);
             throw new IllegalStateException("查询库清单失败: " + describe(e), e);
         }
+    }
+
+    /**
+     * 列出指定库内的 schema 清单（前端「schema」二级选择器数据源，V33 统一模型）。
+     * schema 是库内命名空间，hub 不管这层（平台边界只到库）——spoke 侧自由选择。
+     * 用指定库建<b>临时</b>连接查询，查完即关。四库口径：
+     * MySQL=空（库即 schema，前端跳过二级）；PostgreSQL=pg_namespace；
+     * SQLServer=sys.schemas（排除系统固定角色 schema）；Oracle=all_users（schema 即用户，
+     * 连接目标固定为目录 service_name，database 参数被忽略）。
+     */
+    public List<String> schemas(String serverKey, String database, String password) {
+        SpokeDbConnectionView cfg = requireConfig(serverKey);
+        // 连接目标与 connect 同口径：hub 锁定库名时强制用它（忽略前端传参）
+        String connectDb = resolveTargetDatabase(cfg, database);
+        String sql = switch (cfg.dbType()) {
+            case "mysql" -> null; // 库即 schema，无二级选择
+            case "postgresql" -> "SELECT nspname FROM pg_namespace "
+                    + "WHERE nspname NOT IN ('pg_catalog','information_schema','pg_toast') AND nspname NOT LIKE 'pg_temp%' ORDER BY 1";
+            case "sqlserver" -> "SELECT name FROM sys.schemas "
+                    + "WHERE name NOT IN ('guest','INFORMATION_SCHEMA','sys','db_owner','db_accessadmin',"
+                    + "'db_securityadmin','db_ddladmin','db_backupoperator','db_datareader','db_datawriter',"
+                    + "'db_denydatareader','db_denydatawriter') ORDER BY 1";
+            case "oracle" -> "SELECT username FROM all_users ORDER BY 1";
+            default -> throw new IllegalStateException("不支持的数据库类型: " + cfg.dbType());
+        };
+        if (sql == null) {
+            return List.of();
+        }
+        try (Connection conn = openConnection(cfg, connectDb, password);
+             Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(sql)) {
+            List<String> out = new ArrayList<>();
+            while (rs.next()) {
+                out.add(rs.getString(1));
+            }
+            return out;
+        } catch (SQLException e) {
+            log.warn("查询 schema 清单失败: serverKey={}, db={}", serverKey, connectDb, e);
+            throw new IllegalStateException("查询 schema 清单失败: " + describe(e), e);
+        }
+    }
+
+    /**
+     * 连接目标库裁决（唯一口径，connect/schemas 共用）：
+     * hub 指定库名 = 锁定，强制用它（<b>忽略前端传参</b>——与 host/port/username 不采信
+     * 前端同口径，防绕过）；未指定 = 用前端传参（可为空 = 实例级连接，MySQL/SQLServer 合法）。
+     */
+    private static String resolveTargetDatabase(SpokeDbConnectionView cfg, String requested) {
+        if (cfg.databaseName() != null && !cfg.databaseName().isBlank()) {
+            return cfg.databaseName().trim();
+        }
+        return requested == null || requested.isBlank() ? "" : requested.trim();
     }
 
     /**
@@ -298,26 +400,36 @@ public class DbConnectionService {
     /** 按库类型构造 JDBC URL 并建连；Oracle/PG 建连后执行 schema 初始化。 */
     private Connection openConnection(SpokeDbConnectionView cfg, String database, String password)
             throws SQLException {
+        // databaseName 可空（V33：MySQL/PG/SQLServer 可只连实例）；Oracle 的 service_name 必填
+        boolean noDb = database == null || database.isBlank();
         String url = switch (cfg.dbType()) {
             // useSSL/allowPublicKeyRetrieval 联动：明文模式（内网现状）必须允许公钥检索
             // 才能完成 caching_sha2_password 认证；加密模式下关闭检索、凭证书交换
-            case "mysql" -> "jdbc:mysql://" + cfg.host() + ":" + cfg.port() + "/" + database
+            case "mysql" -> "jdbc:mysql://" + cfg.host() + ":" + cfg.port()
+                    + (noDb ? "" : "/" + database)
                     + "?useSSL=" + transportSsl
                     + "&allowPublicKeyRetrieval=" + !transportSsl
                     + "&useUnicode=true&characterEncoding=utf8"
                     + "&connectTimeout=" + (CONNECT_TIMEOUT_SECONDS * 1000)
                     + "&socketTimeout=" + (SOCKET_TIMEOUT_SECONDS * 1000);
-            case "postgresql" -> "jdbc:postgresql://" + cfg.host() + ":" + cfg.port() + "/" + database
+            case "postgresql" -> "jdbc:postgresql://" + cfg.host() + ":" + cfg.port()
+                    // PG 空库时驱动会用「用户名」当库名去连，多半不存在——显式落默认维护库
+                    + (noDb ? "/postgres" : "/" + database)
                     + "?connectTimeout=" + CONNECT_TIMEOUT_SECONDS
                     + "&socketTimeout=" + SOCKET_TIMEOUT_SECONDS;
             case "sqlserver" -> "jdbc:sqlserver://" + cfg.host() + ":" + cfg.port()
-                    + ";databaseName=" + database + ";encrypt=" + transportSsl
+                    + (noDb ? "" : ";databaseName=" + database) + ";encrypt=" + transportSsl
                     + ";loginTimeout=" + LOGIN_TIMEOUT_SECONDS;
-            case "oracle" -> "jdbc:oracle:thin:@//" + cfg.host() + ":" + cfg.port() + "/" + database;
+            case "oracle" -> {
+                if (noDb) {
+                    throw new IllegalStateException("Oracle 连接必须指定 service_name（数据库名），请在平台目录补全");
+                }
+                yield "jdbc:oracle:thin:@//" + cfg.host() + ":" + cfg.port() + "/" + database;
+            }
             default -> throw new IllegalStateException("不支持的数据库类型: " + cfg.dbType());
         };
         Connection conn = DriverManager.getConnection(url, cfg.username(), password);
-        initSchema(conn, cfg.dbType(), database);
+        initSchema(conn, cfg.dbType(), noDb ? "" : database);
         return conn;
     }
 
@@ -370,6 +482,8 @@ public class DbConnectionService {
         private final String host;
         private final int port;
         private final String database;
+        /** 会话默认 schema（V33，可空）：PG/Oracle 建连时物理生效；MySQL/SQLServer 仅提示。 */
+        private final String schema;
         private final String username;
         private final boolean readonlyHint;
         private final String product;
@@ -381,7 +495,7 @@ public class DbConnectionService {
          *  免去模型盲目探测。MySQL 的 schema=库（无需单独提示），其他库型暂不探测。 */
         private final String schemaHint;
 
-        DbSession(Connection connection, SpokeDbConnectionView cfg, String database, String connKey)
+        DbSession(Connection connection, SpokeDbConnectionView cfg, String database, String schema, String connKey)
                 throws SQLException {
             this.connection = connection;
             this.serverKey = cfg.serverKey();
@@ -390,6 +504,7 @@ public class DbConnectionService {
             this.host = cfg.host();
             this.port = cfg.port();
             this.database = database;
+            this.schema = schema == null || schema.isBlank() ? null : schema.trim();
             this.username = cfg.username();
             this.readonlyHint = cfg.readonlyHint();
             // 版本探测（设计定稿）：DatabaseMetaData 统一取，不写方言 SQL
@@ -430,6 +545,11 @@ public class DbConnectionService {
 
         public String database() {
             return database;
+        }
+
+        /** 会话默认 schema（V33，可空）：PG/Oracle 物理生效；MySQL/SQLServer 仅提示层。 */
+        public String schema() {
+            return schema;
         }
 
         public String username() {

@@ -12,6 +12,7 @@ import jakarta.validation.constraints.Size;
  * （spoke 侧稳定标识，创建后不可改）；host 必填；port 缺省 22；username/description 可空
  * （服务端归一化为空串）。password 可空：非空则加密落库（V19）随目录下发 spoke 供临时运维直连；
  * 留空 = 不设密码（spoke 仍走本地录入凭证）。明文仅存在于请求体，任何回显不含密码。
+ * 项目绑定不在本请求（V31 N:N：走项目目录页 PUT /api/projects/{id}/resources）。
  */
 public record CreateOpsServerRequest(
         @Pattern(regexp = "[a-z0-9_-]+", message = "serverKey 只能包含小写字母/数字/连字符/下划线")
@@ -26,6 +27,5 @@ public record CreateOpsServerRequest(
         Integer sortOrder,
         Boolean enabled,
         @NotNull Long orgId,
-        @NotNull Long projectId,
         @Size(max = 255) String password) {
 }

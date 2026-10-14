@@ -233,6 +233,10 @@ export const restoreProject = (id: number) => request<void>('POST', `/api/projec
 export const transferProject = (id: number, targetOrgId: number) =>
   request<ProjectDto>('POST', `/api/projects/${id}/transfer`, {targetOrgId});
 
+/** 项目资源绑定（V31 N:N）：整组覆盖该项目绑定的 db 连接与 ops 服务器（未列出的既有绑定被解除） */
+export const bindProjectResources = (id: number, body: {dbServerKeys: string[]; opsServerKeys: string[]}) =>
+  request<ProjectDto>('PUT', `/api/projects/${id}/resources`, body);
+
 // ============ 审计日志 ============
 /** 组织维度审计日志分页查询（仅 owner/admin 可调通，服务端强制校验） */
 export const fetchAuditLogs = (orgId: number, module: string, page: number, size: number) => {
@@ -579,8 +583,6 @@ export interface CreateOpsServerBody {
   enabled?: boolean;
   /** 归属组织 id：必填（组织必须，>0） */
   orgId: number;
-  /** 归属项目 id：可选标记（0 = 不限定项目） */
-  projectId: number;
   /** 登录密码（可空；非空则加密落库并随目录下发 spoke 供临时运维直连） */
   password?: string;
 }
@@ -588,7 +590,7 @@ export interface CreateOpsServerBody {
 export const createOpsServer = (body: CreateOpsServerBody) =>
   request<OpsServerDto>('POST', '/api/platform/ops-servers', body);
 
-/** 部分更新：serverKey 创建后不可改（不提交）；orgId/projectId 不传不改（组织必须，orgId 传 0 会被服务端拒绝；projectId 传 0=清除项目归属/不限定）；password 不传=保持原密码 */
+/** 部分更新：serverKey 创建后不可改（不提交）；orgId 不传不改（组织必须，传 0 会被服务端拒绝）；password 不传=保持原密码。项目绑定不在本接口（V31 N:N：项目目录页维护） */
 export interface UpdateOpsServerBody {
   name?: string;
   host?: string;
@@ -602,7 +604,6 @@ export interface UpdateOpsServerBody {
   sortOrder?: number;
   enabled?: boolean;
   orgId?: number;
-  projectId?: number;
   /** 登录密码：不传 = 保持原密码；空串 = 清除（spoke 回退本地录入凭证） */
   password?: string;
 }
@@ -667,8 +668,6 @@ export interface CreateDbConnectionBody {
   enabled?: boolean;
   /** 归属组织 id：必填（组织必须，>0） */
   orgId: number;
-  /** 归属项目 id：可选标记（0 = 不限定项目） */
-  projectId: number;
   /** 登录密码（可空；非空则加密落库并随目录下发 spoke 供 DB 工作区连接） */
   password?: string;
 }
@@ -676,7 +675,7 @@ export interface CreateDbConnectionBody {
 export const createDbConnection = (body: CreateDbConnectionBody) =>
   request<DbConnectionDto>('POST', '/api/platform/db-connections', body);
 
-/** 部分更新：serverKey 创建后不可改（不提交）；orgId/projectId 不传不改（组织必须，orgId 传 0 会被服务端拒绝；projectId 传 0=清除项目归属/不限定）；password 不传=保持原密码 */
+/** 部分更新：serverKey 创建后不可改（不提交）；orgId 不传不改（组织必须，传 0 会被服务端拒绝）；password 不传=保持原密码。项目绑定不在本接口（V31 N:N：项目目录页维护） */
 export interface UpdateDbConnectionBody {
   name?: string;
   dbType?: string;
@@ -689,7 +688,6 @@ export interface UpdateDbConnectionBody {
   sortOrder?: number;
   enabled?: boolean;
   orgId?: number;
-  projectId?: number;
   /** 登录密码：不传 = 保持原密码；空串 = 清除（spoke 回退本地录入凭证） */
   password?: string;
 }

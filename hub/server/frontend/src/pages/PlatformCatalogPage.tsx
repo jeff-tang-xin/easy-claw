@@ -26,7 +26,6 @@ import {
   listPlatformFlags,
   listPlatformMenus,
   listPlatformTools,
-  listProjects,
   setPlatformToolEnabled,
   updateDbConnection,
   updateOpsServer,
@@ -49,7 +48,6 @@ import type {
   OpsServerGrantDto,
   OrgOptionDto,
   PlatformToolDto,
-  ProjectDto,
   UserDto,
 } from '../types';
 
@@ -919,7 +917,8 @@ function PlatformToolsTab() {
 
 const formatGrantTime = (iso: string) => new Date(iso).toLocaleString();
 
-/** 运维服务器表单字段（新增/编辑共用）；orgId 必填（组织必须），projectId=0 表示不限定项目。
+/** 运维服务器表单字段（新增/编辑共用）；orgId 必填（组织必须）。
+ *  项目绑定不在本表单（V31 N:N：在项目目录页维护）。
  *  password 仅新增/改密时填写，编辑留空 = 保持原密码（服务端 null 语义）；该字段不回显明文。 */
 interface OpsServerForm {
   serverKey: string;
@@ -933,7 +932,6 @@ interface OpsServerForm {
   sortOrder: number;
   enabled: boolean;
   orgId: number;
-  projectId: number;
   password: string;
 }
 
@@ -949,7 +947,6 @@ const emptyOpsServerForm = (): OpsServerForm => ({
   sortOrder: 0,
   enabled: true,
   orgId: 0,
-  projectId: 0,
   password: '',
 });
 
@@ -964,9 +961,8 @@ function PlatformOpsServersTab() {
   const [grantsFor, setGrantsFor] = useState<OpsServerDto | null>(null);
   const [logsFor, setLogsFor] = useState<OpsServerDto | null>(null);
   const [catModal, setCatModal] = useState(false);
-  // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量；项目按组织逐个拉，失败降级为空
+  // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量
   const [orgNames, setOrgNames] = useState<Map<number, string>>(new Map());
-  const [projectNames, setProjectNames] = useState<Map<number, string>>(new Map());
 
   const reload = useCallback(async () => {
     try {
@@ -978,16 +974,8 @@ function PlatformOpsServersTab() {
       setCategories(cats);
       setError('');
       const orgIds = [...new Set(list.map((s) => s.orgId).filter((id) => id > 0))];
-      const [orgOpts, projectLists] = await Promise.all([
-        listOrgOptions().catch(() => [] as OrgOptionDto[]),
-        Promise.all(orgIds.map((orgId) => listProjects(orgId).catch(() => [] as ProjectDto[]))),
-      ]);
+      const orgOpts = await listOrgOptions().catch(() => [] as OrgOptionDto[]);
       setOrgNames(new Map(orgOpts.map((o) => [o.id, o.name])));
-      const pMap = new Map<number, string>();
-      for (const projects of projectLists) {
-        for (const p of projects) pMap.set(p.id, p.name);
-      }
-      setProjectNames(pMap);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载运维服务器目录失败');
     }
@@ -1099,10 +1087,7 @@ function PlatformOpsServersTab() {
                     </td>
                     <td>
                       {s.orgId > 0 ? (
-                        <>
-                          {orgNames.get(s.orgId) ?? `#${s.orgId}`}
-                          {s.projectId > 0 && <> / {projectNames.get(s.projectId) ?? `#${s.projectId}`}</>}
-                        </>
+                        <>{orgNames.get(s.orgId) ?? `#${s.orgId}`}</>
                       ) : (
                         <span className="badge badge-archived">未归属</span>
                       )}
@@ -1212,15 +1197,11 @@ function OpsServerFormModal({
           sortOrder: item.sortOrder,
           enabled: item.enabled,
           orgId: item.orgId,
-          projectId: item.projectId,
           password: '',
         }
       : emptyOpsServerForm(),
   );
   const [orgOptions, setOrgOptions] = useState<OrgOptionDto[]>([]);
-  const [projects, setProjects] = useState<ProjectDto[]>([]);
-  const [projectsLoading, setProjectsLoading] = useState(false);
-  const [projectsError, setProjectsError] = useState('');
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -1230,27 +1211,6 @@ function OpsServerFormModal({
       .then(setOrgOptions)
       .catch(() => setOrgOptions([]));
   }, []);
-
-  const loadProjects = useCallback(async (orgId: number, keepProjectId = 0) => {
-    setProjects([]);
-    setProjectsError('');
-    if (orgId <= 0) return;
-    setProjectsLoading(true);
-    try {
-      const list = await listProjects(orgId);
-      // 仅 active 项目可选；编辑回显时当前项目即使已归档也要保留在选项里，否则 select 显示不出来
-      setProjects(list.filter((p) => p.status === 'active' || p.id === keepProjectId));
-    } catch (err) {
-      // platformAdmin 可能不是该组织成员（后端 403）：降级为空列表并提示，不阻塞表单
-      setProjectsError(err instanceof Error ? err.message : '项目列表加载失败');
-    } finally {
-      setProjectsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (item && item.orgId > 0) void loadProjects(item.orgId, item.projectId);
-  }, [item, loadProjects]);
 
   const setField = <K extends keyof OpsServerForm>(key: K, value: OpsServerForm[K]) =>
     setForm((f) => ({...f, [key]: value}));
@@ -1300,7 +1260,6 @@ function OpsServerFormModal({
           sortOrder: form.sortOrder,
           enabled: form.enabled,
           orgId: form.orgId,
-          projectId: form.projectId,
           password: form.password || undefined,
         });
       } else if (item) {
@@ -1315,7 +1274,6 @@ function OpsServerFormModal({
           sortOrder: form.sortOrder,
           enabled: form.enabled,
           orgId: form.orgId,
-          projectId: form.projectId,
           // 编辑留空 = 不传该字段 = 保持原密码（服务端 null 语义）；填了才覆盖
           password: form.password || undefined,
         });
@@ -1429,11 +1387,7 @@ function OpsServerFormModal({
           归属组织
           <select
             value={form.orgId}
-            onChange={(e) => {
-              const orgId = Number(e.target.value);
-              setForm((f) => ({...f, orgId, projectId: 0}));
-              void loadProjects(orgId);
-            }}
+            onChange={(e) => setField('orgId', Number(e.target.value))}
           >
             <option value={0}>— 请选择归属组织（必填）—</option>
             {orgOptions.map((o) => (
@@ -1442,26 +1396,7 @@ function OpsServerFormModal({
               </option>
             ))}
           </select>
-        </label>
-        <label>
-          归属项目
-          <select
-            value={form.projectId}
-            disabled={form.orgId <= 0 || projectsLoading}
-            onChange={(e) => setField('projectId', Number(e.target.value))}
-          >
-            <option value={0}>不限定项目</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          {projectsLoading && <span className="field-hint">项目加载中…</span>}
-          {projectsError && <span className="field-hint">项目列表加载失败：{projectsError}</span>}
-          {form.orgId > 0 && !projectsLoading && !projectsError && projects.length === 0 && (
-            <span className="field-hint">该组织下暂无可选项目</span>
-          )}
+          <span className="field-hint">项目绑定在「项目目录」页按项目维护（V31 N:N）。</span>
         </label>
         <label>
           排序
@@ -1910,7 +1845,6 @@ interface DbConnectionForm {
   sortOrder: number;
   enabled: boolean;
   orgId: number;
-  projectId: number;
   password: string;
 }
 
@@ -1927,7 +1861,6 @@ const emptyDbConnectionForm = (): DbConnectionForm => ({
   sortOrder: 0,
   enabled: true,
   orgId: 0,
-  projectId: 0,
   password: '',
 });
 
@@ -1939,26 +1872,16 @@ function PlatformDbConnectionsTab() {
   const [modal, setModal] = useState<null | {mode: 'create'} | {mode: 'edit'; item: DbConnectionDto}>(null);
   const [grantsFor, setGrantsFor] = useState<DbConnectionDto | null>(null);
   const [logsFor, setLogsFor] = useState<DbConnectionDto | null>(null);
-  // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量；项目按组织逐个拉，失败降级为空
+  // 归属名称映射（表格展示名称而非裸 id）：组织一次拉全量
   const [orgNames, setOrgNames] = useState<Map<number, string>>(new Map());
-  const [projectNames, setProjectNames] = useState<Map<number, string>>(new Map());
 
   const reload = useCallback(async () => {
     try {
       const list = await listDbConnections();
       setConns(list);
       setError('');
-      const orgIds = [...new Set(list.map((c) => c.orgId).filter((id) => id > 0))];
-      const [orgOpts, projectLists] = await Promise.all([
-        listOrgOptions().catch(() => [] as OrgOptionDto[]),
-        Promise.all(orgIds.map((orgId) => listProjects(orgId).catch(() => [] as ProjectDto[]))),
-      ]);
+      const orgOpts = await listOrgOptions().catch(() => [] as OrgOptionDto[]);
       setOrgNames(new Map(orgOpts.map((o) => [o.id, o.name])));
-      const pMap = new Map<number, string>();
-      for (const projects of projectLists) {
-        for (const p of projects) pMap.set(p.id, p.name);
-      }
-      setProjectNames(pMap);
     } catch (err) {
       setError(err instanceof Error ? err.message : '加载数据库连接目录失败');
     }
@@ -2057,10 +1980,7 @@ function PlatformDbConnectionsTab() {
                     </td>
                     <td>
                       {c.orgId > 0 ? (
-                        <>
-                          {orgNames.get(c.orgId) ?? `#${c.orgId}`}
-                          {c.projectId > 0 && <> / {projectNames.get(c.projectId) ?? `#${c.projectId}`}</>}
-                        </>
+                        <>{orgNames.get(c.orgId) ?? `#${c.orgId}`}</>
                       ) : (
                         <span className="badge badge-archived">未归属</span>
                       )}
@@ -2161,15 +2081,11 @@ function DbConnectionFormModal({
           sortOrder: item.sortOrder,
           enabled: item.enabled,
           orgId: item.orgId,
-          projectId: item.projectId,
           password: '',
         }
       : emptyDbConnectionForm(),
   );
   const [orgOptions, setOrgOptions] = useState<OrgOptionDto[]>([]);
-  const [projects, setProjects] = useState<ProjectDto[]>([]);
-  const [projectsLoading, setProjectsLoading] = useState(false);
-  const [projectsError, setProjectsError] = useState('');
   const [formError, setFormError] = useState('');
   const [busy, setBusy] = useState(false);
 
@@ -2179,27 +2095,6 @@ function DbConnectionFormModal({
       .then(setOrgOptions)
       .catch(() => setOrgOptions([]));
   }, []);
-
-  const loadProjects = useCallback(async (orgId: number, keepProjectId = 0) => {
-    setProjects([]);
-    setProjectsError('');
-    if (orgId <= 0) return;
-    setProjectsLoading(true);
-    try {
-      const list = await listProjects(orgId);
-      // 仅 active 项目可选；编辑回显时当前项目即使已归档也要保留在选项里，否则 select 显示不出来
-      setProjects(list.filter((p) => p.status === 'active' || p.id === keepProjectId));
-    } catch (err) {
-      // platformAdmin 可能不是该组织成员（后端 403）：降级为空列表并提示，不阻塞表单
-      setProjectsError(err instanceof Error ? err.message : '项目列表加载失败');
-    } finally {
-      setProjectsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (item && item.orgId > 0) void loadProjects(item.orgId, item.projectId);
-  }, [item, loadProjects]);
 
   const setField = <K extends keyof DbConnectionForm>(key: K, value: DbConnectionForm[K]) =>
     setForm((f) => ({...f, [key]: value}));
@@ -2221,8 +2116,8 @@ function DbConnectionFormModal({
       setFormError('端口需为 1-65535 的整数');
       return;
     }
-    if (!form.databaseName.trim()) {
-      setFormError('请填写数据库名');
+    if (form.dbType === 'oracle' && !form.databaseName.trim()) {
+      setFormError('Oracle 连接必须填写 service_name（数据库名）');
       return;
     }
     if (!form.username.trim()) {
@@ -2254,7 +2149,6 @@ function DbConnectionFormModal({
           sortOrder: form.sortOrder,
           enabled: form.enabled,
           orgId: form.orgId,
-          projectId: form.projectId,
           password: form.password || undefined,
         });
       } else if (item) {
@@ -2270,7 +2164,6 @@ function DbConnectionFormModal({
           sortOrder: form.sortOrder,
           enabled: form.enabled,
           orgId: form.orgId,
-          projectId: form.projectId,
           // 编辑留空 = 不传该字段 = 保持原密码（服务端 null 语义）；填了才覆盖
           password: form.password || undefined,
         });
@@ -2331,12 +2224,13 @@ function DbConnectionFormModal({
           />
         </label>
         <label>
-          数据库名 *
+          数据库名
           <input
             value={form.databaseName}
             onChange={(e) => setField('databaseName', e.target.value)}
-            placeholder="连接后默认库 / 会话绑定库"
+            placeholder="可留空连实例默认库（Oracle 必填 service_name）"
           />
+          <span className="field-hint">MySQL/PostgreSQL/SQLServer 可留空——一个微服务项目常含多个库，查询时用 schema.table 限定名</span>
         </label>
         <label>
           登录账号 *
@@ -2376,12 +2270,7 @@ function DbConnectionFormModal({
           归属组织 *
           <select
             value={form.orgId}
-            onChange={(e) => {
-              const orgId = Number(e.target.value);
-              setField('orgId', orgId);
-              setField('projectId', 0);
-              void loadProjects(orgId);
-            }}
+            onChange={(e) => setField('orgId', Number(e.target.value))}
           >
             <option value={0}>选择组织…</option>
             {orgOptions.map((o) => (
@@ -2390,22 +2279,7 @@ function DbConnectionFormModal({
               </option>
             ))}
           </select>
-        </label>
-        <label>
-          归属项目
-          <select
-            value={form.projectId}
-            onChange={(e) => setField('projectId', Number(e.target.value))}
-            disabled={form.orgId <= 0 || projectsLoading}
-          >
-            <option value={0}>不限定项目</option>
-            {projects.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          {projectsError && <span className="field-hint">{projectsError}</span>}
+          <span className="field-hint">项目绑定在「项目目录」页按项目维护（V31 N:N）。</span>
         </label>
         <label className="checkbox-label">
           <input

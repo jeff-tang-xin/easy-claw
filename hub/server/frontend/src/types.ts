@@ -54,6 +54,10 @@ export interface ProjectDto {
   ownerUsername: string | null;
   /** active|archived */
   status: string;
+  /** 该项目绑定的数据库连接 serverKey 清单（V31 N:N；空 = 未绑定） */
+  dbServerKeys: string[];
+  /** 该项目绑定的运维服务器 serverKey 清单（V31 N:N；空 = 未绑定） */
+  opsServerKeys: string[];
   createdAt: string | null;
   updatedAt: string | null;
 }
@@ -474,7 +478,7 @@ export interface RoleMatrixResponse {
 
 // ============ 运维服务器目录（platformAdmin 维护归属与授权；spoke 按归属只读下发） ============
 
-/** 运维服务器目录项；orgId 必填（组织必须），projectId 0=不限定项目（历史未归属行仅存量，新增必选组织） */
+/** 运维服务器目录项；orgId 必填（组织必须）。项目绑定 V31 N:N：projectIds 为绑定项目 id 清单（空 = 未绑定，对所有项目可见） */
 export interface OpsServerDto {
   id: number;
   /** spoke 侧稳定标识（全局唯一，创建后不可改） */
@@ -492,8 +496,8 @@ export interface OpsServerDto {
   enabled: boolean;
   /** 归属组织 id（组织必须，>0） */
   orgId: number;
-  /** 归属项目 id；0=不限定项目 */
-  projectId: number;
+  /** 绑定项目 id 清单（V31 N:N；空 = 未绑定任何项目） */
+  projectIds: number[];
   /** 是否已设置登录密码（hub 加密保存、随目录下发 spoke；回显仅此布尔位，不含明文） */
   passwordSet: boolean;
 }
@@ -567,8 +571,8 @@ export interface DbConnectionDto {
   enabled: boolean;
   /** 归属组织 id（组织必须，>0） */
   orgId: number;
-  /** 归属项目 id；0=不限定项目 */
-  projectId: number;
+  /** 绑定项目 id 清单（V31 N:N；空 = 未绑定任何项目） */
+  projectIds: number[];
   /** 是否已设置登录密码（hub 加密保存、随目录下发 spoke；回显仅此布尔位，不含明文） */
   passwordSet: boolean;
 }

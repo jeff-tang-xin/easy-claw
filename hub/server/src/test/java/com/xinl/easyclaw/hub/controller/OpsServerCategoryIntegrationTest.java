@@ -57,7 +57,7 @@ class OpsServerCategoryIntegrationTest extends HubIntegrationTestSupport {
     private long createServer(String admin, String tag, long orgId, String category) throws Exception {
         String json = postJson("/api/platform/ops-servers",
                 new CreateOpsServerRequest("osc-" + tag, "主机 " + tag, "10.0.0.1", null, null,
-                        null, null, category, null, null, orgId, 0L, null), admin)
+                        null, null, category, null, null, orgId, null), admin)
                 .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
         return om.readTree(json).get("id").asLong();
     }
@@ -138,7 +138,7 @@ class OpsServerCategoryIntegrationTest extends HubIntegrationTestSupport {
         // 未受管标签 → 400；受管标签 → 200
         postJson("/api/platform/ops-servers",
                 new CreateOpsServerRequest("osc-managed-x", "X", "10.0.0.1", null, null, null,
-                        null, "osc-不存在", null, null, orgId, 0L, null), admin)
+                        null, "osc-不存在", null, null, orgId, null), admin)
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION"));
         createCategory(admin, "osc-网关");
         long serverId = createServer(admin, "managed-a", orgId, "osc-网关");
@@ -146,11 +146,11 @@ class OpsServerCategoryIntegrationTest extends HubIntegrationTestSupport {
         // 更新为未受管 → 400；更新为空串 = 清除标注（历史行兼容）→ 200
         putJson("/api/platform/ops-servers/" + serverId,
                 new UpdateOpsServerRequest(null, null, null, null, null, null, "osc-不存在",
-                        null, null, null, null, null), admin)
+                        null, null, null, null), admin)
                 .andExpect(status().isBadRequest()).andExpect(jsonPath("$.code").value("VALIDATION"));
         putJson("/api/platform/ops-servers/" + serverId,
                 new UpdateOpsServerRequest(null, null, null, null, null, null, "",
-                        null, null, null, null, null), admin)
+                        null, null, null, null), admin)
                 .andExpect(status().isOk()).andExpect(jsonPath("$.category").value(""));
     }
 

@@ -10,23 +10,24 @@ import com.xinl.easyclaw.hub.contract.ops.UpdateOpsServerRequest;
 import com.xinl.easyclaw.hub.contract.spoke.SpokeOpsServer;
 import com.xinl.easyclaw.hub.entity.OpsServerEntity;
 import com.xinl.easyclaw.hub.entity.OpsServerGrantEntity;
-import com.xinl.easyclaw.hub.entity.ProjectEntity;
 import com.xinl.easyclaw.hub.entity.UserEntity;
 import com.xinl.easyclaw.hub.repository.OpsServerGrantRepository;
 import com.xinl.easyclaw.hub.repository.OpsServerCategoryRepository;
 import com.xinl.easyclaw.hub.repository.OpsServerRepository;
 import com.xinl.easyclaw.hub.repository.OrganizationRepository;
-import com.xinl.easyclaw.hub.repository.ProjectRepository;
+import com.xinl.easyclaw.hub.repository.ProjectResourceRepository;
 import com.xinl.easyclaw.hub.repository.UserRepository;
 import com.xinl.easyclaw.hub.security.AppKeyContext;
 import com.xinl.easyclaw.hub.service.AuditService;
 import com.xinl.easyclaw.hub.service.CryptoService;
 import com.xinl.easyclaw.hub.service.PlatformAdminGuard;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,8 +35,9 @@ import org.springframework.transaction.annotation.Transactional;
 /**
  * 运维服务器目录服务（ops_servers，V17）：hub 统一维护（platformAdmin CRUD），spoke 只读消费。
  * serverKey 全局唯一、创建后不可改（spoke 侧稳定标识）。
- * V18 起服务器归属组织+项目（org_id/project_id，0=未归属遗留行），spoke 下发按
- * appkey 组织 + 用户时效授权（ops_server_grants）过滤。
+ * V18 起服务器归属组织（org_id，0=未归属遗留行），spoke 下发按 appkey 组织 +
+ * 用户时效授权（ops_server_grants）过滤；V31 起项目归属改 N:N（project_resources，
+ * 绑定走项目目录页），本服务不再读写资源上的单值 project_id。
  * V19 起可存运维登录密码密文（CryptoService，AES-256-GCM），下发 spoke 时解密为明文
  * 供临时运维直连；平台回显只出 passwordSet 布尔位。
  */
@@ -45,39 +47,45 @@ public class OpsServerService {
     private final OpsServerRepository repo;
     private final OpsServerCategoryRepository categories;
     private final OrganizationRepository organizations;
-    private final ProjectRepository projects;
     private final UserRepository users;
     private final OpsServerGrantRepository grants;
     private final PlatformAdminGuard guard;
     private final AuditService auditService;
     private final CryptoService crypto;
+    private final ProjectResourceRepository projectResources;
 
     public OpsServerService(OpsServerRepository repo, OpsServerCategoryRepository categories,
                             OrganizationRepository organizations,
-                            ProjectRepository projects, UserRepository users,
+                            UserRepository users,
                             OpsServerGrantRepository grants, PlatformAdminGuard guard,
-                            AuditService auditService, CryptoService crypto) {
+                            AuditService auditService, CryptoService crypto,
+                            ProjectResourceRepository projectResources) {
         this.repo = repo;
         this.categories = categories;
         this.organizations = organizations;
-        this.projects = projects;
         this.users = users;
         this.grants = grants;
         this.guard = guard;
         this.auditService = auditService;
         this.crypto = crypto;
+        this.projectResources = projectResources;
     }
 
-    /** 目录清单（platformAdmin），按 sort_order,id 保序。 */
+    /** 目录清单（platformAdmin），按 sort_order,id 保序；项目绑定批查（避免逐行 N+1）。 */
     public List<OpsServerDto> listCatalog(Long requesterId) {
         guard.require(requesterId);
-        return repo.findAllByOrderBySortOrderAscIdAsc().stream().map(OpsServerService::toDto).toList();
+        List<OpsServerEntity> all = repo.findAllByOrderBySortOrderAscIdAsc();
+        Map<Long, Set<Long>> projectIdsByResource = projectIdsByResource(
+                all.stream().map(OpsServerEntity::getId).toList());
+        return all.stream()
+                .map(e -> toDto(e, projectIdsByResource.getOrDefault(e.getId(), Set.of())))
+                .toList();
     }
 
     /**
      * 新增目录项（platformAdmin）：serverKey 全局唯一（409），port 缺省 22，可空文本归一化为空串。
      * serverKey 留空时按名称自动生成（前端「留空则按名称自动生成」承诺的语义）；
-     * orgId 必须为正且组织存在（组织必须）；projectId 可空（0 = 不限定项目，可选标记）。
+     * orgId 必须为正且组织存在（组织必须）。项目绑定不在本请求（V31 N:N：走项目目录页）。
      */
     @Transactional
     public OpsServerDto createCatalogItem(Long requesterId, CreateOpsServerRequest req) {
@@ -89,7 +97,6 @@ public class OpsServerService {
             throw ApiException.conflict("serverKey 已存在");
         }
         Long orgId = requireOrgId(req.orgId());
-        Long projectId = requireProjectId(orgId, req.projectId());
         OpsServerEntity e = new OpsServerEntity();
         e.setServerKey(serverKey);
         e.setName(req.name().trim());
@@ -102,7 +109,6 @@ public class OpsServerService {
         e.setSortOrder(req.sortOrder() == null ? 0 : req.sortOrder());
         e.setEnabled(req.enabled() == null ? Boolean.TRUE : req.enabled());
         e.setOrgId(orgId);
-        e.setProjectId(projectId);
         e.setPasswordEnc(encryptOrNull(req.password()));
         repo.save(e);
         auditService.record(AuditModule.OPS, "create_ops_server", requesterId, null, "ops_server",
@@ -142,16 +148,8 @@ public class OpsServerService {
         if (req.enabled() != null) {
             e.setEnabled(req.enabled());
         }
-        if (req.orgId() != null || req.projectId() != null) {
-            Long orgId = req.orgId() != null ? requireOrgId(req.orgId()) : e.getOrgId();
-            if (req.projectId() != null) {
-                e.setProjectId(requireProjectId(orgId, req.projectId()));
-            } else if (req.orgId() != null && !req.orgId().equals(e.getOrgId())
-                    && e.getProjectId() != null && e.getProjectId() > 0) {
-                // 旧项目属于旧组织，换组织必须连带指定新项目，否则留下 project ∉ org 的脏数据
-                throw ApiException.validation("更换归属组织时须同时指定 projectId");
-            }
-            e.setOrgId(orgId);
+        if (req.orgId() != null) {
+            e.setOrgId(requireOrgId(req.orgId()));
         }
         if (req.password() != null) {
             // null = 保持原密码；非 null = 覆盖（空串 = 清除，spoke 回退本地录入凭证）
@@ -177,24 +175,47 @@ public class OpsServerService {
      * spoke 下发用（GET /api/spoke/ops-servers）：仅启用项，按 sort_order,id 保序。
      * V19：password_enc 非空时解密为明文随目录下发（临时运维直连）；未设置则为 null。
      * V18 过滤口径：归属当前 appkey 组织（org_id=0 的未归属遗留行永远不下发）+
-     * 可选按绑定项目过滤（projectId 非空时）+ 当前 appkey 用户存在未过期授权
+     * 可选按项目过滤（V31 N:N：资源未绑定任何项目 = 对所有项目可见，绑定了则要求
+     * 绑定集合包含请求项目）+ 当前 appkey 用户存在未过期授权
      * （valid_from &lt;= now &lt;= valid_until，一人一服务器一行，过期即不可见）。
      */
     public List<SpokeOpsServer> listEnabledForSpoke(AppKeyContext ctx, Long projectId) {
         Instant now = Instant.now();
-        return repo.findAllByEnabledTrueOrderBySortOrderAscIdAsc().stream()
+        List<OpsServerEntity> enabled = repo.findAllByEnabledTrueOrderBySortOrderAscIdAsc();
+        Map<Long, Set<Long>> projectIdsByResource = projectIdsByResource(
+                enabled.stream().map(OpsServerEntity::getId).toList());
+        return enabled.stream()
                 .filter(e -> ctx.orgId().equals(e.getOrgId()))
-                // 项目为可选标记：projectId<=0（不限定项目）对所有项目可见；>0 时按项目过滤
-                .filter(e -> projectId == null || e.getProjectId() == null || e.getProjectId() <= 0
-                        || projectId.equals(e.getProjectId()))
+                .filter(e -> visibleForProject(projectIdsByResource.get(e.getId()), projectId))
                 .filter(e -> grants.existsByServerIdAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
                         e.getId(), ctx.userId(), now, now))
                 .map(e -> new SpokeOpsServer(e.getServerKey(), e.getName(), e.getHost(), e.getPort(),
                         e.getUsername(), e.getDescription(), e.getOsType(), e.getCategory(),
-                        e.getProjectId(),
+                        List.copyOf(projectIdsByResource.getOrDefault(e.getId(), Set.of())),
                         e.getPasswordEnc() == null || e.getPasswordEnc().isEmpty()
                                 ? null : crypto.decrypt(e.getPasswordEnc())))
                 .toList();
+    }
+
+    /** 批查资源的项目绑定：resourceId → projectId 集合（V31 N:N）。 */
+    private Map<Long, Set<Long>> projectIdsByResource(List<Long> resourceIds) {
+        if (resourceIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Set<Long>> out = new LinkedHashMap<>();
+        for (var binding : projectResources.findByResourceTypeAndResourceIdIn("ops", resourceIds)) {
+            out.computeIfAbsent(binding.getResourceId(), k -> new HashSet<>())
+                    .add(binding.getProjectId());
+        }
+        return out;
+    }
+
+    /** 资源未绑定任何项目 = 与项目无关对所有项目可见；绑定了则要求包含请求项目。 */
+    private static boolean visibleForProject(Set<Long> boundProjectIds, Long requestingProjectId) {
+        if (boundProjectIds == null || boundProjectIds.isEmpty()) {
+            return true;
+        }
+        return requestingProjectId != null && boundProjectIds.contains(requestingProjectId);
     }
 
     /**
@@ -295,18 +316,6 @@ public class OpsServerService {
         return trimmed;
     }
 
-    /** projectId 可选标记：0/null = 不限定项目（合法）；>0 时必须存在且属于该组织（全库无外键，归属一致性在此收口）。 */
-    private Long requireProjectId(Long orgId, Long projectId) {
-        if (projectId == null || projectId <= 0) {
-            return 0L;
-        }
-        ProjectEntity p = projects.findById(projectId).orElseThrow(() -> ApiException.notFound("项目不存在"));
-        if (!orgId.equals(p.getOrgId())) {
-            throw ApiException.validation("项目不属于该组织");
-        }
-        return projectId;
-    }
-
     /**
      * serverKey 自动生成（前端「留空则按名称自动生成」承诺的语义）：名称转小写、非 [a-z0-9_-] 折叠为 '-'
      * 并去首尾 '-'；结果为空（如纯中文名）回退 "server"；与存量冲突时追加 -2/-3… 保证 uk_ops_server_key 唯一。
@@ -330,11 +339,23 @@ public class OpsServerService {
         return key;
     }
 
-    private static OpsServerDto toDto(OpsServerEntity e) {
+    private OpsServerDto toDto(OpsServerEntity e) {
+        return toDto(e, Set.copyOf(boundProjectIds(e.getId())));
+    }
+
+    private OpsServerDto toDto(OpsServerEntity e, Set<Long> projectIds) {
         return new OpsServerDto(e.getId(), e.getServerKey(), e.getName(), e.getHost(), e.getPort(),
                 e.getUsername(), e.getDescription(), e.getOsType(), e.getCategory(), e.getSortOrder(),
-                e.getEnabled(), e.getOrgId(), e.getProjectId(),
+                e.getEnabled(), e.getOrgId(), projectIds.stream().sorted().toList(),
                 e.getPasswordEnc() != null && !e.getPasswordEnc().isEmpty());
+    }
+
+    /** 资源绑定的项目 id 集合（V31 N:N；升序，空 = 未绑定任何项目）。 */
+    private List<Long> boundProjectIds(Long resourceId) {
+        return projectResources.findByResourceTypeAndResourceIdIn("ops", List.of(resourceId)).stream()
+                .map(com.xinl.easyclaw.hub.entity.ProjectResourceEntity::getProjectId)
+                .sorted()
+                .toList();
     }
 
     /** 明文 → 密文；null/空白输入返回 null（不落库）。 */

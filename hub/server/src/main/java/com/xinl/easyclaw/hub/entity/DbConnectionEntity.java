@@ -12,7 +12,8 @@ import lombok.Setter;
  * 数据库连接目录（db_connections，V30）：hub 统一维护（platformAdmin CRUD），spoke 只读消费。
  * serverKey 全局唯一、创建后不可改（spoke 侧稳定标识）。
  * dbType 限四类：mysql / postgresql / sqlserver / oracle（应用层校验）。
- * databaseName 为默认库（Oracle 存 service_name）；readonly_hint 提示「必须只读账号」
+ * databaseName 为默认库（可空——MySQL/PG/SQLServer 可只连实例，查询用 schema.table 限定名；
+ * Oracle 存 service_name 必填）；readonly_hint 提示「只读账号」
  * （物理防线，随目录下发注入提示词）。
  * passwordEnc AES-256-GCM（CryptoService，同 ops_servers V19 机制），仅下发 spoke 直连，
  * 平台端永不回显。
@@ -63,10 +64,6 @@ public class DbConnectionEntity extends BaseEntity {
     /** 归属组织：0 = 未归属遗留行，不满足下发条件，spoke 永远看不到，须 platformAdmin 补全。 */
     @Column(name = "org_id", nullable = false)
     private Long orgId = 0L;
-
-    /** 归属项目：0 = 不限定项目（org_id 冗余口径对齐 ops_servers，无外键，应用层保证一致）。 */
-    @Column(name = "project_id", nullable = false)
-    private Long projectId = 0L;
 
     /** 连接密码密文（AES-256-GCM）；NULL = 未设置。仅用于下发 spoke 直连，绝不在平台回显。 */
     @Column(name = "password_enc", length = 1024)

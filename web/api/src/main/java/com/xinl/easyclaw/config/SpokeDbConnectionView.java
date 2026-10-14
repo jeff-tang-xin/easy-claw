@@ -1,5 +1,7 @@
 package com.xinl.easyclaw.config;
 
+import java.util.List;
+
 /**
  * hub 下发的数据库连接视图（spoke 侧，V30）：从通用资源信封（SpokeResourceItem，
  * type=db-connection）解析而来。password 为 hub 解密后的明文——仅服务端快照持有，
@@ -7,10 +9,11 @@ package com.xinl.easyclaw.config;
  * 供前端预判「一键连接 vs 当次手输」（同 ops 口径）。
  *
  * @param readonlyHint hub 侧标记的只读提示（行为层提示，物理防线是 DB 只读账号）
+ * @param projectIds   绑定的项目 id 集合（V31 N:N；空 = 未绑定任何项目，对所有项目可见）
  */
 public record SpokeDbConnectionView(String serverKey, String name, String dbType,
                                     String host, int port, String databaseName,
                                     String username, String description,
-                                    boolean readonlyHint, Long projectId,
+                                    boolean readonlyHint, List<Long> projectIds,
                                     String password, boolean hasPassword) {
 }

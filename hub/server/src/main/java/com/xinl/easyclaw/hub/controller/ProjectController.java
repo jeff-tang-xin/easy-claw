@@ -1,6 +1,7 @@
 package com.xinl.easyclaw.hub.controller;
 
 import com.xinl.easyclaw.hub.security.CurrentUserHolder;
+import com.xinl.easyclaw.hub.contract.project.BindProjectResourcesRequest;
 import com.xinl.easyclaw.hub.contract.project.CreateProjectRequest;
 import com.xinl.easyclaw.hub.contract.project.ProjectDto;
 import com.xinl.easyclaw.hub.contract.project.TransferProjectRequest;
@@ -13,6 +14,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -68,5 +70,11 @@ public class ProjectController {
     @PostMapping("/{id}/transfer")
     public ProjectDto transfer(@PathVariable Long id, @Valid @RequestBody TransferProjectRequest req) {
         return projectService.transfer(CurrentUserHolder.requireUserId(), id, req.targetOrgId());
+    }
+
+    /** 项目资源绑定（V31 N:N）：整组覆盖该项目绑定的 db 连接与 ops 服务器（owner/admin 或创建者）。 */
+    @PutMapping("/{id}/resources")
+    public ProjectDto bindResources(@PathVariable Long id, @Valid @RequestBody BindProjectResourcesRequest req) {
+        return projectService.bindResources(CurrentUserHolder.requireUserId(), id, req);
     }
 }

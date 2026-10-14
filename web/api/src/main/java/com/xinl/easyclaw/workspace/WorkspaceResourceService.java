@@ -45,21 +45,23 @@ public class WorkspaceResourceService {
     /**
      * 按工作区归属项目过滤候选。
      * <p>
-     * {@code projectId} 为空（本地模式或未绑项目的工作区）时仍返回「不限定项目」的资源：
-     * hub 侧 {@code projectId<=0} 的语义就是对所有项目可见（V18 起沿用），这类资源本就
-     * 与项目无关，不该因为工作区没绑项目而被藏起来。
+     * {@code projectId} 为空（本地模式或未绑项目的工作区）时仍返回「未绑定任何项目」的资源：
+     * V31 N:N 语义——资源未绑定任何项目 = 与项目无关，对所有项目可见；绑定了则要求
+     * 绑定集合包含工作区归属项目。这类资源本就与项目无关，不该因为工作区没绑项目而被藏起来。
      */
     public ResourceOptions options(Long projectId) {
         List<WorkspaceResourceService.ResourceOption> databases =
                 cloudBootstrapService.cloudConfig().dbConnections().stream()
-                        .filter(c -> visibleFor(c.projectId(), projectId))
+                        .filter(c -> visibleFor(c.projectIds(), projectId))
                         .map(c -> new ResourceOption(c.serverKey(),
-                                c.name() + " · " + c.dbType() + " · " + c.databaseName(),
+                                c.name() + " · " + c.dbType()
+                                        + (c.databaseName() == null || c.databaseName().isBlank()
+                                        ? "" : " · " + c.databaseName()),
                                 c.hasPassword()))
                         .toList();
         List<WorkspaceResourceService.ResourceOption> servers =
                 cloudBootstrapService.cloudConfig().opsServers().stream()
-                        .filter(s -> visibleFor(s.projectId(), projectId))
+                        .filter(s -> visibleFor(s.projectIds(), projectId))
                         .map(s -> new ResourceOption(s.serverKey(),
                                 s.name() + (s.osType() == null || s.osType().isBlank()
                                         ? "" : " · " + s.osType()),
@@ -94,11 +96,14 @@ public class WorkspaceResourceService {
                         + "请在下拉里重新选择，或先在平台完成授权。");
     }
 
-    /** hub 侧 projectId<=0/null = 不限定项目，对所有工作区可见。 */
-    private static boolean visibleFor(Long resourceProjectId, Long workspaceProjectId) {
-        if (resourceProjectId == null || resourceProjectId <= 0) {
+    /**
+     * V31 N:N 可见性：资源未绑定任何项目（null/空集）= 与项目无关，对所有工作区可见；
+     * 绑定了则要求绑定集合包含工作区归属项目。
+     */
+    private static boolean visibleFor(java.util.List<Long> resourceProjectIds, Long workspaceProjectId) {
+        if (resourceProjectIds == null || resourceProjectIds.isEmpty()) {
             return true;
         }
-        return resourceProjectId.equals(workspaceProjectId);
+        return workspaceProjectId != null && resourceProjectIds.contains(workspaceProjectId);
     }
 }

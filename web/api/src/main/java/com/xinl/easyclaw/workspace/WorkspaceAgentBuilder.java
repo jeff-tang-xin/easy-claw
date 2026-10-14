@@ -731,7 +731,7 @@ public class WorkspaceAgentBuilder {
                 log.warn("工作区 {} 绑定的数据库 {} 不在平台下发清单中，跳过自动建连", workspaceId, serverKey);
                 return;
             }
-            dbConnectionService.connect(workspaceId, serverKey.trim(), cfg.databaseName(), cfg.password());
+            dbConnectionService.connect(workspaceId, serverKey.trim(), cfg.databaseName(), null, cfg.password());
             log.info("工作区 {} 绑定的数据库 {} 已自动建连（默认库 {}）",
                     workspaceId, serverKey, cfg.databaseName());
         } catch (Exception ex) {

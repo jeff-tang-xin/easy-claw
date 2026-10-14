@@ -56,11 +56,13 @@ public class DbConnectionService implements SpokeResourceCatalog {
     private final PlatformAdminGuard guard;
     private final AuditService auditService;
     private final CryptoService crypto;
+    private final com.xinl.easyclaw.hub.repository.ProjectResourceRepository projectResources;
 
     public DbConnectionService(DbConnectionRepository repo, OrganizationRepository organizations,
                                ProjectRepository projects, UserRepository users,
                                ResourceGrantRepository grants, ResourceGrantService grantService,
-                               PlatformAdminGuard guard, AuditService auditService, CryptoService crypto) {
+                               PlatformAdminGuard guard, AuditService auditService, CryptoService crypto,
+                               com.xinl.easyclaw.hub.repository.ProjectResourceRepository projectResources) {
         this.repo = repo;
         this.organizations = organizations;
         this.projects = projects;
@@ -70,6 +72,7 @@ public class DbConnectionService implements SpokeResourceCatalog {
         this.guard = guard;
         this.auditService = auditService;
         this.crypto = crypto;
+        this.projectResources = projectResources;
     }
 
     @Override
@@ -82,7 +85,8 @@ public class DbConnectionService implements SpokeResourceCatalog {
     /**
      * spoke 下发用（GET /api/spoke/resources/db-connection）：仅启用项，按 sort_order,id 保序。
      * 过滤口径（全类型一致）：归属当前 appkey 组织（org_id=0 的未归属遗留行永远不下发）+
-     * 可选按绑定项目过滤（projectId 非空时；条目 projectId<=0 = 不限定项目对所有项目可见）+
+     * 可选按项目过滤（projectId 非空时；V31 N:N——资源未绑定任何项目 = 对所有项目可见，
+     * 绑定了则要求绑定集合包含请求项目）+
      * 当前 appkey 用户存在未过期授权（resource_grants，valid_from <= now <= valid_until）。
      * password_enc 非空时解密为明文随目录下发（临时直连）；未设置则为 null。
      */
@@ -94,21 +98,45 @@ public class DbConnectionService implements SpokeResourceCatalog {
                 .findByResourceTypeAndUserIdAndValidFromLessThanEqualAndValidUntilGreaterThanEqual(
                         RESOURCE_TYPE, ctx.userId(), now, now)
                 .stream().map(ResourceGrantEntity::getResourceId).collect(Collectors.toSet());
-        return repo.findAllByEnabledTrueOrderBySortOrderAscIdAsc().stream()
+        // 项目绑定批查（V31 N:N）：resourceId → 绑定的项目集合
+        List<DbConnectionEntity> enabled = repo.findAllByEnabledTrueOrderBySortOrderAscIdAsc();
+        Map<Long, Set<Long>> projectIdsByResource = projectIdsByResource(
+                enabled.stream().map(DbConnectionEntity::getId).toList());
+        return enabled.stream()
                 .filter(e -> ctx.orgId() != null && ctx.orgId().equals(e.getOrgId()))
-                .filter(e -> projectId == null || e.getProjectId() == null || e.getProjectId() <= 0
-                        || projectId.equals(e.getProjectId()))
+                .filter(e -> visibleForProject(projectIdsByResource.get(e.getId()), projectId))
                 .filter(e -> authorizedIds.contains(e.getId()))
                 .map(e -> new SpokeResourceItem(
                         e.getServerKey(), e.getName(), RESOURCE_TYPE,
-                        attributes(e),
+                        attributes(e, projectIdsByResource.getOrDefault(e.getId(), Set.of())),
                         e.getPasswordEnc() == null || e.getPasswordEnc().isEmpty()
                                 ? null : crypto.decrypt(e.getPasswordEnc())))
                 .toList();
     }
 
+    /** 批查资源的项目绑定：resourceId → projectId 集合（V31 N:N）。 */
+    private Map<Long, Set<Long>> projectIdsByResource(List<Long> resourceIds) {
+        if (resourceIds.isEmpty()) {
+            return Map.of();
+        }
+        Map<Long, Set<Long>> out = new LinkedHashMap<>();
+        for (var binding : projectResources.findByResourceTypeAndResourceIdIn("db", resourceIds)) {
+            out.computeIfAbsent(binding.getResourceId(), k -> new java.util.HashSet<>())
+                    .add(binding.getProjectId());
+        }
+        return out;
+    }
+
+    /** 资源未绑定任何项目 = 与项目无关对所有项目可见；绑定了则要求包含请求项目。 */
+    private static boolean visibleForProject(Set<Long> boundProjectIds, Long requestingProjectId) {
+        if (boundProjectIds == null || boundProjectIds.isEmpty()) {
+            return true;
+        }
+        return requestingProjectId != null && boundProjectIds.contains(requestingProjectId);
+    }
+
     /** 类型特有字段 → 通用信封 attributes（spoke 侧 SpokeDbConnectionView.from 解析）。 */
-    private static Map<String, String> attributes(DbConnectionEntity e) {
+    private static Map<String, String> attributes(DbConnectionEntity e, Set<Long> boundProjectIds) {
         Map<String, String> attrs = new LinkedHashMap<>();
         attrs.put("dbType", e.getDbType());
         attrs.put("host", e.getHost());
@@ -117,7 +145,8 @@ public class DbConnectionService implements SpokeResourceCatalog {
         attrs.put("username", e.getUsername());
         attrs.put("description", e.getDescription());
         attrs.put("readonlyHint", String.valueOf(Boolean.TRUE.equals(e.getReadonlyHint())));
-        attrs.put("projectId", String.valueOf(e.getProjectId()));
+        attrs.put("projectIds", boundProjectIds.stream().map(String::valueOf)
+                .collect(java.util.stream.Collectors.joining(",")));
         attrs.put("hasPassword", String.valueOf(e.getPasswordEnc() != null && !e.getPasswordEnc().isEmpty()));
         return attrs;
     }
@@ -149,15 +178,21 @@ public class DbConnectionService implements SpokeResourceCatalog {
 
     // ---- 目录 CRUD（platformAdmin，类型特异不通用化）----
 
-    /** 目录清单（platformAdmin），按 sort_order,id 保序。 */
+    /** 目录清单（platformAdmin），按 sort_order,id 保序；项目绑定批查（避免逐行 N+1）。 */
     public List<DbConnectionDto> listCatalog(Long requesterId) {
         guard.require(requesterId);
-        return repo.findAllByOrderBySortOrderAscIdAsc().stream().map(DbConnectionService::toDto).toList();
+        List<DbConnectionEntity> all = repo.findAllByOrderBySortOrderAscIdAsc();
+        Map<Long, Set<Long>> projectIdsByResource = projectIdsByResource(
+                all.stream().map(DbConnectionEntity::getId).toList());
+        return all.stream()
+                .map(e -> toDto(e, projectIdsByResource.getOrDefault(e.getId(), Set.of())))
+                .toList();
     }
 
     /**
      * 新增目录项（platformAdmin）：serverKey 全局唯一（409），留空按名称自动生成；
-     * dbType 限四类；orgId 必须为正且组织存在；projectId 可选标记。
+     * dbType 限四类；orgId 必须为正且组织存在。项目绑定走项目目录页（V31 N:N），不在本接口。
+     * databaseName 可空（MySQL/PG/SQLServer 可只连实例）；Oracle 必填（service_name）。
      */
     @Transactional
     public DbConnectionDto createCatalogItem(Long requesterId, CreateDbConnectionRequest req) {
@@ -169,24 +204,24 @@ public class DbConnectionService implements SpokeResourceCatalog {
             throw ApiException.conflict("serverKey 已存在");
         }
         Long orgId = requireOrgId(req.orgId());
-        Long projectId = requireProjectId(orgId, req.projectId());
         // dbType 校验与 update 同走 service 层（Bean Validation @Pattern 仍是第一道，
         // 这里是唯一权威口径——两入口一套规则，避免「改了 update 漏了 create」类漂移）
         requireDbType(req.dbType());
+        String databaseName = req.databaseName() == null ? "" : req.databaseName().trim();
+        requireDatabaseName(req.dbType(), databaseName);
         DbConnectionEntity e = new DbConnectionEntity();
         e.setServerKey(serverKey);
         e.setName(req.name().trim());
         e.setDbType(req.dbType().trim());
         e.setHost(req.host().trim());
         e.setPort(req.port());
-        e.setDatabaseName(req.databaseName().trim());
+        e.setDatabaseName(databaseName);
         e.setUsername(req.username().trim());
         e.setDescription(req.description() == null ? "" : req.description().trim());
         e.setReadonlyHint(req.readonlyHint() == null ? Boolean.FALSE : req.readonlyHint());
         e.setSortOrder(req.sortOrder() == null ? 0 : req.sortOrder());
         e.setEnabled(req.enabled() == null ? Boolean.TRUE : req.enabled());
         e.setOrgId(orgId);
-        e.setProjectId(projectId);
         e.setPasswordEnc(encryptOrNull(req.password()));
         repo.save(e);
         auditService.record(AuditModule.DB, "create_db_connection", requesterId, null, "db_connection",
@@ -231,21 +266,15 @@ public class DbConnectionService implements SpokeResourceCatalog {
         if (req.enabled() != null) {
             e.setEnabled(req.enabled());
         }
-        if (req.orgId() != null || req.projectId() != null) {
-            Long orgId = req.orgId() != null ? requireOrgId(req.orgId()) : e.getOrgId();
-            if (req.projectId() != null) {
-                e.setProjectId(requireProjectId(orgId, req.projectId()));
-            } else if (req.orgId() != null && !req.orgId().equals(e.getOrgId())
-                    && e.getProjectId() != null && e.getProjectId() > 0) {
-                // 旧项目属于旧组织，换组织必须连带指定新项目，否则留下 project ∉ org 的脏数据
-                throw ApiException.validation("更换归属组织时须同时指定 projectId");
-            }
-            e.setOrgId(orgId);
+        if (req.orgId() != null) {
+            e.setOrgId(requireOrgId(req.orgId()));
         }
         if (req.password() != null) {
             // null = 保持原密码；非 null = 覆盖（空串 = 清除，spoke 回退当次手输）
             e.setPasswordEnc(encryptOrNull(req.password()));
         }
+        // 终态校验：dbType 与 databaseName 的联动约束（如改成 Oracle 但库名为空 = 建连必败）
+        requireDatabaseName(e.getDbType(), e.getDatabaseName());
         repo.save(e);
         auditService.record(AuditModule.DB, "update_db_connection", requesterId, null, "db_connection",
                 String.valueOf(e.getId()), "serverKey=" + e.getServerKey(), AuditModule.SUCCESS);
@@ -315,6 +344,16 @@ public class DbConnectionService implements SpokeResourceCatalog {
         }
     }
 
+    /**
+     * databaseName 按库类型校验：MySQL/PostgreSQL/SQLServer 可空（只连实例，微服务多库场景
+     * 查询时用 schema.table 限定名）；Oracle 必填——service_name 是 JDBC 建连必需品，空了连不上。
+     */
+    private static void requireDatabaseName(String dbType, String databaseName) {
+        if ("oracle".equals(dbType) && (databaseName == null || databaseName.isBlank())) {
+            throw ApiException.validation("Oracle 连接必须填写 service_name（数据库名）");
+        }
+    }
+
     /** orgId 必须为正整数且组织存在（0/负数=入参错误 400，不存在=404）。 */
     private Long requireOrgId(Long orgId) {
         if (orgId == null || orgId <= 0) {
@@ -326,17 +365,7 @@ public class DbConnectionService implements SpokeResourceCatalog {
         return orgId;
     }
 
-    /** projectId 可选标记：0/null = 不限定项目（合法）；>0 时必须存在且属于该组织。 */
-    private Long requireProjectId(Long orgId, Long projectId) {
-        if (projectId == null || projectId <= 0) {
-            return 0L;
-        }
-        ProjectEntity p = projects.findById(projectId).orElseThrow(() -> ApiException.notFound("项目不存在"));
-        if (!orgId.equals(p.getOrgId())) {
-            throw ApiException.validation("项目不属于该组织");
-        }
-        return projectId;
-    }
+    /** projectId 校验已随 V31 N:N 移除：绑定走项目目录页，资源服务不再持有项目归属。 */
 
     /**
      * serverKey 自动生成（同 ops 口径）：名称转小写、非 [a-z0-9_-] 折叠为 '-' 并去首尾 '-'；
@@ -360,11 +389,24 @@ public class DbConnectionService implements SpokeResourceCatalog {
         return key;
     }
 
-    private static DbConnectionDto toDto(DbConnectionEntity e) {
+    private DbConnectionDto toDto(DbConnectionEntity e) {
+        return toDto(e, Set.copyOf(boundProjectIds(e.getId())));
+    }
+
+    private DbConnectionDto toDto(DbConnectionEntity e, Set<Long> projectIds) {
         return new DbConnectionDto(e.getId(), e.getServerKey(), e.getName(), e.getDbType(),
                 e.getHost(), e.getPort(), e.getDatabaseName(), e.getUsername(), e.getDescription(),
-                e.getReadonlyHint(), e.getSortOrder(), e.getEnabled(), e.getOrgId(), e.getProjectId(),
+                e.getReadonlyHint(), e.getSortOrder(), e.getEnabled(), e.getOrgId(),
+                projectIds.stream().sorted().toList(),
                 e.getPasswordEnc() != null && !e.getPasswordEnc().isEmpty());
+    }
+
+    /** 资源绑定的项目 id 集合（V31 N:N；升序，空 = 未绑定任何项目）。 */
+    private List<Long> boundProjectIds(Long resourceId) {
+        return projectResources.findByResourceTypeAndResourceIdIn("db", List.of(resourceId)).stream()
+                .map(com.xinl.easyclaw.hub.entity.ProjectResourceEntity::getProjectId)
+                .sorted()
+                .toList();
     }
 
     /** 明文 → 密文；null/空白输入返回 null（不落库）。 */

@@ -199,7 +199,7 @@ public class CloudBootstrapService {
         List<SpokeOpsServerView> servers = s == null ? List.of()
                 : s.opsServers().stream()
                         .map(o -> new SpokeOpsServerView(o.serverKey(), o.name(), o.host(), o.port(),
-                                o.username(), o.description(), o.projectId(), null, o.hasPassword(),
+                                o.username(), o.description(), o.projectIds(), null, o.hasPassword(),
                                 o.osType(), o.category()))
                         .toList();
         // 数据库连接（V30）：同 ops 口径——明文不下发浏览器，仅 hasPassword 布尔
@@ -207,7 +207,7 @@ public class CloudBootstrapService {
                 : s.dbConnections().stream()
                         .map(c -> new SpokeDbConnectionView(c.serverKey(), c.name(), c.dbType(),
                                 c.host(), c.port(), c.databaseName(), c.username(), c.description(),
-                                c.readonlyHint(), c.projectId(), null, c.hasPassword()))
+                                c.readonlyHint(), c.projectIds(), null, c.hasPassword()))
                         .toList();
         return new CloudConfigView(
                 available,
@@ -350,9 +350,39 @@ public class CloudBootstrapService {
         }
     }
 
+    /**
+     * 解析 hub 下发的项目绑定集合（V31 N:N）：ops 走 JSON 数组字段，db 走 attrs CSV 字符串，
+     * 两种形态都兼容；字段缺失/空 = null（旧 hub 容错，不造空哨兵——null 与空集在
+     * WorkspaceResourceService.visibleFor 中同样按「未绑定 = 全部可见」处理）。
+     */
+    private static java.util.List<Long> parseProjectIds(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        java.util.List<Long> out = new ArrayList<>();
+        if (node.isArray()) {
+            for (JsonNode e : node) {
+                if (e.canConvertToLong()) {
+                    out.add(e.asLong());
+                }
+            }
+        } else if (node.isTextual()) {
+            for (String part : node.asText().split(",")) {
+                String trimmed = part.trim();
+                if (!trimmed.isEmpty()) {
+                    try {
+                        out.add(Long.parseLong(trimmed));
+                    } catch (NumberFormatException ignored) {
+                        // 脏数据容错：非数字段跳过
+                    }
+                }
+            }
+        }
+        return out;
+    }
+
     /** 拉取 hub 下发的运维服务器清单；任何失败返回空表 */
-    private List<SpokeOpsServerView> fetchOpsServers(String hubUrl, String appKey) {
-        try {
+    private List<SpokeOpsServerView> fetchOpsServers(String hubUrl, String appKey) {        try {
             String body = fetchJson(hubUrl, appKey, "/api/spoke/ops-servers");
             if (body == null) {
                 return List.of();
@@ -366,8 +396,8 @@ public class CloudBootstrapService {
                         n.path("port").asInt(22),
                         n.path("username").asText(""),
                         n.path("description").asText(""),
-                        // V18：归属项目 id；旧 hub 未下发该字段时保持 null（不造 0 哨兵）
-                        n.hasNonNull("projectId") ? n.path("projectId").asLong() : null,
+                        // V31 N:N：绑定的项目 id 集合；旧 hub 未下发该字段时保持 null（不造空哨兵）
+                        parseProjectIds(n.path("projectIds")),
                         // V19：hub 解密后随目录下发；未设置/旧 hub 下发时保持 null
                         n.hasNonNull("password") ? n.path("password").asText() : null,
                         // V24：是否配置了密码（供前端预判一键连接；明文本身不下发浏览器）
@@ -406,7 +436,7 @@ public class CloudBootstrapService {
                         attrs.path("description").asText(""),
                         // V32：缺省 false——hub 总是下发该字段；缺省 true 会让未标记的连接被模型当只读而拒绝 db_dml
                         attrs.path("readonlyHint").asBoolean(false),
-                        attrs.hasNonNull("projectId") ? attrs.path("projectId").asLong() : null,
+                        parseProjectIds(attrs.path("projectIds")),
                         // V30：hub 解密后随目录下发；未设置/旧 hub 下发时保持 null
                         n.hasNonNull("password") ? n.path("password").asText() : null,
                         attrs.path("hasPassword").asBoolean(false)));

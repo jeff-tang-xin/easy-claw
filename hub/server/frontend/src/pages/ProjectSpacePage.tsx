@@ -1,7 +1,15 @@
 import {useCallback, useEffect, useState} from 'react';
 import {NavLink, Navigate, Route, Routes, useLocation, useNavigate, useParams} from 'react-router-dom';
-import {archiveProject, getProject, restoreProject, updateProject} from '../api';
-import type {ProjectDto} from '../types';
+import {
+  archiveProject,
+  bindProjectResources,
+  getProject,
+  listDbConnections,
+  listOpsServers,
+  restoreProject,
+  updateProject,
+} from '../api';
+import type {DbConnectionDto, OpsServerDto, ProjectDto} from '../types';
 import BlackboardPage from './BlackboardPage';
 import KnowledgePage from './KnowledgePage';
 
@@ -15,6 +23,8 @@ interface Props {
   /** 当前用户加入的全部组织（含角色），用于按项目所属组织推导角色，支持跨组织 public 直链 */
   orgs: OrgRef[];
   meUserId: number;
+  /** 是否平台管理员：资源目录（db 连接/ops 服务器）仅平台管理员可读，绑定编辑仅其可用 */
+  platformAdmin: boolean;
 }
 
 const VIS_LABELS: Record<string, string> = {
@@ -27,7 +37,7 @@ const VIS_LABELS: Record<string, string> = {
  * 项目空间（IA 乙方案核心）：/projects/:pid 独立空间，内置二级导航。
  * 概览/知识库/黑板当前可用；设置为项目管理入口，业务模块均落此空间内、不新增顶层菜单。
  */
-export default function ProjectSpacePage({orgs, meUserId}: Props) {
+export default function ProjectSpacePage({orgs, meUserId, platformAdmin}: Props) {
   const {pid} = useParams();
   const projectId = Number(pid);
   const navigate = useNavigate();
@@ -149,7 +159,12 @@ export default function ProjectSpacePage({orgs, meUserId}: Props) {
         <Route
           path="settings"
           element={
-            <SettingsTab project={project} canManage={canManage} onChanged={(np) => setProject(np)} />
+            <SettingsTab
+              project={project}
+              canManage={canManage}
+              platformAdmin={platformAdmin}
+              onChanged={(np) => setProject(np)}
+            />
           }
         />
         <Route path="*" element={<Navigate to={base} replace />} />
@@ -213,10 +228,12 @@ const SETTINGS_VIS_HINTS: Record<string, string> = {
 function SettingsTab({
   project,
   canManage,
+  platformAdmin,
   onChanged,
 }: {
   project: ProjectDto;
   canManage: boolean;
+  platformAdmin: boolean;
   onChanged: (p: ProjectDto) => void;
 }) {
   const navigate = useNavigate();
@@ -317,6 +334,8 @@ function SettingsTab({
         {archived && <div className="form-error" style={{marginTop: 10}}>项目已归档，不可编辑基本信息；请先恢复。</div>}
       </form>
 
+      <ResourceBindingCard project={project} canManage={canManage} platformAdmin={platformAdmin} onChanged={onChanged} />
+
       <div className="card ps-danger-zone">
         <h3 className="ps-card-title">归档与恢复</h3>
         <p className="page-desc">归档后项目不再出现在默认列表，历史文档保留；可随时恢复为进行中。</p>
@@ -335,6 +354,147 @@ function SettingsTab({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * 项目资源绑定（V31 N:N）：该项目绑定的数据库连接与运维服务器（按 serverKey 整组覆盖）。
+ * 候选清单来自平台目录（platformAdmin 端点）：platformAdmin 可编辑；组织 owner/admin
+ * 只读展示已绑定清单（资源目录对非平台管理员不可读，绑定操作由平台管理员执行）。
+ */
+function ResourceBindingCard({
+  project,
+  canManage,
+  platformAdmin,
+  onChanged,
+}: {
+  project: ProjectDto;
+  canManage: boolean;
+  platformAdmin: boolean;
+  onChanged: (p: ProjectDto) => void;
+}) {
+  const [dbConns, setDbConns] = useState<DbConnectionDto[] | null>(null);
+  const [opsServers, setOpsServers] = useState<OpsServerDto[] | null>(null);
+  const [loadError, setLoadError] = useState('');
+  const [selectedDb, setSelectedDb] = useState<Set<string>>(new Set(project.dbServerKeys ?? []));
+  const [selectedOps, setSelectedOps] = useState<Set<string>>(new Set(project.opsServerKeys ?? []));
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState('');
+  const [savedHint, setSavedHint] = useState('');
+
+  const editable = canManage && platformAdmin;
+
+  useEffect(() => {
+    if (!editable) return;
+    let cancelled = false;
+    Promise.all([listDbConnections(), listOpsServers()])
+      .then(([dbs, ops]) => {
+        if (cancelled) return;
+        // 仅本组织资源可绑（后端同样校验跨组织绑定拒绝）；含未归属（orgId=0）行不可绑
+        setDbConns(dbs.filter((c) => c.orgId === project.orgId));
+        setOpsServers(ops.filter((s) => s.orgId === project.orgId));
+        setLoadError('');
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err instanceof Error ? err.message : '资源目录加载失败');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [editable, project.orgId]);
+
+  if (!canManage) {
+    return null;
+  }
+
+  const toggle = (set: Set<string>, key: string, apply: (s: Set<string>) => void) => {
+    const next = new Set(set);
+    if (next.has(key)) {
+      next.delete(key);
+    } else {
+      next.add(key);
+    }
+    apply(next);
+    setSavedHint('');
+  };
+
+  const save = async () => {
+    setFormError('');
+    setSavedHint('');
+    setBusy(true);
+    try {
+      const updated = await bindProjectResources(project.id, {
+        dbServerKeys: [...selectedDb],
+        opsServerKeys: [...selectedOps],
+      });
+      onChanged(updated);
+      setSavedHint('绑定已保存');
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : '保存失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const boundDb = project.dbServerKeys ?? [];
+  const boundOps = project.opsServerKeys ?? [];
+
+  return (
+    <div className="card">
+      <h3 className="ps-card-title">资源绑定</h3>
+      <p className="page-desc">
+        绑定后，本项目的工作区可在资源选择器中看到对应数据库连接与运维服务器；
+        未绑定任何项目（空绑定）的资源对所有项目可见。
+      </p>
+      {!platformAdmin && (
+        <div className="form-error">
+          资源绑定由平台管理员维护。当前绑定：
+          {boundDb.length === 0 && boundOps.length === 0
+            ? '无'
+            : `${boundDb.length} 个数据库连接 / ${boundOps.length} 个运维服务器`}
+        </div>
+      )}
+      {platformAdmin && loadError && <div className="form-error">{loadError}</div>}
+      {editable && !loadError && (
+        <>
+          <label className="ps-bind-group">
+            <b>数据库连接</b>
+            {(dbConns ?? []).length === 0 && <span className="field-hint">本组织暂无数据库连接（在平台目录中维护）</span>}
+            {(dbConns ?? []).map((c) => (
+              <label key={c.serverKey} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={selectedDb.has(c.serverKey)}
+                  onChange={() => toggle(selectedDb, c.serverKey, setSelectedDb)}
+                />
+                {c.name}（{c.dbType} · {c.serverKey}）
+              </label>
+            ))}
+          </label>
+          <label className="ps-bind-group">
+            <b>运维服务器</b>
+            {(opsServers ?? []).length === 0 && <span className="field-hint">本组织暂无运维服务器（在平台目录中维护）</span>}
+            {(opsServers ?? []).map((s) => (
+              <label key={s.serverKey} className="checkbox-label">
+                <input
+                  type="checkbox"
+                  checked={selectedOps.has(s.serverKey)}
+                  onChange={() => toggle(selectedOps, s.serverKey, setSelectedOps)}
+                />
+                {s.name}（{s.category || '未标注'} · {s.serverKey}）
+              </label>
+            ))}
+          </label>
+          {formError && <div className="form-error">{formError}</div>}
+          <div className="modal-actions">
+            {savedHint && !formError && <span className="ps-saved-hint">{savedHint}</span>}
+            <button type="button" className="btn btn-primary" disabled={busy} onClick={() => void save()}>
+              {busy ? '保存中…' : '保存绑定'}
+            </button>
+          </div>
+        </>
+      )}
     </div>
   );
 }

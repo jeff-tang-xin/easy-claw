@@ -8,6 +8,7 @@ import jakarta.validation.constraints.Size;
 /**
  * 更新数据库连接目录项请求（platformAdmin）：字段全可空 = 不传不改；
  * serverKey 创建后不可改（请求体不含该字段）；password null = 保持原密码，空串 = 清除。
+ * 项目绑定不在本请求（V31 N:N：走项目目录页 PUT /api/projects/{id}/resources）。
  */
 public record UpdateDbConnectionRequest(
         @Size(max = 128) String name,
@@ -21,6 +22,5 @@ public record UpdateDbConnectionRequest(
         Integer sortOrder,
         Boolean enabled,
         Long orgId,
-        Long projectId,
         @Size(max = 256) String password) {
 }

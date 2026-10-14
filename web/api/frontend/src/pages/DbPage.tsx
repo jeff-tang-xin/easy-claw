@@ -108,12 +108,17 @@ const DANGEROUS_TOOLS: Record<string, string> = {
   remote_shell: '⚠️ 高危 · 远程命令',
 };
 
-/** 右侧栏「库选择」展开状态：serverKey → 该连接实例的库清单（懒加载） */
+/** 右侧栏「库/schema 选择」展开状态（V33 两级选择器：库 → schema，懒加载）。
+ *  databases 为空 = Oracle（service_name 固定，直接进 schema 选择）；
+ *  schemas 为空 = MySQL（库即 schema，跳过二级）。 */
 interface DbPickerState {
   serverKey: string;
   loading: boolean;
   databases: string[];
   selected: string;
+  schemas: string[];
+  schemasLoading: boolean;
+  selectedSchema: string;
   error: string;
 }
 
@@ -440,10 +445,12 @@ export default function DbPage() {
     return () => clearInterval(timer);
   }, [fetchStatus]);
 
-  /** 展开右侧栏「库选择」：拉取该连接实例的库清单（懒加载，每次点开都刷新） */
+  /** 展开右侧栏「库选择」：拉取库清单（懒加载，每次点开都刷新）。
+   *  V33 两级模型：库清单为空（Oracle）时直接拉 schema；否则等用户选库后再拉 schema。 */
   const openPicker = async (c: CloudDbConnection) => {
     setPageError('');
-    setPicker({serverKey: c.serverKey, loading: true, databases: [], selected: c.databaseName, error: ''});
+    setPicker({serverKey: c.serverKey, loading: true, databases: [], selected: c.databaseName,
+      schemas: [], schemasLoading: false, selectedSchema: '', error: ''});
     try {
       let encryptedPassword: string | undefined;
       if (!c.hasPassword) {
@@ -465,15 +472,42 @@ export default function DbPage() {
       const r = await postJson<{ databases: string[]; defaultDatabase: string }>(
         '/api/db/databases',
         {serverKey: c.serverKey, encryptedPassword: encryptedPassword || null});
+      const dbs = r.databases ?? [];
+      const selected = r.defaultDatabase || dbs[0] || '';
       setPicker({
         serverKey: c.serverKey,
         loading: false,
-        databases: r.databases ?? [],
-        selected: r.defaultDatabase || (r.databases ?? [])[0] || '',
+        databases: dbs,
+        selected,
+        schemas: [],
+        schemasLoading: false,
+        selectedSchema: '',
         error: '',
       });
+      // Oracle（库清单空）：无库可选，直接拉 schema 清单
+      if (dbs.length === 0) {
+        void loadSchemas(c, '', encryptedPassword);
+      }
     } catch (e) {
-      setPicker({serverKey: c.serverKey, loading: false, databases: [], selected: '', error: String(e)});
+      setPicker({serverKey: c.serverKey, loading: false, databases: [], selected: '',
+        schemas: [], schemasLoading: false, selectedSchema: '', error: String(e)});
+    }
+  };
+
+  /** 拉取指定库内的 schema 清单（V33 二级选择器；MySQL 返回空 = 跳过二级） */
+  const loadSchemas = async (c: CloudDbConnection, database: string, encryptedPassword?: string) => {
+    setPicker((p) => (p && p.serverKey === c.serverKey
+      ? {...p, schemasLoading: true, schemas: [], selectedSchema: ''} : p));
+    try {
+      const r = await postJson<{ schemas: string[] }>(
+        '/api/db/schemas',
+        {serverKey: c.serverKey, database: database || null, encryptedPassword: encryptedPassword || null});
+      setPicker((p) => (p && p.serverKey === c.serverKey
+        ? {...p, schemasLoading: false, schemas: r.schemas ?? []} : p));
+    } catch (e) {
+      // schema 清单失败不阻塞连接（可空 = 用库默认命名空间），仅提示
+      setPicker((p) => (p && p.serverKey === c.serverKey
+        ? {...p, schemasLoading: false, schemas: [], error: `schema 清单加载失败: ${String(e)}`} : p));
     }
   };
 
@@ -506,9 +540,9 @@ export default function DbPage() {
     return msgs;
   };
 
-  /** 建立连接：POST /api/db/connect（只传 serverKey + database；密码链路同 ops）。
+  /** 建立连接：POST /api/db/connect（serverKey + database + 可选 schema；密码链路同 ops）。
    * 已有同 connKey 的活跃 tab：直接切换过去，不重连 */
-  const connectDb = async (c: CloudDbConnection, database: string) => {
+  const connectDb = async (c: CloudDbConnection, database: string, schema?: string) => {
     if (!workspaceId || connectingKey) return;
     const connKey = `${c.serverKey}/${database}`;
     const existing = tabsRef.current.find((t) => t.connKey === connKey);
@@ -536,6 +570,7 @@ export default function DbPage() {
         workspaceId,
         serverKey: c.serverKey,
         database,
+        ...(schema ? {schema} : {}),
         ...(encryptedPassword ? {encryptedPassword} : {}),
       });
       const conn = (st.connections ?? []).find((x) => x.connKey === st.connKey);
@@ -567,6 +602,7 @@ export default function DbPage() {
           {
             kind: 'info',
             content: `已连接 ${conn.serverName} / ${conn.database}（${conn.product} ${firstLine(conn.version)}）`
+              + (schema ? ` · schema=${schema}` : '')
               + (conn.readonlyHint ? ' · 只读' : ''),
           },
           ...(replayed ?? []),
@@ -1049,19 +1085,46 @@ export default function DbPage() {
                           <select
                             className="db-picker-select"
                             value={picker.selected}
-                            onChange={(e) => setPicker({...picker, selected: e.target.value})}
+                            onChange={(e) => {
+                              const db = e.target.value;
+                              setPicker({...picker, selected: db, schemas: [], selectedSchema: ''});
+                              // 选库即拉该库的 schema 清单（MySQL 返回空 = 无二级）
+                              void loadSchemas(c, db);
+                            }}
                           >
-                            {picker.databases.length === 0 && <option value="">（无可见库）</option>}
+                            {picker.databases.length === 0 && (
+                              <option value="">
+                                {c.dbType === 'oracle' ? `service：${c.databaseName || '（未配置）'}` : '（无可见库）'}
+                              </option>
+                            )}
                             {picker.databases.map((d) => (
                               <option key={d} value={d}>{d}</option>
                             ))}
                           </select>
+                          {(picker.schemas.length > 0 || picker.schemasLoading) && (
+                            <>
+                              <label className="db-picker-label">选择 schema（可空 = 库默认）</label>
+                              <select
+                                className="db-picker-select"
+                                value={picker.selectedSchema}
+                                disabled={picker.schemasLoading}
+                                onChange={(e) => setPicker({...picker, selectedSchema: e.target.value})}
+                              >
+                                <option value="">（库默认）</option>
+                                {picker.schemas.map((s) => (
+                                  <option key={s} value={s}>{s}</option>
+                                ))}
+                              </select>
+                            </>
+                          )}
                           <button
                             className="db-picker-connect"
-                            disabled={!picker.selected || connectingKey === c.serverKey}
-                            onClick={() => void connectDb(c, picker.selected)}
+                            disabled={(picker.databases.length > 0 && !picker.selected) || connectingKey === c.serverKey}
+                            onClick={() => void connectDb(c, picker.selected, picker.selectedSchema || undefined)}
                           >
-                            {connectingKey === c.serverKey ? '连接中…' : `连接 ${picker.selected}`}
+                            {connectingKey === c.serverKey
+                              ? '连接中…'
+                              : `连接 ${picker.selected || c.databaseName || ''}`}
                           </button>
                         </>
                       )}

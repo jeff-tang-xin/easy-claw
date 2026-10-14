@@ -24,15 +24,18 @@ import java.util.Map;
  * 数据库连接<b>只来自 hub 下发</b>（{@code GET /api/spoke/resources/db-connection}，hub 已按
  * 组织 + 当前 appkey 用户有效授权过滤）。spoke 不持久化任何连接配置或凭证：
  * <ul>
- *   <li>{@code POST /api/db/connect}：只传 serverKey + database（+ 可选 RSA 加密密码），
- *       host/port/username/password 全部由后端按 serverKey 从下发快照解析——前端不持有
- *       数据库凭证，密码不明文过网（手输密码经 RSA-OAEP 加密，复用 {@link OpsCryptoService}）；</li>
- *   <li>{@code POST /api/db/databases}：该连接实例上可用的库/schema 清单（「库」二级选择器，
- *       密文走 body 不进 URL）；</li>
+ *   <li>{@code POST /api/db/connect}：只传 serverKey + database + 可选 schema（+ 可选 RSA
+ *       加密密码），host/port/username/password 全部由后端按 serverKey 从下发快照解析——
+ *       前端不持有数据库凭证，密码不明文过网（手输密码经 RSA-OAEP 加密，复用
+ *       {@link OpsCryptoService}）；hub 指定库名时后端强制用它（忽略前端传参）；</li>
+ *   <li>{@code POST /api/db/databases}：可用的库清单（「库」一级选择器；hub 锁定库名时
+ *       返回单元素，密文走 body 不进 URL）；</li>
+ *   <li>{@code POST /api/db/schemas}：指定库内的 schema 清单（V33「schema」二级选择器）；</li>
  *   <li>{@code POST /api/db/disconnect} / {@code GET /api/db/status}：断开 / 活跃连接快照。</li>
  * </ul>
  * 每个连接实例的「库」是连接属性：每个 (serverKey, database) 组合 = 独立物理连接，
- * 换库 = 建新连接（规避连接级状态被多会话污染，设计定稿）。
+ * 换库 = 建新连接（规避连接级状态被多会话污染，设计定稿）；schema 是库内会话属性，
+ * 不进 connKey（同库内换 schema 不新建物理连接）。
  */
 @RestController
 @RequestMapping("/api/db")
@@ -57,12 +60,15 @@ public class DbConnectionController {
     /**
      * 连接请求体：只带 serverKey + database 与可选的加密密码。
      * <p>
+     * {@code database} 可空：hub 指定库名时后端强制用它（忽略此传参）；未指定时为
+     * 用户所选库（DB 工作台 picker 必选）。{@code schema} 可选——库内默认命名空间
+     * （PG/Oracle 物理生效，MySQL/SQLServer 仅上下文提示）。
      * {@code encryptedPassword} = Base64(RSA-OAEP-SHA-256(utf8(密码)))，公钥取自
      * {@code GET /api/ops/public-key}（与运维共用同一密钥对）；缺省时使用 hub 随目录
      * 下发的密码（仅服务端内部使用，不经过浏览器）。
      */
     public record ConnectRequest(String workspaceId, String serverKey, String database,
-                                 String encryptedPassword) {
+                                 String schema, String encryptedPassword) {
     }
 
     /**
@@ -77,19 +83,19 @@ public class DbConnectionController {
         SpokeDbConnectionView cfg = cloudBootstrap.findDbConnection(req.serverKey())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "serverKey 不存在或平台配置未就绪: " + req.serverKey()));
-        String database = isBlank(req.database()) ? cfg.databaseName() : req.database().trim();
+        // 库边界裁决在 service（resolveTargetDatabase）：hub 锁定库名时忽略前端传参
         String password = resolvePassword(req, cfg);
         String connKey;
         try {
-            connKey = db.connect(req.workspaceId(), req.serverKey(), database, password);
+            connKey = db.connect(req.workspaceId(), req.serverKey(), req.database(), req.schema(), password);
         } catch (DbConnectionService.ConnectionLimitException ex) {
             // 限流与建连失败语义不同：前者是配额问题（429），后者是目标库不可达（502）
             throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS, ex.getMessage());
         } catch (IllegalStateException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
-        log.info("数据库连接: workspace={}, serverKey={}, database={}",
-                req.workspaceId(), req.serverKey(), database);
+        log.info("数据库连接: workspace={}, serverKey={}, database={}, schema={}",
+                req.workspaceId(), req.serverKey(), req.database(), req.schema());
         Map<String, Object> out = Map.of("connKey", connKey, "connections", db.status(req.workspaceId()));
         return out;
     }
@@ -132,7 +138,7 @@ public class DbConnectionController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
                         "serverKey 不存在或平台配置未就绪: " + serverKey));
         String password = resolvePassword(
-                new ConnectRequest(null, serverKey, null, req.encryptedPassword()), cfg);
+                new ConnectRequest(null, serverKey, null, null, req.encryptedPassword()), cfg);
         try {
             List<String> list = db.databases(serverKey, password);
             return Map.of("databases", list, "defaultDatabase", cfg.databaseName());
@@ -143,6 +149,35 @@ public class DbConnectionController {
 
     /** 库清单请求体：serverKey 必填；encryptedPassword 为当次手输的 RSA-OAEP 密文（可空）。 */
     public record DatabasesRequest(String serverKey, String encryptedPassword) {
+    }
+
+    /**
+     * 指定库内的 schema 清单（V33「schema」二级选择器数据源）。
+     * 用指定库建临时连接查询，查完即关。password 解析同 connect。
+     * MySQL 返回空清单（库即 schema，前端跳过二级）；Oracle 忽略 database 参数
+     * （连接目标固定为目录 service_name）。
+     */
+    @PostMapping("/schemas")
+    public Map<String, Object> schemas(@RequestBody SchemasRequest req) {
+        if (req == null || isBlank(req.serverKey())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "serverKey 不能为空");
+        }
+        String serverKey = req.serverKey();
+        SpokeDbConnectionView cfg = cloudBootstrap.findDbConnection(serverKey)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                        "serverKey 不存在或平台配置未就绪: " + serverKey));
+        String password = resolvePassword(
+                new ConnectRequest(null, serverKey, req.database(), null, req.encryptedPassword()), cfg);
+        try {
+            List<String> list = db.schemas(serverKey, req.database(), password);
+            return Map.of("schemas", list);
+        } catch (IllegalStateException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
+        }
+    }
+
+    /** schema 清单请求体：serverKey 必填；database 为用户所选库（可空，锁定模式被忽略）。 */
+    public record SchemasRequest(String serverKey, String database, String encryptedPassword) {
     }
 
     /** 断开指定连接（connKey 必填）；返回剩余活跃连接列表 */

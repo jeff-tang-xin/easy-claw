@@ -270,7 +270,7 @@ export default function App() {
             />
             <Route
               path="/projects/:pid/*"
-              element={<ProjectSpacePage orgs={me.orgs} meUserId={me.user.id} />}
+              element={<ProjectSpacePage orgs={me.orgs} meUserId={me.user.id} platformAdmin={me.user.platformAdmin} />}
             />
             <Route
               path="/orgs"
