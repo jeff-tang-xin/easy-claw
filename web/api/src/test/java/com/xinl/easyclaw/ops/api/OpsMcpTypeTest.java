@@ -98,7 +98,7 @@ class OpsMcpTypeTest {
 
     private static SpokeOpsServerView server(String password) {
         return new SpokeOpsServerView(SERVER, "生产 Web 机", "10.0.0.9", 22, "deploy",
-                null, 1L, password, password != null, "Linux", null);
+                null, List.of(1L), password, password != null, "Linux", null);
     }
 
     // ==================== 工具面（静态） ====================

@@ -34,14 +34,17 @@ class WorkspaceResourceServiceTest {
         svc = new WorkspaceResourceService(cloud);
     }
 
+    /** V31 N:N：projectId 参数沿用旧哨兵语义——0/null 映射为空列表 = 未绑定任何项目 = 对所有项目可见。 */
     private static SpokeOpsServerView server(String key, Long projectId) {
         return new SpokeOpsServerView(key, "机-" + key, "10.0.0.9", 22, "deploy",
-                null, projectId, "s3cret", true, "Linux", null);
+                null, projectId == null || projectId == 0L ? List.of() : List.of(projectId),
+                "s3cret", true, "Linux", null);
     }
 
     private static SpokeDbConnectionView db(String key, Long projectId) {
         return new SpokeDbConnectionView(key, "库-" + key, "mysql", "10.0.0.1", 3306,
-                "orders_db", "reader", null, true, projectId, null, true);
+                "orders_db", "reader", null, true,
+                projectId == null || projectId == 0L ? List.of() : List.of(projectId), null, true);
     }
 
     private void given(List<SpokeOpsServerView> ops, List<SpokeDbConnectionView> dbs) {

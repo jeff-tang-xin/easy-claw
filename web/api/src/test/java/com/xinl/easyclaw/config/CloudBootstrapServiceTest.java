@@ -300,8 +300,8 @@ class CloudBootstrapServiceTest {
     @Test
     void refreshParsesOpsServersWithProjectId() {
         opsBody.set("""
-                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectId":5},
-                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectId":7}]""");
+                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectIds":[5]},
+                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectIds":[7]}]""");
         CloudBootstrapService service = new CloudBootstrapService(cloudProps());
         service.refresh();
 
@@ -310,11 +310,11 @@ class CloudBootstrapServiceTest {
         assertEquals(2, servers.size());
         assertEquals("web-1", servers.get(0).serverKey());
         assertEquals(2222, servers.get(0).port());
-        assertEquals(Long.valueOf(5L), servers.get(0).projectId());
-        assertEquals(Long.valueOf(7L), servers.get(1).projectId());
+        assertEquals(List.of(5L), servers.get(0).projectIds());
+        assertEquals(List.of(7L), servers.get(1).projectIds());
     }
 
-    /** 旧 hub 未下发 projectId 字段 → null（不造 0 哨兵，前端按 null=未归属处理）。 */
+    /** 旧 hub 未下发 projectIds 字段 → null（不造空列表哨兵，过滤层按 null=未绑定=全可见处理）。 */
     @Test
     void opsServerMissingProjectIdParsesAsNull() {
         opsBody.set("[{\"serverKey\":\"s\",\"name\":\"n\",\"host\":\"h\",\"port\":22,\"username\":\"u\",\"description\":\"\"}]");
@@ -322,7 +322,7 @@ class CloudBootstrapServiceTest {
         service.refresh();
 
         assertTrue(service.isAvailable());
-        assertNull(service.snapshot().opsServers().get(0).projectId());
+        assertNull(service.snapshot().opsServers().get(0).projectIds());
     }
 
     // ---------- 运维服务器下发（V19：hub 解密密码随目录下发） ----------
@@ -331,8 +331,8 @@ class CloudBootstrapServiceTest {
     @Test
     void refreshParsesOpsServerPassword() {
         opsBody.set("""
-                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectId":5,"password":"s3cret"},
-                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectId":7}]""");
+                [{"serverKey":"web-1","name":"Web","host":"10.0.0.1","port":2222,"username":"root","description":"web","projectIds":[5],"password":"s3cret"},
+                 {"serverKey":"db-1","name":"DB","host":"10.0.0.2","port":22,"username":"root","description":"","projectIds":[7]}]""");
         CloudBootstrapService service = new CloudBootstrapService(cloudProps());
         service.refresh();
 
