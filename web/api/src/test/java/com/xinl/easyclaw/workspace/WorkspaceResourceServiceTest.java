@@ -82,12 +82,16 @@ class WorkspaceResourceServiceTest {
     }
 
     @Test
-    @DisplayName("未绑项目的工作区看不到任何限定项目的资源")
-    void unboundWorkspaceSeesNoProjectScopedResource() {
+    @DisplayName("未绑项目的工作区（db/ops 专属工作区）不受项目过滤：限定项目的资源也可见")
+    void unboundWorkspaceSeesEverything() {
         given(List.of(server("prod-web", 1L)), List.of(db("orders", 1L)));
 
-        assertThat(svc.options(null).servers()).isEmpty();
-        assertThat(svc.options(null).databases()).isEmpty();
+        assertThat(svc.options(null).servers())
+                .extracting(WorkspaceResourceService.ResourceOption::key)
+                .containsExactly("prod-web");
+        assertThat(svc.options(null).databases())
+                .extracting(WorkspaceResourceService.ResourceOption::key)
+                .containsExactly("orders");
     }
 
     @Test

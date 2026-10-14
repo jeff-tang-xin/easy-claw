@@ -175,8 +175,9 @@ public class OpsServerService {
      * spoke 下发用（GET /api/spoke/ops-servers）：仅启用项，按 sort_order,id 保序。
      * V19：password_enc 非空时解密为明文随目录下发（临时运维直连）；未设置则为 null。
      * V18 过滤口径：归属当前 appkey 组织（org_id=0 的未归属遗留行永远不下发）+
-     * 可选按项目过滤（V31 N:N：资源未绑定任何项目 = 对所有项目可见，绑定了则要求
-     * 绑定集合包含请求项目）+ 当前 appkey 用户存在未过期授权
+     * 可选按项目过滤（仅 solo 工作区请求带 projectId 时生效；ops 专属工作区不带 → 不过滤。
+     * V31 N:N：资源未绑定任何项目 = 对所有项目可见，绑定了则要求绑定集合包含请求项目）+
+     * 当前 appkey 用户存在未过期授权
      * （valid_from &lt;= now &lt;= valid_until，一人一服务器一行，过期即不可见）。
      */
     public List<SpokeOpsServer> listEnabledForSpoke(AppKeyContext ctx, Long projectId) {
@@ -210,12 +211,13 @@ public class OpsServerService {
         return out;
     }
 
-    /** 资源未绑定任何项目 = 与项目无关对所有项目可见；绑定了则要求包含请求项目。 */
+    /** 项目过滤只针对 solo 工作区：请求未带项目（db/ops 专属工作区）→ 不过滤；
+     * 资源未绑定任何项目 = 与项目无关对所有项目可见；绑定了则要求包含请求项目。 */
     private static boolean visibleForProject(Set<Long> boundProjectIds, Long requestingProjectId) {
         if (boundProjectIds == null || boundProjectIds.isEmpty()) {
             return true;
         }
-        return requestingProjectId != null && boundProjectIds.contains(requestingProjectId);
+        return requestingProjectId == null || boundProjectIds.contains(requestingProjectId);
     }
 
     /**

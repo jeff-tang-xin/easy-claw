@@ -100,10 +100,12 @@ public class WorkspaceResourceService {
      * V31 N:N 可见性：资源未绑定任何项目（null/空集）= 与项目无关，对所有工作区可见；
      * 绑定了则要求绑定集合包含工作区归属项目。
      */
+    /** 项目过滤只针对 solo 工作区：工作区未绑项目（db/ops 专属工作区）→ 不过滤；
+     * 资源未绑定任何项目 = 与项目无关对所有项目可见；绑定了则要求包含工作区项目。 */
     private static boolean visibleFor(java.util.List<Long> resourceProjectIds, Long workspaceProjectId) {
         if (resourceProjectIds == null || resourceProjectIds.isEmpty()) {
             return true;
         }
-        return workspaceProjectId != null && resourceProjectIds.contains(workspaceProjectId);
+        return workspaceProjectId == null || resourceProjectIds.contains(workspaceProjectId);
     }
 }
