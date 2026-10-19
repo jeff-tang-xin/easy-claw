@@ -2230,7 +2230,7 @@ function DbConnectionFormModal({
             onChange={(e) => setField('databaseName', e.target.value)}
             placeholder="可留空连实例默认库（Oracle 必填 service_name）"
           />
-          <span className="field-hint">MySQL/PostgreSQL/SQLServer 可留空——一个微服务项目常含多个库，查询时用 schema.table 限定名</span>
+          <span className="field-hint">填写后作为 spoke 端默认连接库（使用者可自由切换其他库）；留空则由使用者自选（Oracle 必填 service_name）</span>
         </label>
         <label>
           登录账号 *

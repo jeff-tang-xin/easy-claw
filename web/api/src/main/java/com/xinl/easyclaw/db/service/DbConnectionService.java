@@ -277,20 +277,16 @@ public class DbConnectionService {
     /**
      * 列出可用的<b>库</b>清单（前端「库」一级选择器数据源，V33 统一模型）。
      * <p>
-     * <b>边界语义（定稿）</b>：hub 录入的 databaseName 是平台划定的库边界——
-     * 非空 = 锁定该库（直接返回单元素清单，连临时连接都不建）；为空 = 实例级连接，
-     * spoke 自由选库（建临时连接查实例清单，查完即关）。
-     * 自由模式的实例清单口径（各库各自适配，无统一方案）：
+     * <b>默认语义（2026-10-14 用户裁决）</b>：hub 录入的 databaseName 只是<b>默认库</b>
+     * （前端默认选中项，见 {@code defaultDatabase}），<b>不再是库边界</b>——库清单一律
+     * 按实例真查，用户可自由浏览/切换。实例清单口径（各库各自适配，无统一方案）：
      * MySQL=information_schema.schemata（schema 即库）；PostgreSQL=pg_database（真库清单，
      * V33 修正——原 pg_namespace 列的是 schema，被当库连接必然失败）；
-     * SQLServer=sys.databases；Oracle 不会走到自由模式（service_name 必填=永远锁定）。
+     * SQLServer=sys.databases；Oracle 返回空（service_name 必填=连接目标固定，
+     * 前端直接用 defaultDatabase 展示并进 schema 选择）。
      */
     public List<String> databases(String serverKey, String password) {
         SpokeDbConnectionView cfg = requireConfig(serverKey);
-        // 锁定模式：hub 指定了库名，可选项只有它（不建临时连接、不需要密码）
-        if (cfg.databaseName() != null && !cfg.databaseName().isBlank()) {
-            return List.of(cfg.databaseName().trim());
-        }
         String sql = switch (cfg.dbType()) {
             case "mysql" -> "SELECT schema_name FROM information_schema.schemata "
                     + "WHERE schema_name NOT IN ('information_schema','mysql','performance_schema','sys') ORDER BY 1";
@@ -329,7 +325,7 @@ public class DbConnectionService {
      */
     public List<String> schemas(String serverKey, String database, String password) {
         SpokeDbConnectionView cfg = requireConfig(serverKey);
-        // 连接目标与 connect 同口径：hub 锁定库名时强制用它（忽略前端传参）
+        // 连接目标与 connect 同口径：前端传参优先，未传回退 hub 默认库（不再锁定）
         String connectDb = resolveTargetDatabase(cfg, database);
         String sql = switch (cfg.dbType()) {
             case "mysql" -> null; // 库即 schema，无二级选择
@@ -361,14 +357,17 @@ public class DbConnectionService {
 
     /**
      * 连接目标库裁决（唯一口径，connect/schemas 共用）：
-     * hub 指定库名 = 锁定，强制用它（<b>忽略前端传参</b>——与 host/port/username 不采信
-     * 前端同口径，防绕过）；未指定 = 用前端传参（可为空 = 实例级连接，MySQL/SQLServer 合法）。
+     * <b>前端传参优先</b>（用户自由选库，2026-10-14 起默认语义——hub 指定库名不再锁定）；
+     * 未传时回退 hub 指定的<b>默认库</b>；都没有 = 实例级连接（MySQL/SQLServer 合法）。
      */
     private static String resolveTargetDatabase(SpokeDbConnectionView cfg, String requested) {
+        if (requested != null && !requested.isBlank()) {
+            return requested.trim();
+        }
         if (cfg.databaseName() != null && !cfg.databaseName().isBlank()) {
             return cfg.databaseName().trim();
         }
-        return requested == null || requested.isBlank() ? "" : requested.trim();
+        return "";
     }
 
     /**

@@ -123,7 +123,8 @@ public class DbConnectionController {
 
     /**
      * 该连接实例上可用的库/schema 清单（「库」二级选择器数据源）。
-     * 用目录默认库建临时连接查询，查完即关。password 解析同 connect。
+     * 建临时连接查实例真库清单，查完即关；{@code defaultDatabase} 是 hub 指定的
+     * <b>默认库</b>（前端默认选中项，可切换——不再是库边界）。password 解析同 connect。
      * <p>
      * V30.1 由 GET 改 POST：密码密文（RSA-OAEP，单次有效）不应进 URL——查询串会
      * 被访问日志/反向代理留存，POST body 不落日志。
@@ -141,7 +142,8 @@ public class DbConnectionController {
                 new ConnectRequest(null, serverKey, null, null, req.encryptedPassword()), cfg);
         try {
             List<String> list = db.databases(serverKey, password);
-            return Map.of("databases", list, "defaultDatabase", cfg.databaseName());
+            String defaultDb = cfg.databaseName() == null ? "" : cfg.databaseName();
+            return Map.of("databases", list, "defaultDatabase", defaultDb);
         } catch (IllegalStateException ex) {
             throw new ResponseStatusException(HttpStatus.BAD_GATEWAY, ex.getMessage());
         }
