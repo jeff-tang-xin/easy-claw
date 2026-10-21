@@ -179,6 +179,8 @@ export default function DbPage() {
   const [picker, setPicker] = useState<DbPickerState | null>(null);
   const [connectingKey, setConnectingKey] = useState<string | null>(null);
   const [pageError, setPageError] = useState('');
+  // 移动端（≤768px）：右侧栏（表清单+连接清单）变滑出抽屉，由顶栏「☰ 数据库」按钮开关
+  const [sideOpen, setSideOpen] = useState(false);
   const [curtain, setCurtain] = useState('');
   /** 表清单过滤词（前端过滤，切换连接不清空——用户自行清除） */
   const [tableFilter, setTableFilter] = useState('');
@@ -840,6 +842,7 @@ export default function DbPage() {
           </span>
         )}
         <div className="ops-topbar-actions">
+          <button className="mobile-only" onClick={() => setSideOpen((v) => !v)}>☰ 数据库</button>
           {activeTab && (
             <button onClick={() => void disconnectTab(activeTab)}>⛔ 断开当前连接</button>
           )}
@@ -1013,7 +1016,7 @@ export default function DbPage() {
         </div>
 
         {/* 右侧栏：当前连接的表清单（连接后直接展示）+ 平台数据库连接清单 */}
-        <aside className="ops-side">
+        <aside className={'ops-side' + (sideOpen ? ' open' : '')}>
           {activeTab && (
             <div className="db-tables-panel">
               <div className="ops-side-head">
@@ -1136,6 +1139,9 @@ export default function DbPage() {
           </ul>
         </aside>
       </div>
+
+      {/* 移动端抽屉遮罩：点击空白关闭右侧栏（桌面端 CSS display:none 不渲染效果） */}
+      {sideOpen && <div className="side-mask" onClick={() => setSideOpen(false)} />}
     </div>
   );
 }

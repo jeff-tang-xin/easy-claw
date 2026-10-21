@@ -1,5 +1,6 @@
 package com.xinl.easyclaw.config;
 
+import com.xinl.easyclaw.asr.AsrProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.scheduling.annotation.EnableScheduling;
@@ -11,6 +12,6 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  */
 @Configuration
 @EnableScheduling
-@EnableConfigurationProperties({BrandingProperties.class})
+@EnableConfigurationProperties({BrandingProperties.class, AsrProperties.class})
 public class AppConfig {
 }

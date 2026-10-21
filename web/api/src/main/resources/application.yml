@@ -199,6 +199,27 @@ easyclaw:
     name: Easy-Claw
     subtitle: AI 编程助手
     icon: "/Easy-Claw.png"
+  # 语音转文字（ASR，移动端聊天页语音输入）：离线推理，模型文件需人工准备。
+  # 两种模型方案（二选一，改 model-type）：
+  #   WHISPER（默认）：下载 ggml 模型单文件（ggml-base.bin ≈148MB，中文建议 small 及以上），
+  #     来源 huggingface.co/ggerganov/whisper.cpp；native 库自带，无需 lib-path
+  #   VOSK：轻量（中文小模型 vosk-model-small-cn-0.22 ≈42MB，来源 alphacephei.com/vosk/models），
+  #     model-path 指向解压后的模型目录；另需下载 vosk-win64-0.3.45.zip 解压，
+  #     lib-path 指向其中的 vosk.dll（不配则需把 dll 目录加入系统 PATH）
+  # 开启步骤：模型就绪后在运行层 ~/.easyClaw/application.yml 覆盖：
+  #     easyclaw:
+  #       asr:
+  #         enabled: true
+  #         model-path: D:/models/ggml-base.bin        # WHISPER=单文件；VOSK=模型目录
+  #         # model-type: VOSK                         # 用 VOSK 时改
+  #         # lib-path: D:/models/vosk-win64-0.3.45/vosk.dll
+  # 重启后端；前端聊天页出现 🎤 按钮（需 HTTPS 或 localhost 环境，浏览器限制）
+  asr:
+    enabled: false
+    model-type: WHISPER        # SmartJavaAI AsrModelEnum 名称（WHISPER / VOSK / SHERPA_*）
+    model-path: ""             # 模型路径（WHISPER=ggml 单文件；VOSK=模型目录）
+    lib-path: ""               # native 库路径（VOSK 用：vosk.dll；WHISPER 留空）
+    language: zh               # 识别语言提示（whisper 用；zh/en…，空 = 自动检测）
 
 # ============================
 # 内置工具配置

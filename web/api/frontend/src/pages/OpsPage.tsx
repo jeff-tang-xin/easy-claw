@@ -207,6 +207,8 @@ export default function OpsPage() {
   // 文件管理面板 / 任务中心（P1：目录树 + 右键菜单 + 传输进度）
   const [filePanelOpen, setFilePanelOpen] = useState(false);
   const [taskCenterOpen, setTaskCenterOpen] = useState(false);
+  // 移动端（≤768px）：服务器侧栏变滑出抽屉，由顶栏「☰ 服务器」按钮开关；桌面端该状态无样式效果
+  const [sideOpen, setSideOpen] = useState(false);
   const transfers = useOpsTransfers();
 
   /** 终端选中文字后的快捷操作浮层（选中即问：问 AI / 解释） */
@@ -519,6 +521,22 @@ export default function OpsPage() {
       if (activeTabRef.current === active.terminalId) term.focus();
     }, 50);
   }, [tabs, activeTabId, workspaceId]);
+
+  // 窗口尺寸变化（手机旋转、软键盘弹出、桌面拖拽窗口）时重排当前终端：
+  // xterm 画布不会跟随容器自动重排，不 fit 会留白或溢出。防抖 150ms 避免高频触发
+  useEffect(() => {
+    let timer = 0;
+    const onResize = () => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => {
+        const tid = activeTabRef.current;
+        const inst = tid ? termsRef.current.get(tid) : undefined;
+        if (inst) { try { inst.fit.fit(); } catch { /* 容器未就绪，忽略 */ } }
+      }, 150);
+    };
+    window.addEventListener('resize', onResize);
+    return () => { window.removeEventListener('resize', onResize); window.clearTimeout(timer); };
+  }, []);
 
   // tab 被移除时释放其 xterm 实例
   useEffect(() => {
@@ -1106,6 +1124,7 @@ export default function OpsPage() {
           {activeTab ? `已连接 ${activeTab.username}@${activeTab.host}` : '未连接'}
         </span>
         <div className="ops-topbar-actions">
+          <button className="mobile-only" onClick={() => setSideOpen((v) => !v)}>☰ 服务器</button>
           <button disabled={!activeTab} onClick={() => setFilePanelOpen((v) => !v)}>📂 文件管理</button>
           <button disabled={!activeTab} onClick={() => setTaskCenterOpen((v) => !v)}>📊 任务中心</button>
         </div>
@@ -1227,7 +1246,7 @@ export default function OpsPage() {
           </div>
         </section>
 
-        <aside className="ops-side">
+        <aside className={'ops-side' + (sideOpen ? ' open' : '')}>
           <div className="ops-side-head">
             <span>服务器（平台下发）</span>
           </div>
@@ -1295,6 +1314,9 @@ export default function OpsPage() {
 
         </aside>
       </div>
+
+      {/* 移动端抽屉遮罩：点击空白关闭服务器侧栏（桌面端 CSS display:none 不渲染效果） */}
+      {sideOpen && <div className="side-mask" onClick={() => setSideOpen(false)} />}
 
       {/* 文件管理面板：浮在终端左侧，作用于当前激活 tab 的连接 */}
       {filePanelOpen && activeTab && (

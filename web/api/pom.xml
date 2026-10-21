@@ -273,6 +273,14 @@
             <groupId>io.projectreactor</groupId>
             <artifactId>reactor-core</artifactId>
         </dependency>
+        <!-- 语音转文字（ASR）：SmartJavaAI speech 模块，离线推理。
+             WHISPER 实现（whisper-jni）自带 native 库无需额外部署，只需 ggml 模型文件；
+             模型未配置时 AsrService 保持未加载态，接口明确报错，不影响启动与其他功能 -->
+        <dependency>
+            <groupId>cn.smartjavaai</groupId>
+            <artifactId>speech</artifactId>
+            <version>1.1.2</version>
+        </dependency>
     </dependencies>
 
     <build>

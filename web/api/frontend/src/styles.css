@@ -1874,4 +1874,56 @@ input:focus-visible, textarea:focus-visible, select:focus-visible { outline: non
 /* ---- 输入控件 hover 边框反馈（AntD 惯例：hover 加深、focus 主色光环） ---- */
 input:hover, textarea:hover, select:hover { border-color: var(--border-strong); }
 
+/* ============================================================
+   移动端适配（≤768px：手机竖/横屏、竖屏 pad）
+   断点与 App.tsx 侧边栏自动折叠一致；抽屉/遮罩/移动按钮三页共用
+   ============================================================ */
+.side-mask { display: none; }
+.mobile-only { display: none; }
+
+@media (max-width: 768px) {
+  .mobile-only { display: inline-flex; align-items: center; justify-content: center; }
+
+  /* 弹窗收进视口：Modal/ConfirmDialog 的内联 width 在窄屏一律让位于 max-width */
+  .modal { max-width: calc(100vw - 24px) !important; }
+
+  /* 聊天页留白收窄：改间距变量一处生效（topbar/chat-scroll/input-dock 都引用） */
+  :root { --chat-pad-x: 12px; --chat-pad-y: 12px; }
+
+  /* ---- ChatPage：右侧面板（会话/黑板/授权/文件）变滑出抽屉 ---- */
+  .chat-resizer { display: none; }
+  .chat-side {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 60;
+    width: min(88vw, 380px) !important;   /* !important 压过内联 panelWidth */
+    transform: translateX(100%);
+    transition: transform 0.2s ease;
+    box-shadow: -8px 0 24px rgba(15, 23, 42, 0.2);
+  }
+  .chat-side.open { transform: none; }
+  .side-mask {
+    display: block; position: fixed; inset: 0; z-index: 55;
+    background: rgba(15, 23, 42, 0.45);
+  }
+  .chat-topbar { flex-wrap: wrap; gap: 6px 8px; }
+  .chat-topbar .ws-path { display: none; }  /* 路径在手机上无操作价值，让位给状态徽章 */
+  .chat-topbar .mobile-only { margin-left: auto; height: 30px; padding: 4px 10px; }
+
+  /* 触摸目标加大 + iOS 聚焦不缩放（font-size ≥16px） */
+  .input-row textarea { font-size: 16px; }
+  .input-row .btn { height: 42px; }
+  .input-row .skill-select { height: 42px; }
+
+  /* 语音输入录音中：红色呼吸提示（正在采集麦克风） */
+  .btn.voice-rec {
+    background: var(--danger);
+    border-color: var(--danger);
+    color: #fff;
+    animation: voice-pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes voice-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.55; }
+  }
+}
+
 

@@ -601,3 +601,18 @@
 
 /* 侧栏留白对齐 8 栅格（ops.css 14px） */
 .db-page .ops-side { padding: 16px; }
+
+/* ============================================================
+   移动端适配（≤768px）：db 页特有（消息流/确认卡/输入区）
+   骨架抽屉化在 ops.css 的媒体查询里，两页共用
+   ============================================================ */
+@media (max-width: 768px) {
+  .db-stream { padding: 12px 10px; }
+  .db-page .ops-curtain-row textarea { font-size: 16px; }  /* iOS 聚焦不缩放 */
+
+  /* 确认卡：窄屏改纵向排布，按钮全宽好按；SQL 文本限高滚动 */
+  .db-page .ops-confirm { flex-direction: column; align-items: stretch; }
+  .db-page .ops-confirm-allow,
+  .db-page .ops-confirm-deny { padding: 12px; }
+  .db-page .db-confirm-sql { max-height: 200px; }
+}

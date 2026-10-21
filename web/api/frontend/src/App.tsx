@@ -1,5 +1,5 @@
 import {useEffect, useState} from 'react';
-import {Navigate, NavLink, Route, Routes} from 'react-router-dom';
+import {Navigate, NavLink, Route, Routes, useLocation} from 'react-router-dom';
 import {isIconUrl, loadBranding, useBranding} from './branding';
 import {loadCloudStatus} from './cloudStatus';
 import {CloudMenuItem, loadCloudConfig, startCloudConfigPolling, useCloudConfig} from './cloudConfig';
@@ -14,6 +14,7 @@ import McpPage from './pages/McpPage';
 import BlackboardPage from './pages/BlackboardPage';
 import KnowledgePage from './pages/KnowledgePage';
 import SettingsPage from './pages/SettingsPage';
+import MobileWorkspacesPage from './pages/MobileWorkspacesPage';
 import './chatSocket';
 
 type MenuItem = { to: string; icon: string; label: string; end?: boolean };
@@ -95,7 +96,12 @@ export default function App() {
     startCloudConfigPolling();
   }, []);
 
-  const [collapsed, setCollapsed] = useState(() => localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1');
+  const [collapsed, setCollapsed] = useState(() => {
+    const saved = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
+    // 用户手动切换过（有记录）则尊重记忆；首次访问时手机/竖屏 pad 默认折叠，给内容区留宽度
+    if (saved !== null) return saved === '1';
+    return window.innerWidth <= 768;
+  });
   const toggleSidebar = () => {
     setCollapsed((c) => {
       const next = !c;
@@ -103,6 +109,13 @@ export default function App() {
       return next;
     });
   };
+
+  // 移动端工作区首页（/m）：全屏独立布局，不带桌面侧边栏（页面只含 SOLO/运维/数据库三类工作区）
+  const location = useLocation();
+  const isMobileHome = location.pathname === '/m' || location.pathname.startsWith('/m/');
+  if (isMobileHome) {
+    return <MobileWorkspacesPage />;
+  }
 
   return (
     <div className="app-shell">

@@ -40,6 +40,13 @@ export async function postJson<T>(url: string, body: unknown): Promise<T> {
   return safeJson<T>(res);
 }
 
+/** multipart 表单上传（文件类接口：语音转文字等）；浏览器自动设 Content-Type 与 boundary */
+export async function postForm<T>(url: string, form: FormData): Promise<T> {
+  const res = await fetch(url, { method: 'POST', body: form });
+  if (!res.ok) throw new Error((await safeText(res)) || `HTTP ${res.status}`);
+  return safeJson<T>(res);
+}
+
 export async function putJson<T>(url: string, body: unknown): Promise<T> {
   const res = await fetch(url, {
     method: 'PUT',

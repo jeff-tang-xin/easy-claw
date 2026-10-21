@@ -9,6 +9,7 @@ import {
     getJson,
     listBlackboardBooks,
     listBlackboardEntries,
+    postForm,
     postJson,
     putJson,
     type BlackboardBook,
@@ -18,6 +19,7 @@ import {
     type CloudProject,
     type StreamEvent,
 } from '../api';
+import {createVoiceRecorder} from '../voiceRecorder';
 import Modal from '../components/Modal';
 import {useBranding} from '../branding';
 import {useCloudStatus} from '../cloudStatus';
@@ -1092,6 +1094,13 @@ export default function ChatPage() {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [tab, setTab] = useState<'sessions' | 'auth' | 'files' | 'blackboard'>('sessions');
+  // 移动端（≤768px）：右侧面板变滑出抽屉，由顶栏「☰ 面板」按钮开关；桌面端该状态无样式效果
+  const [sideOpen, setSideOpen] = useState(false);
+  // 语音输入（移动端）：录音 → /api/asr/transcribe 离线转文字 → 回填输入框（可编辑后再发送）
+  const [voiceState, setVoiceState] = useState<'idle' | 'recording' | 'transcribing'>('idle');
+  const [voiceSeconds, setVoiceSeconds] = useState(0);
+  const recorderRef = useRef<ReturnType<typeof createVoiceRecorder> | null>(null);
+  const voiceTimerRef = useRef(0);
   const [statusHint, setStatusHint] = useState('');
   const [authList, setAuthList] = useState<{ id: number; toolName: string; createdAt: string }[]>([]);
   const [authOptions, setAuthOptions] = useState<{ name: string; displayName: string; requiresConfirm: boolean }[]>([]);
@@ -2174,6 +2183,64 @@ export default function ChatPage() {
     sendNow(text, myAtts);
   };
 
+  /** 语音输入状态提示（复用输入区上方的 chat-status 行，数秒后自动清除） */
+  const showVoiceHint = useCallback((msg: string, ms = 5000) => {
+    setStatusHint(msg);
+    window.setTimeout(() => setStatusHint((cur) => (cur === msg ? '' : cur)), ms);
+  }, []);
+
+  /** 语音输入：idle 点击开始录音 → recording 点击停止并转写 → 文字回填输入框（可编辑后再发送） */
+  const toggleVoice = async () => {
+    if (voiceState === 'transcribing') return;
+    if (voiceState === 'idle') {
+      try {
+        const rec = createVoiceRecorder();
+        await rec.start();
+        recorderRef.current = rec;
+        setVoiceSeconds(0);
+        window.clearInterval(voiceTimerRef.current);
+        voiceTimerRef.current = window.setInterval(() => setVoiceSeconds((s) => s + 1), 1000);
+        setVoiceState('recording');
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        showVoiceHint(e instanceof DOMException && e.name === 'NotAllowedError'
+          ? '🎤 麦克风权限被拒绝，请在浏览器设置中允许后重试'
+          : `🎤 无法开始录音：${msg}`, 6000);
+      }
+      return;
+    }
+    // recording → 停止并转写
+    const rec = recorderRef.current;
+    if (!rec) { setVoiceState('idle'); return; }
+    window.clearInterval(voiceTimerRef.current);
+    setVoiceState('transcribing');
+    try {
+      const blob = rec.stop();
+      if (blob.size < 2000) throw new Error('录音太短，请按住说完再松开');
+      const form = new FormData();
+      form.append('file', blob, 'voice.wav');
+      const { text } = await postForm<{ text: string }>('/api/asr/transcribe', form);
+      if (text) {
+        // 回填输入框（前端展示，用户可编辑/补充后再发送给 LLM）；已有内容时空格拼接
+        setInput((prev) => (prev ? `${prev} ${text}` : text));
+        window.setTimeout(() => textareaRef.current?.focus(), 60);
+      } else {
+        showVoiceHint('🎤 未识别到内容，请靠近麦克风重试');
+      }
+    } catch (e) {
+      showVoiceHint(`🎤 转写失败：${e instanceof Error ? e.message : String(e)}`, 8000);
+    } finally {
+      setVoiceState('idle');
+      recorderRef.current = null;
+    }
+  };
+
+  // 卸载时释放麦克风与计时器（录音中切页面/换工作区不泄漏设备占用）
+  useEffect(() => () => {
+    window.clearInterval(voiceTimerRef.current);
+    try { recorderRef.current?.stop(); } catch { /* 未在录音 */ }
+  }, []);
+
   const decideConfirm = async (action: 'once' | 'turn' | 'always' | 'deny') => {
     if (!workspaceId || !sessionId || !pending) return;
     const toolNames = pending.tools.map((t) => t.name);
@@ -2398,6 +2465,13 @@ export default function ChatPage() {
           </span>
         ))}
         <span className="ws-path">{workspace?.path}</span>
+        <button
+          className="btn small mobile-only"
+          onClick={() => setSideOpen((v) => !v)}
+          title="会话 / 黑板 / 授权 / 文件面板"
+        >
+          ☰ 面板
+        </button>
       </div>
       <div className="chat-scroll" ref={scrollRef} onScroll={(e) => {
         const el = e.currentTarget;
@@ -2502,6 +2576,16 @@ export default function ChatPage() {
               <input type="file" multiple style={{ display: 'none' }} onChange={pickFiles} />
             </label>
           )}
+          {/* 语音输入（移动端）：录音 → 离线转文字 → 回填输入框，确认后再发送给 LLM */}
+          <button
+            className={`btn small mobile-only${voiceState === 'recording' ? ' voice-rec' : ''}`}
+            style={{ alignSelf: 'flex-end', marginBottom: 6 }}
+            onClick={() => void toggleVoice()}
+            disabled={voiceState === 'transcribing'}
+            title={voiceState === 'recording' ? '停止并转写' : '语音输入'}
+          >
+            {voiceState === 'recording' ? `⏹ ${voiceSeconds}s` : voiceState === 'transcribing' ? '⏳…' : '🎤'}
+          </button>
           <textarea
             ref={textareaRef}
             value={input}
@@ -2760,7 +2844,7 @@ export default function ChatPage() {
 
       <div className="chat-resizer" onMouseDown={onResizerDown} title="拖拽调整" />
 
-      <div className="chat-side" style={{ width: panelWidth }}>
+      <div className={'chat-side' + (sideOpen ? ' open' : '')} style={{ width: panelWidth }}>
         <div className="side-tabs">
           <button className={`btn small ${tab === 'sessions' ? 'primary' : ''}`} onClick={() => setTab('sessions')}>💬 会话</button>
           <button className={`btn small ${tab === 'blackboard' ? 'primary' : ''}`} onClick={() => { void loadBlackboard(); setTab('blackboard'); }}>📋 黑板</button>
@@ -2774,6 +2858,9 @@ export default function ChatPage() {
           {renderToolPanel()}
         </div>
       </div>
+
+      {/* 移动端抽屉遮罩：点击空白关闭侧栏（桌面端 CSS display:none 不渲染效果） */}
+      {sideOpen && <div className="side-mask" onClick={() => setSideOpen(false)} />}
 
       {pending && (
         <ConfirmDialog
