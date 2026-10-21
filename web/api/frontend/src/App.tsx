@@ -97,10 +97,12 @@ export default function App() {
   }, []);
 
   const [collapsed, setCollapsed] = useState(() => {
+    // 窄屏一律折叠：桌面端存过「展开」记忆后，手机/窄窗口访问若尊重记忆，
+    // 侧栏会占掉大半屏、内容区没法看（真机适配时发现的漏洞）。
+    // 窄屏下用户仍可手动点开（主动展开是明确意图），但刷新回到折叠基线。
+    if (window.innerWidth <= 768) return true;
     const saved = localStorage.getItem(SIDEBAR_COLLAPSED_KEY);
-    // 用户手动切换过（有记录）则尊重记忆；首次访问时手机/竖屏 pad 默认折叠，给内容区留宽度
-    if (saved !== null) return saved === '1';
-    return window.innerWidth <= 768;
+    return saved === '1';
   });
   const toggleSidebar = () => {
     setCollapsed((c) => {
