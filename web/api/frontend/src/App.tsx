@@ -112,6 +112,9 @@ export default function App() {
     });
   };
 
+  // 窄屏：左侧导航彻底隐藏，由浮动 ☰ 呼出为覆盖式抽屉（点遮罩/选中导航项关闭）
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
   // 移动端工作区首页（/m）：全屏独立布局，不带桌面侧边栏（页面只含 SOLO/运维/数据库三类工作区）
   const location = useLocation();
   const isMobileHome = location.pathname === '/m' || location.pathname.startsWith('/m/');
@@ -121,7 +124,22 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <aside className={'app-sidebar' + (collapsed ? ' collapsed' : '')}>
+      {/* 窄屏浮动菜单按钮 + 遮罩（桌面端由 CSS 隐藏） */}
+      <button
+        type="button"
+        className="mobile-nav-btn"
+        onClick={() => setMobileNavOpen(true)}
+        title="菜单"
+        aria-label="打开导航菜单"
+      >☰</button>
+      {mobileNavOpen && <div className="mobile-nav-mask" onClick={() => setMobileNavOpen(false)} />}
+      <aside
+        className={'app-sidebar' + (collapsed ? ' collapsed' : '') + (mobileNavOpen ? ' mobile-nav-open' : '')}
+        onClick={(e) => {
+          // 抽屉态点任意导航链接后自动收起（NavLink 渲染为 <a>）
+          if ((e.target as HTMLElement).closest('a')) setMobileNavOpen(false);
+        }}
+      >
         <div className="app-logo">
           <div className="logo-icon">
             {isIconUrl(branding.icon) ? (
