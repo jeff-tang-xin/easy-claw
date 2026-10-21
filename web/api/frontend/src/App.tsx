@@ -122,7 +122,9 @@ export default function App() {
     return <MobileWorkspacesPage />;
   }
   if (location.pathname.startsWith('/m/chat/')) {
-    return <MobileChatPage />;
+    // 手动渲染不走 <Route>，useParams 拿不到参数，必须从 pathname 解析传入
+    const wsId = decodeURIComponent(location.pathname.slice('/m/chat/'.length));
+    return <MobileChatPage workspaceId={wsId} />;
   }
   if (location.pathname === '/m/ops') {
     return <OpsPage />;

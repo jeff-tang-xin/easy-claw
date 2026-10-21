@@ -5,6 +5,9 @@
  * 消息流、发送/停止、工具确认条、🎤 语音输入。桌面复杂能力
  * （文件/黑板/授权面板/队列/插队/子 Agent 时间线）不进入移动端。
  *
+ * workspaceId 由 App.tsx 从 pathname 解析后以 prop 传入（/m/* 不走 <Route>
+ * 参数定义，useParams 拿不到）；保留 useParams 兜底以兼容未来改为 Route 挂载。
+ *
  * WS 事件处理是 ChatPage 的简化子集（text/tool/subagent/confirm/error/end/stopped），
  * 协议语义与 ChatPage 保持同步；改动消息协议时两处都要核对。
  */
@@ -18,19 +21,32 @@ import { getActiveSession, setActiveSession } from '../chatStore';
 import { createVoiceRecorder } from '../voiceRecorder';
 
 interface SessionItem { id: string; title: string; }
-/** 消息统一用后端转录形态（历史原样、实时事件归并成同构条目），渲染层零转换 */
+/** 后端转录条目（/api/chat/history）：type 为大写枚举 */
+interface HistMsg { type: string; content: string; toolName?: string; subagentName?: string; }
+/** 消息统一用内部小写形态（历史经 toMsg 转换、实时事件直接产出），渲染层零分支重复 */
 interface Msg { type: string; content: string; toolName?: string; toolResult?: string; subagentName?: string; running?: boolean; }
 interface PendingConfirm { tools: { name: string; input: string }[]; raw: string; }
+
+/** 历史转录条目 → 内部消息形态（THINKING/TOOL_RESULT/BLACKBOARD/SYSTEM 移动端不展示） */
+function toMsg(b: HistMsg): Msg | null {
+  switch (b.type) {
+    case 'USER': return { type: 'user', content: b.content };
+    case 'AI_TEXT': return { type: 'text', content: b.content };
+    case 'TOOL_CALL': return { type: 'tool', toolName: b.toolName || '', content: '完成' };
+    case 'SUBAGENT': return { type: 'subagent', subagentName: b.subagentName || '', content: '' };
+    default: return null;
+  }
+}
 
 /** 轻量 markdown 渲染（与 ChatPage 同库同净化策略） */
 function md(text: string): string {
   return DOMPurify.sanitize(marked.parse(text, { async: false }) as string);
 }
 
-export default function MobileChatPage() {
-  const { workspaceId } = useParams<{ workspaceId: string }>();
+export default function MobileChatPage({ workspaceId: wsIdProp }: { workspaceId?: string }) {
+  const params = useParams<{ workspaceId: string }>();
   const navigate = useNavigate();
-  const wid = workspaceId || '';
+  const wid = wsIdProp || params.workspaceId || '';
 
   const [sessionTitle, setSessionTitle] = useState('');
   const [sessionId, setSessionId] = useState('');
@@ -86,8 +102,8 @@ export default function MobileChatPage() {
     let cancelled = false;
     (async () => {
       try {
-        const history = await getJson<Msg[]>(`/api/chat/history?workspaceId=${wid}&sessionId=${sessionId}`);
-        if (!cancelled) setMsgs(Array.isArray(history) ? history : []);
+        const history = await getJson<HistMsg[]>(`/api/chat/history?workspaceId=${wid}&sessionId=${sessionId}`);
+        if (!cancelled) setMsgs((Array.isArray(history) ? history : []).map(toMsg).filter((m): m is Msg => m !== null));
         const st = await getJson<{ running: boolean; pending: boolean }>(`/api/chat/status?workspaceId=${wid}&sessionId=${sessionId}`);
         if (!cancelled) setRunning(st.running);
       } catch { /* 历史拉取失败不阻塞对话，错误随发送暴露 */ }
