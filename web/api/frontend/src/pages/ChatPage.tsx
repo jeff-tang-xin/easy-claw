@@ -2436,6 +2436,7 @@ export default function ChatPage() {
   const chatArea = (
     <div className="chat-main">
       <div className="chat-topbar">
+        <button className="btn small mobile-only" onClick={() => navigate('/m')} title="返回手机首页">←</button>
         <span className="ws-name">💬 {workspace?.name}</span>
         {workspace?.agentName && <span className="agent-badge">🤖 {workspace.agentName}</span>}
         {scenario && (

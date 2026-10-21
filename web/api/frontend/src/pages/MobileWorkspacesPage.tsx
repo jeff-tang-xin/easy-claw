@@ -60,8 +60,8 @@ export default function MobileWorkspacesPage() {
     },
     ...(cloudMode
       ? [
-          {key: 'ops', icon: '🖥️', label: '运维', desc: '远程服务器', action: () => navigate('/ops')},
-          {key: 'db', icon: '🗄️', label: '数据库', desc: '查询分析', action: () => navigate('/db')},
+          {key: 'ops', icon: '🖥️', label: '运维', desc: '远程服务器', action: () => navigate('/m/ops')},
+          {key: 'db', icon: '🗄️', label: '数据库', desc: '查询分析', action: () => navigate('/m/db')},
         ]
       : []),
   ];
@@ -113,7 +113,7 @@ export default function MobileWorkspacesPage() {
                 key={ws.workspaceId}
                 type="button"
                 className="mws-ws-card"
-                onClick={() => navigate(`/chat/${ws.workspaceId}`)}
+                onClick={() => navigate(`/m/chat/${ws.workspaceId}`)}
               >
                 <span className="mws-ws-icon">👤</span>
                 <span className="mws-ws-body">

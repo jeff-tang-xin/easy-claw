@@ -11,7 +11,7 @@
 // 授权守卫感知：5s 轮询 /api/db/status，活跃 connKey 消失（管理员撤销授权被强制断开）
 // → 移除 tab 并灰字提示。
 import {useCallback, useEffect, useRef, useState} from 'react';
-import {useParams} from 'react-router-dom';
+import {useNavigate, useParams} from 'react-router-dom';
 import {marked} from 'marked';
 import DOMPurify from 'dompurify';
 import {getJson, postJson} from '../api';
@@ -168,6 +168,7 @@ function toolInputText(input: unknown): string {
 }
 
 export default function DbPage() {
+  const navigate = useNavigate();
   const params = useParams<{ workspaceId?: string }>();
   // DB 工作区是固定内置工作区：路由无参时用默认 id（与 ops 的 default-ops 同模式）
   const workspaceId = params.workspaceId || 'default-db';
@@ -829,6 +830,7 @@ export default function DbPage() {
   return (
     <div className="ops-page db-page">
       <header className="ops-topbar">
+        <button className="btn small mobile-only" onClick={() => navigate('/m')} title="返回手机首页">←</button>
         <span className="ops-title">🗄️ 数据库工作台</span>
         <span className={'ops-status ' + (activeTab ? 'on' : 'off')}>
           {activeTab

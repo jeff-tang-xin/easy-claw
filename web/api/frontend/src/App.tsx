@@ -15,6 +15,7 @@ import BlackboardPage from './pages/BlackboardPage';
 import KnowledgePage from './pages/KnowledgePage';
 import SettingsPage from './pages/SettingsPage';
 import MobileWorkspacesPage from './pages/MobileWorkspacesPage';
+import MobileChatPage from './pages/MobileChatPage';
 import './chatSocket';
 
 type MenuItem = { to: string; icon: string; label: string; end?: boolean };
@@ -112,34 +113,27 @@ export default function App() {
     });
   };
 
-  // 窄屏：左侧导航彻底隐藏，由浮动 ☰ 呼出为覆盖式抽屉（点遮罩/选中导航项关闭）
-  const [mobileNavOpen, setMobileNavOpen] = useState(false);
-
-  // 移动端工作区首页（/m）：全屏独立布局，不带桌面侧边栏（页面只含 SOLO/运维/数据库三类工作区）
+  // 移动端体系（/m 前缀）：全屏独立布局，不带桌面侧边栏。
+  // /m = 工作区首页；/m/chat/:id = 移动聊天页（独立轻量实现）；/m/ops、/m/db = 复用
+  // OpsPage/DbPage（已含移动适配），顶栏有「← 返回」回 /m
   const location = useLocation();
-  const isMobileHome = location.pathname === '/m' || location.pathname.startsWith('/m/');
+  const isMobileHome = location.pathname === '/m';
   if (isMobileHome) {
     return <MobileWorkspacesPage />;
+  }
+  if (location.pathname.startsWith('/m/chat/')) {
+    return <MobileChatPage />;
+  }
+  if (location.pathname === '/m/ops') {
+    return <OpsPage />;
+  }
+  if (location.pathname === '/m/db') {
+    return <DbPage />;
   }
 
   return (
     <div className="app-shell">
-      {/* 窄屏浮动菜单按钮 + 遮罩（桌面端由 CSS 隐藏） */}
-      <button
-        type="button"
-        className="mobile-nav-btn"
-        onClick={() => setMobileNavOpen(true)}
-        title="菜单"
-        aria-label="打开导航菜单"
-      >☰</button>
-      {mobileNavOpen && <div className="mobile-nav-mask" onClick={() => setMobileNavOpen(false)} />}
-      <aside
-        className={'app-sidebar' + (collapsed ? ' collapsed' : '') + (mobileNavOpen ? ' mobile-nav-open' : '')}
-        onClick={(e) => {
-          // 抽屉态点任意导航链接后自动收起（NavLink 渲染为 <a>）
-          if ((e.target as HTMLElement).closest('a')) setMobileNavOpen(false);
-        }}
-      >
+      <aside className={'app-sidebar' + (collapsed ? ' collapsed' : '')}>
         <div className="app-logo">
           <div className="logo-icon">
             {isIconUrl(branding.icon) ? (

@@ -14,7 +14,7 @@
 // 确认按钮只给「允许一次 / 拒绝」：ops 模式白名单机制关闭（AgentOrchestrator.whitelistEnabled=false），
 // 回合/永久授权后端一律不生效，渲染出来只会造成「点了没反应」的错觉。
 import {useCallback, useEffect, useMemo, useRef, useState, Fragment} from 'react';
-import {useParams} from 'react-router-dom';
+import {useNavigate, useParams} from 'react-router-dom';
 import {Terminal} from '@xterm/xterm';
 import {FitAddon} from '@xterm/addon-fit';
 import Zmodem from 'zmodem.js/src/zmodem_browser';
@@ -196,6 +196,7 @@ function bytesToB64(bytes: ArrayLike<number>): string {
 }
 
 export default function OpsPage() {
+  const navigate = useNavigate();
   const params = useParams<{ workspaceId: string }>();
   // 运维工作区是系统内置唯一固定 workspace：路由未带 id（/ops）时用写死的默认 id。
   // 该 id 与后端 AppConstants.DEFAULT_OPS_WORKSPACE_ID 保持一致
@@ -1119,6 +1120,7 @@ export default function OpsPage() {
   return (
     <div className="ops-page">
       <header className="ops-topbar">
+        <button className="btn small mobile-only" onClick={() => navigate('/m')} title="返回手机首页">←</button>
         <span className="ops-title">🖥️ 运维终端</span>
         <span className={'ops-status ' + (activeTab ? 'on' : 'off')}>
           {activeTab ? `已连接 ${activeTab.username}@${activeTab.host}` : '未连接'}
