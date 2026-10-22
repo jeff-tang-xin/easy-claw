@@ -5,6 +5,7 @@ import io.agentscope.harness.agent.filesystem.remote.store.BaseStore;
 import io.agentscope.harness.agent.filesystem.remote.store.StoreItem;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -49,6 +50,12 @@ public class FileBaseStore implements BaseStore {
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, StoreItem>> cache =
             new ConcurrentHashMap<>();
 
+    /**
+     * Spring 装配入口。类有两个构造器（本构造器 + 测试用的 {@link #FileBaseStore(Path)}），
+     * 多构造器时 Spring 无法自动选择，必须显式 {@code @Autowired} 标注——
+     * 否则容器启动报 {@code No default constructor found}（单测直接 new 不走容器，测不出来）。
+     */
+    @Autowired
     public FileBaseStore(
             @Value("${easyclaw.team.store-root:}") String configuredRoot) {
         this.root = configuredRoot == null || configuredRoot.isBlank()
