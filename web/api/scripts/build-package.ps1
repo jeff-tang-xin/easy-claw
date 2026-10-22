@@ -195,7 +195,7 @@ $runBat = @"
 @echo off
 chcp 65001 >nul 2>&1
 cd /d "%~dp0"
-java -Xmx2g -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
+java -Xmx768m -XX:MinHeapFreeRatio=20 -XX:MaxHeapFreeRatio=40 -XX:G1PeriodicGCInterval=300000 -Dfile.encoding=UTF-8 -Dsun.jnu.encoding=UTF-8 -jar easy-claw.jar
 pause
 "@
 $runBat | Out-File -FilePath (Join-Path $DistDir "run.bat") -Encoding ASCII
@@ -245,7 +245,10 @@ if ($Mode -ne "fatjar") {
     # zh-CN systems). Forcing UTF-8 here garbles Chinese when the exe is launched directly.
     # File logging stays UTF-8 (logging.charset.file in application.yml).
     $javaOpts = @(
-        "-Xmx2g",
+        "-Xmx768m",
+        "-XX:MinHeapFreeRatio=20",
+        "-XX:MaxHeapFreeRatio=40",
+        "-XX:G1PeriodicGCInterval=300000",
         "-Dfile.encoding=UTF-8",
         "-Dlogging.charset.console=GBK",
         "-Dsun.jnu.encoding=UTF-8",
