@@ -1,15 +1,23 @@
 package com.xinl.easyclaw.workspace;
 
+import com.xinl.easyclaw.agent.AgentService;
 import com.xinl.easyclaw.agent.SessionTranscriptStore;
 import com.xinl.easyclaw.workspace.entity.SessionEntity;
+import com.xinl.easyclaw.workspace.entity.WorkspaceEntity;
 import com.xinl.easyclaw.workspace.repository.SessionRepository;
+import com.xinl.easyclaw.workspace.repository.WorkspaceRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -30,12 +38,22 @@ public class SessionHistoryService {
     private final SessionRepository sessionRepository;
     private final WorkspaceManager workspaceManager;
     private final WorkspaceFileLayout workspaceFileLayout;
+    private final WorkspaceRepository workspaceRepository;
+    /** 延迟解析 AgentService：仅保留期清理需要（防删运行中会话），避免启动期强依赖 */
+    private final ObjectProvider<AgentService> agentServiceProvider;
+    /** 会话保留天数：最后活跃（transcript mtime，缺省回退 createdAt）超过该值即清理；<=0 禁用 */
+    private final int retentionDays;
 
     public SessionHistoryService(SessionRepository sessionRepository, WorkspaceManager workspaceManager,
-                                 WorkspaceFileLayout workspaceFileLayout) {
+                                 WorkspaceFileLayout workspaceFileLayout, WorkspaceRepository workspaceRepository,
+                                 ObjectProvider<AgentService> agentServiceProvider,
+                                 @Value("${easyclaw.session.retention-days:180}") int retentionDays) {
         this.sessionRepository = sessionRepository;
         this.workspaceManager = workspaceManager;
         this.workspaceFileLayout = workspaceFileLayout;
+        this.workspaceRepository = workspaceRepository;
+        this.agentServiceProvider = agentServiceProvider;
+        this.retentionDays = retentionDays;
     }
 
     /**
@@ -85,9 +103,81 @@ public class SessionHistoryService {
      */
     public void deleteSession(WorkspaceContext workspace, String sessionId) {
         sessionRepository.deleteById(sessionId);
-        try {
+        purgeSessionStateDir(workspaceFileLayout.sessionStateDir(
+                workspace.getPath(), workspace.getUserId(), sessionId));
+        log.info("已删除会话: {}（工作区 {}）", sessionId, workspace.getWorkspaceId());
+    }
+
+    /**
+     * 会话保留期清理（每天凌晨 4 点）：删除最后活跃时间超过 {@code easyclaw.session.retention-days}
+     * （默认 180 天，<=0 禁用）的会话——SQLite 记录 + 会话状态目录 + 转录缓存，与手动删除同路径。
+     * <p>
+     * 「最后活跃」取 transcript.jsonl 的文件 mtime（每次对话追加都会刷新），比
+     * {@code lastAccessedAt} 可靠——后者仅在创建会话时写入一次，使用中不更新，
+     * 若按它判定会把长期使用的老会话误杀。无转录文件的空会话回退 createdAt。
+     * <p>
+     * 运行中或有挂起确认的会话本轮跳过（{@link AgentService#releaseSessionIfIdle} 返回 false），
+     * 等下一轮清扫；工作区已删除的孤儿会话只清 DB 记录。
+     */
+    @Scheduled(cron = "0 0 4 * * *")
+    public void purgeExpiredSessions() {
+        if (retentionDays <= 0) {
+            return;
+        }
+        Instant cutoff = Instant.now().minus(Duration.ofDays(retentionDays));
+        List<SessionEntity> all = sessionRepository.findAll();
+        int purged = 0;
+        int skipped = 0;
+        for (SessionEntity session : all) {
+            Instant lastActive = resolveLastActiveAt(session);
+            if (lastActive == null || !lastActive.isBefore(cutoff)) {
+                continue;
+            }
+            AgentService agentService = agentServiceProvider.getIfAvailable();
+            if (agentService != null && !agentService.releaseSessionIfIdle(session.getId())) {
+                skipped++;
+                continue;
+            }
+            WorkspaceEntity ws = workspaceRepository.findById(session.getWorkspaceId()).orElse(null);
+            if (ws == null) {
+                // 工作区已不存在：状态目录无从定位，只清 DB 记录
+                sessionRepository.deleteById(session.getId());
+            } else {
+                sessionRepository.deleteById(session.getId());
+                purgeSessionStateDir(workspaceFileLayout.sessionStateDir(
+                        Path.of(ws.getPath()), ws.getUserId(), session.getId()));
+            }
+            purged++;
+        }
+        if (purged > 0 || skipped > 0) {
+            log.info("会话保留期清理（{} 天未活跃）: 删除 {} 个, 跳过运行中 {} 个", retentionDays, purged, skipped);
+        }
+    }
+
+    /** 会话最后活跃时间：transcript.jsonl 的 mtime 优先，无转录回退 createdAt。 */
+    private Instant resolveLastActiveAt(SessionEntity session) {
+        WorkspaceEntity ws = workspaceRepository.findById(session.getWorkspaceId()).orElse(null);
+        if (ws != null) {
             Path stateDir = workspaceFileLayout.sessionStateDir(
-                    workspace.getPath(), workspace.getUserId(), sessionId);
+                    Path.of(ws.getPath()), ws.getUserId(), session.getId());
+            Path transcript = SessionTranscriptStore.transcriptFile(stateDir);
+            try {
+                if (transcript != null && Files.exists(transcript)) {
+                    return Files.getLastModifiedTime(transcript).toInstant();
+                }
+            } catch (IOException e) {
+                log.warn("读取转录修改时间失败，回退 createdAt: {}, {}", transcript, e.getMessage());
+            }
+        }
+        return session.getCreatedAt();
+    }
+
+    /**
+     * 删除会话状态目录并驱逐转录缓存。供手动删除与保留期清理共用；
+     * 调用方需保证会话已无活跃回合。
+     */
+    private void purgeSessionStateDir(Path stateDir) {
+        try {
             if (Files.isDirectory(stateDir)) {
                 try (var walk = Files.walk(stateDir)) {
                     walk.sorted(java.util.Comparator.reverseOrder()).forEach(p -> {
@@ -102,7 +192,6 @@ public class SessionHistoryService {
             // 必须同步清理转录计数缓存：否则同名 sessionId 复用时会继承已删除会话的
             // seq 计数，新转录的序号从一个虚高值开始（历史渲染顺序错乱）
             SessionTranscriptStore.evict(stateDir);
-            log.info("已删除会话: {}（工作区 {}）", sessionId, workspace.getWorkspaceId());
         } catch (IOException e) {
             log.warn("删除会话状态文件失败: {}", e.getMessage());
         }

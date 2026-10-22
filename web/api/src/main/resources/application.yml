@@ -221,6 +221,11 @@ easyclaw:
     lib-path: ""               # native 库路径（VOSK 用：vosk.dll；WHISPER 留空）
     language: zh               # 识别语言提示（whisper 用；zh/en…，空 = 自动检测）
 
+  # 会话保留期（天）：最后活跃（transcript mtime）超过该值的会话每天凌晨 4 点自动清理
+  # （SQLite 记录 + 会话状态目录 + 转录缓存，与手动删除同路径）。<=0 禁用。
+  session:
+    retention-days: 180
+
 # ============================
 # 内置工具配置
 # ----------------------------
