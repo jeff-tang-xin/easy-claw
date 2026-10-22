@@ -4,6 +4,11 @@ server:
 spring:
   application:
     name: easy-claw-hub
+  threads:
+    virtual:
+      # Java 21 虚拟线程：Tomcat 请求处理与 Spring MVC async（StreamingResponseBody 流式转发）
+      # 全部走虚拟线程，消除「每个 SSE 流一个平台线程（1MB 栈）」的内存放大器。
+      enabled: true
   datasource:
     # 生产：PostgreSQL。连接信息走环境变量，不入仓。
     url: ${HUB_DB_URL:jdbc:postgresql://localhost:5432/easy_claw}

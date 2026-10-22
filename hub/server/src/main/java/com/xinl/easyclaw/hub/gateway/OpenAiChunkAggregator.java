@@ -14,6 +14,13 @@ import java.util.Map;
  */
 public class OpenAiChunkAggregator {
 
+    /**
+     * 聚合留档上限（字符数）：超过后停止拼接 content/tool_calls（转发不受影响，usage 继续解析），
+     * 聚合结果带 {@code hub_truncated:true} 标记。防长响应在堆内聚合出超大字符串——
+     * 1.8GB 小机器上这是 OOM 放大器之一。
+     */
+    static final int MAX_AGGREGATE_CHARS = 2 * 1024 * 1024;
+
     /** 聚合中的 tool_call：arguments 为增量拼接。 */
     private static final class ToolCallAcc {
         String id;
@@ -30,6 +37,8 @@ public class OpenAiChunkAggregator {
     private String finishReason;
     private Integer promptTokens;
     private Integer completionTokens;
+    private int aggregatedChars;
+    private boolean truncated;
 
     public OpenAiChunkAggregator(ObjectMapper om) {
         this.om = om;
@@ -58,7 +67,7 @@ public class OpenAiChunkAggregator {
         for (JsonNode choice : chunk.path("choices")) {
             JsonNode delta = choice.path("delta");
             if (delta.hasNonNull("content")) {
-                content.append(delta.path("content").asText());
+                appendCapped(content, delta.path("content").asText());
             }
             for (JsonNode tc : delta.path("tool_calls")) {
                 int index = tc.path("index").asInt(0);
@@ -71,7 +80,7 @@ public class OpenAiChunkAggregator {
                     acc.name = fn.path("name").asText();
                 }
                 if (fn.hasNonNull("arguments")) {
-                    acc.arguments.append(fn.path("arguments").asText());
+                    appendCapped(acc.arguments, fn.path("arguments").asText());
                 }
             }
             if (choice.hasNonNull("finish_reason")) {
@@ -89,12 +98,29 @@ public class OpenAiChunkAggregator {
         }
     }
 
-    /** 聚合结果：完整 chat.completion JSON（usage 未知则省略）。 */
+    /** 预算内拼接：超出全局上限的部分丢弃并置 truncated（转发不受影响，仅留档截断）。 */
+    private void appendCapped(StringBuilder sb, String text) {
+        if (aggregatedChars >= MAX_AGGREGATE_CHARS) {
+            truncated = true;
+            return;
+        }
+        int n = Math.min(text.length(), MAX_AGGREGATE_CHARS - aggregatedChars);
+        sb.append(text, 0, n);
+        aggregatedChars += n;
+        if (n < text.length()) {
+            truncated = true;
+        }
+    }
+
+    /** 聚合结果：完整 chat.completion JSON（usage 未知则省略；留档截断时带 hub_truncated 标记）。 */
     public ObjectNode aggregate() {
         ObjectNode out = om.createObjectNode();
         out.put("id", id != null ? id : "chatcmpl-unknown");
         out.put("object", "chat.completion");
         out.put("created", created);
+        if (truncated) {
+            out.put("hub_truncated", true);
+        }
         if (model != null) {
             out.put("model", model);
         }
