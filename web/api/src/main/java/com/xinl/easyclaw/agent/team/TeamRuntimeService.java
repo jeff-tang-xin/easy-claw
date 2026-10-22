@@ -61,18 +61,23 @@ public class TeamRuntimeService {
             "sendMessage", "broadcastMessage", "listMessages", "listMembers",
             "submitPlan");
 
-    /** 成员 Agent 构建回调。 */
+    /** 成员 Agent 构建回调。client 传入以便成员 Agent 挂同一个 team 的 teamsMode。 */
     public interface MemberAgentFactory {
         HarnessAgent create(SubagentDeclaration declaration, String memberSessionId,
-                            TeamContext context);
+                            TeamContext context, EasyClawTeamClient client);
     }
 
     private final SubagentLoader subagentLoader;
     private final ScenarioResolver scenarioResolver;
     private final MemberAgentFactory memberAgentFactory;
+    private final com.xinl.easyclaw.workspace.WorkspaceAgentBuilder workspaceAgentBuilder;
+    private final com.xinl.easyclaw.workspace.WorkspaceManager workspaceManager;
 
     /** teamKey = workspaceId + "/" + sessionId → 运行时。 */
     private final ConcurrentHashMap<String, TeamRuntime> runtimes = new ConcurrentHashMap<>();
+
+    /** lead team 变体实例缓存（key 同 runtimes）：team 会话用独立 Agent，避免 teamsMode 污染共享单例。 */
+    private final ConcurrentHashMap<String, HarnessAgent> leadAgents = new ConcurrentHashMap<>();
 
     static final class MemberHandle {
         final String name;
@@ -110,10 +115,14 @@ public class TeamRuntimeService {
 
     public TeamRuntimeService(SubagentLoader subagentLoader,
                               ScenarioResolver scenarioResolver,
-                              MemberAgentFactory memberAgentFactory) {
+                              MemberAgentFactory memberAgentFactory,
+                              com.xinl.easyclaw.workspace.WorkspaceAgentBuilder workspaceAgentBuilder,
+                              com.xinl.easyclaw.workspace.WorkspaceManager workspaceManager) {
         this.subagentLoader = subagentLoader;
         this.scenarioResolver = scenarioResolver;
         this.memberAgentFactory = memberAgentFactory;
+        this.workspaceAgentBuilder = workspaceAgentBuilder;
+        this.workspaceManager = workspaceManager;
     }
 
     /** 进程级 wakeup hook：TeamWakeups 是静态单槽，启动时注册一次。 */
@@ -193,6 +202,55 @@ public class TeamRuntimeService {
         log.info("[team] 已收尾: team={}, session={}", rt.teamName, sessionId);
     }
 
+    // ── lead team 变体装配 ───────────────────────────────────────────────
+
+    /**
+     * 取（或构建）lead 的 team 变体 Agent。
+     *
+     * <p><b>为什么不用 workspace 共享单例</b>：teamsMode 在 build 时挂 TeamsMiddleware
+     * 并注册 team 工具，绑定 (teamName, sessionId)——共享单例服务多会话，挂上后
+     * 所有会话都被污染。对齐 service 的做法：team 会话用独立实例
+     * （service 的 cacheKey 追加 {@code /team-<sessionId>}），缓存随会话释放。
+     *
+     * <p>装配走 {@link com.xinl.easyclaw.workspace.WorkspaceAgentBuilder} 主重载
+     * （完整场景绑定/名册/压缩/记忆），仅追加 teamsMode——lead 保留既有工具面
+     * （过渡期 agent_spawn 与 team 工具双通道并存，批 4 裁剪）。
+     *
+     * @param teamName    team 名（场景绑定或默认 main）
+     * @param objective   团队目标（场景描述或用户消息首句）
+     * @param rosterNames 预建成员名册（可空——成员由 lead 运行时 spawnMember 拉起）
+     */
+    public synchronized HarnessAgent leadAgentFor(String workspaceId, String sessionId,
+                                                  String teamName, String objective,
+                                                  List<String> rosterNames) {
+        String key = runtimeKey(workspaceId, sessionId);
+        HarnessAgent cached = leadAgents.get(key);
+        if (cached != null) {
+            return cached;
+        }
+        TeamRuntime rt = startTeam(workspaceId, sessionId, teamName, objective, rosterNames);
+        com.xinl.easyclaw.workspace.WorkspaceContext ws = workspaceManager.getWorkspace(workspaceId);
+        if (ws == null) {
+            throw new IllegalStateException("工作区不存在: " + workspaceId);
+        }
+        java.nio.file.Path wsPath = ws.getPath();
+        java.nio.file.Path easyClawDir = wsPath.resolve(".easyClaw");
+        TeamContext leadCtx = new TeamContext(
+                teamName, workspaceId, objective, "lead", true, List.of(), LEAD_ACTIONS);
+        HarnessAgent lead = workspaceAgentBuilder.build(
+                workspaceId, subagentLoader.MAIN_AGENT_ID, ws.getName(), wsPath, easyClawDir,
+                null, "solo", rt.client, leadCtx, sessionId);
+        leadAgents.put(key, lead);
+        log.info("[team] lead 变体已构建: team={}, session={}", teamName, sessionId);
+        return lead;
+    }
+
+    /** lead 会话释放：停 team + 丢弃 lead 变体实例（AgentService.releaseSession 调用）。 */
+    public void releaseSession(String workspaceId, String sessionId) {
+        leadAgents.remove(runtimeKey(workspaceId, sessionId));
+        stopTeam(workspaceId, sessionId);
+    }
+
     // ── 成员生命周期 ─────────────────────────────────────────────────────
 
     /**
@@ -219,7 +277,7 @@ public class TeamRuntimeService {
         HarnessAgent agent = null;
         if (memberAgentFactory != null && decl != null) {
             try {
-                agent = memberAgentFactory.create(decl, memberSessionId, ctx);
+                agent = memberAgentFactory.create(decl, memberSessionId, ctx, rt.client);
             } catch (Exception e) {
                 log.warn("[team] 成员 Agent 构建失败: member={}, err={}", memberName, e.toString());
             }

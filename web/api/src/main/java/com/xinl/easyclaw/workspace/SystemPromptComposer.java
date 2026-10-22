@@ -368,11 +368,31 @@ public class SystemPromptComposer {
         StringBuilder sb = new StringBuilder();
         sb.append("\n\n## 🤝 可调度的子 Agent\n")
                 .append(teamMode
-                        ? "以下子 Agent 是你可以派发任务的执行体（通过 subagent 工具）：\n"
+                        ? "以下子 Agent 是你的团队成员（通过 `team` 工具协作，规则见下方「team 协作规则」）：\n"
                         : "遇到可独立交付的子任务时，你可以把它派给以下子 Agent（通过 subagent 工具）；"
                                 + "简单任务自己做即可，不必为了用而用：\n");
         for (SubagentDeclaration d : subagents) {
             sb.append("- **").append(d.getName()).append("**：").append(d.getDescription()).append("\n");
+        }
+        if (teamMode) {
+            sb.append("""
+
+                    team 协作规则（你是 lead，`team` 工具是你的主通道）：
+                    1. **任务板流转**：`createTask` 建任务（写清目标/上下文/交付物）→ `assignTask` 指派
+                       （或留 PENDING 让成员自领）→ 成员 `claimTask` 领取并执行 → 成员 `completeTask`
+                       回写结果 → 你验收。结果以任务板回写为准，成员「说做完了」不算数。
+                    2. **成员管理**：`spawnMember` 拉起成员（agentRef 用上方名册名），`shutdownMember`
+                       下线不再需要的成员；`listMembers` 看在册状态。成员是常驻协作角色——有邮箱、
+                       可被反复唤醒，不是一次性执行体。
+                    3. **计划审批**：成员对方案拿不准时 `submitPlan` 提交，你 `approvePlan`/`rejectPlan`
+                       裁决；审批消息会进成员邮箱，成员下回合自动看到。
+                    4. **沟通**：`sendMessage` 点对点、`broadcastMessage` 广播、`listMessages` 查邮箱。
+                       给成员的指令写清「做什么 + 交付物 + 边界」，成员看不到你的对话历史。
+                    5. **收尾**：全部任务验收后 `completeTeam` 结束本轮协作。
+                    6. **`agent_spawn` 是备用通道**：过渡期仍可用（同步派发、结果直接返回），
+                       但优先用 team 工具——成员常驻、状态可查、支持计划审批，适合多轮协作；
+                       一次性简单任务用 agent_spawn 也可以。
+                    """);
         }
         // 步数取名册里的实际最小值，而不是写死数字：SubagentLoader 会按 team 模式抬升步数，
         // 提示词里若留「默认 30」会与真实上限不符，编排者据此拆任务粒度就会判断失准。

@@ -88,6 +88,13 @@ public class AgentService {
     private final OrchestratorRegistry orchestratorRegistry;
     private final com.xinl.easyclaw.config.CloudFeatureGate featureGate;
 
+    /**
+     * team 运行时（可选注入）：场景 mode=team 时 lead 用 team 变体实例。
+     * 测试构造不经 Spring，为 null 时 team 分支整体跳过、行为与旧版一致。
+     */
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    private com.xinl.easyclaw.agent.team.TeamRuntimeService teamRuntime;
+
     /** 空闲会话 TTL：超过此时长无活动且无挂起确认的会话，其内存状态被清扫 */
     private static final long IDLE_TTL_MS = 2 * 60 * 60 * 1000L;
 
@@ -546,6 +553,16 @@ public class AgentService {
         // 此处会话已无活跃回合（releaseSessionIfIdle 与清扫均先判 isRunning），
         // 驱逐安全；下次访问会自动重建锁并重新扫描计数。
         SessionTranscriptStore.evictBySessionId(sessionId);
+        // team 会话收尾：停 team（completeTeam + 成员下线）+ 丢弃 lead 变体实例。
+        // 非 team 会话内部 no-op（runtimes/leadAgents 无该 key）。
+        String wsIdForTeam = sessions.workspaceOf(sessionId);
+        if (teamRuntime != null && wsIdForTeam != null) {
+            try {
+                teamRuntime.releaseSession(wsIdForTeam, sessionId);
+            } catch (Exception e) {
+                log.warn("team 会话收尾异常（不阻塞释放）: sessionId={}, err={}", sessionId, e.toString());
+            }
+        }
     }
 
     /** 记录会话活跃时间（清扫任务据此判定空闲） */
@@ -753,7 +770,7 @@ public class AgentService {
             workspaceManager.rebuildAgent(workspaceId);
             workspace = workspaceManager.getWorkspace(workspaceId);
         }
-        HarnessAgent agent = workspace.getAgent();
+        HarnessAgent agent = resolveLeadAgent(workspace, workspaceId, sessionId, message);
 
         // 会话转录：旧会话首次落盘时把 agent_state.json 已有历史种子化（快照），
         // 再追加本轮用户消息 —— 赶在未来的上下文压缩之前把历史固化
@@ -2517,6 +2534,35 @@ public class AgentService {
      * <b>改动本方法时必须同步核对那两条文案</b>，否则模型行为与运行时语义会脱节。
      * （此处刻意不写条目编号——编号会随提示词增删而漂移，按标题定位更稳。）
      */
+    /**
+     * 解析本回合使用的 Agent：team 模式场景用 lead team 变体实例，其余用 workspace 共享单例。
+     *
+     * <p><b>team 变体的意义</b>：teamsMode 在 build 时挂 TeamsMiddleware 并注册 team 工具，
+     * 绑定 (teamName, sessionId)——共享单例服务多会话，挂上后所有会话都被污染。
+     * team 会话用独立实例（对齐 service 的 cacheKey 追加 {@code /team-<sessionId>}），
+     * 缓存随会话释放（{@link #releaseSession}）。
+     *
+     * <p>teamName 取场景名、objective 取用户消息首段（≤200 字符）——lead 的 team 工具
+     * （createTask/spawnMember 等）以二者为协作上下文。名册留空：成员由 lead 运行时
+     * spawnMember 按需拉起（对齐 service 的动态成员模型）。
+     */
+    private HarnessAgent resolveLeadAgent(com.xinl.easyclaw.workspace.WorkspaceContext workspace,
+                                          String workspaceId, String sessionId, String message) {
+        if (teamRuntime == null) {
+            return workspace.getAgent();
+        }
+        var scenario = scenarioResolver.activeScenario(workspaceId);
+        if (scenario == null || !"team".equals(scenario.getMode())) {
+            return workspace.getAgent();
+        }
+        String teamName = scenario.getName() != null && !scenario.getName().isBlank()
+                ? scenario.getName() : "main";
+        String objective = message != null && !message.isBlank()
+                ? message.substring(0, Math.min(message.length(), 200))
+                : "协作完成用户任务";
+        return teamRuntime.leadAgentFor(workspaceId, sessionId, teamName, objective, List.of());
+    }
+
     private void applyForceSyncDispatch(RuntimeContext.Builder builder, String workspaceId) {
         if (workspaceId == null) {
             return;

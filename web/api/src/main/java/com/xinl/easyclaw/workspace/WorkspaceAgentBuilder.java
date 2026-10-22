@@ -245,6 +245,20 @@ public class WorkspaceAgentBuilder {
      */
     public HarnessAgent build(String workspaceId, String agentId, String name, Path workspacePath,
                               Path easyClawDir, String sysPromptAugment, String workspaceType) {
+        return build(workspaceId, agentId, name, workspacePath, easyClawDir, sysPromptAugment,
+                workspaceType, null, null, null);
+    }
+
+    /**
+     * 完整装配入口（team 变体）：{@code teamClient}/{@code teamContext}/{@code teamSessionId}
+     * 非空时挂 teamsMode（对齐 service HarnessAgentBuildService 的 teamsMode 装配位）——
+     * lead Agent 获得 team 工具（任务板/邮箱/成员管理），TeamsMiddleware 绑定 lead 会话。
+     */
+    public HarnessAgent build(String workspaceId, String agentId, String name, Path workspacePath,
+                              Path easyClawDir, String sysPromptAugment, String workspaceType,
+                              io.agentscope.harness.agent.team.TeamClient teamClient,
+                              io.agentscope.harness.agent.team.TeamContext teamContext,
+                              String teamSessionId) {
         // 方案 C 兼容：场景绑定了已下线（SPI 未注册）的智能体标识（如历史的 creative-writer）
         // 时，统一回退主控 main 并告警。否则会装配出模型走全局默认、人格错配、
         // 且凭空多出 state/agents/<id> 隔离目录的"野"智能体。
@@ -426,6 +440,12 @@ public class WorkspaceAgentBuilder {
                 // （phase=start/end 经 AgentEventEmitter 实时推送，CustomEventTranslator 翻译），
                 // 旧的 CompactionNoticeMiddleware（下一推理步才延迟到达）已删除。
 
+        // team 变体：挂 TeamsMiddleware + 注册角色裁剪的 team 工具（对齐 service 的
+        // teamsMode 装配位——middleware 链上、toolkit 注册由 build 内部完成）。
+        if (teamClient != null && teamContext != null) {
+            builder.teamsMode(teamClient, teamContext, teamSessionId);
+        }
+
         // 运维 P2（pull 形态）：仅追加静态「终端工具能力提示」，引导模型按需主动读取；
         // 终端内容不注入对话（push 形态已废弃），工具返回经 TerminalOutputSanitizer 脱敏
         if (opsMode) {
@@ -456,6 +476,86 @@ public class WorkspaceAgentBuilder {
             builder.subagent(decl);
         }
 
+        return builder.build();
+    }
+
+    /**
+     * 构建 team 成员 Agent（轻量装配，对齐 service 的成员会话模型：独立实例+独立会话）。
+     *
+     * <p><b>与 lead 的差异</b>：成员不走场景绑定装配（无子 Agent 名册、无编排提示词、
+     * 无 MCP 白名单展开）——成员是专职执行角色，协作面就是 team 工具（teamsMode 自动
+     * 注册），生产力面由声明决定（后续按需扩展）。提示词 = 成员声明 prompt + 成员
+     * 协作规则（任务板/邮箱用法），不注入 lead 的编排规则。
+     *
+     * <p><b>状态隔离</b>：stateStore 落 {@code state/members/<name>}，与主 Agent 及
+     * 其他成员互不覆盖；transcript 同理独立目录。
+     */
+    public HarnessAgent buildMember(String workspaceId, SubagentDeclaration decl,
+                                    Path workspacePath, Path easyClawDir,
+                                    io.agentscope.harness.agent.team.TeamClient teamClient,
+                                    io.agentscope.harness.agent.team.TeamContext teamContext,
+                                    String memberSessionId) {
+        Path agentRoot = easyClawDir.resolve("agent");
+        AgentScopeProperties.Agent agentCfg = agentScopeProperties.getAgent();
+        LocalFilesystemSpec fsSpec = buildFilesystemSpec(workspaceId, workspacePath, agentCfg);
+        AbstractFilesystem agentFs = fsSpec.toFilesystem(workspacePath, null);
+        WorkspaceMessageBus messageBus = new WorkspaceMessageBus(agentFs, ".easyClaw/bus");
+        ObjectStoreTranscriptStore transcriptStore = new ObjectStoreTranscriptStore(
+                agentFs, RuntimeContext.empty(), ".easyClaw/agent/transcripts/members");
+
+        String memberName = decl.getName();
+        // 成员模型：跟主 Agent 同模型（声明级 model 覆盖留待按需扩展——
+        // decl.getModel() 是模型名字符串，走 resolveModelWithCredentials 需要凭据解析链，
+        // 成员先复用主模型保证可用性）
+        Model agentModel = resolveAgentModel(SubagentLoader.MAIN_AGENT_ID);
+        String memberPrompt = """
+                你是团队「%s」的成员 %s：%s
+
+                ## 协作规则（team 工具）
+                1. 用 `team` 工具协作：`listTasks`/`listClaimableTasks` 看任务板，`claimTask` 领任务，
+                   `completeTask`（带结果摘要）或 `failTask`（带原因）回写，`sendMessage` 与 lead/同伴沟通，
+                   方案需要 lead 拍板时 `submitPlan` 提交审批。
+                2. 被唤醒（收到 notice）时先 `listMessages` 查邮箱、`listTasks` 查任务板，再决定动作；
+                   没有可做的工作就直接结束回合，不要空转。
+                3. 任务完成以 `completeTask` 回写为准——只说不写，lead 永远看不到结果。
+                4. 你是专项执行者：把分配给你的事做完做对，不替 lead 做编排决策。
+                """.formatted(
+                teamContext != null ? teamContext.teamName() : "",
+                memberName,
+                decl.getDescription() == null ? "" : decl.getDescription());
+
+        HarnessAgent.Builder builder = HarnessAgent.builder()
+                .name("member-" + memberName)
+                .description("team 成员 " + memberName)
+                .sysPrompt(memberPrompt)
+                .model(agentModel)
+                // 成员最小工具面：协作走 team 工具（teamsMode 注册），检索工具兜底查资料；
+                // 不装配文件/代码工具——成员的产出以任务板 result 文本回写，批 4 按声明扩展。
+                .toolkit(agentFactory.createSearchToolkit())
+                .workspace(agentRoot)
+                .filesystem(fsSpec)
+                .permissionContext(buildPermissionContext(workspaceId, false))
+                .stateStore(new JsonFileAgentStateStore(
+                        stateDir(agentRoot, "member-" + memberName)))
+                .disableSessionPersistence()
+                .compaction(buildCompactionConfig(agentCfg, agentModel))
+                .maxIters(decl.getSteps() > 0 ? decl.getSteps() : agentCfg.getMaxIters())
+                .modelExecutionConfig(ExecutionConfig.builder()
+                        .timeout(java.time.Duration.ofMinutes(agentCfg.getModelTimeoutMinutes()))
+                        .maxAttempts(2)
+                        .build())
+                .toolExecutionConfig(ExecutionConfig.builder()
+                        .timeout(java.time.Duration.ofMinutes(agentCfg.getToolTimeoutMinutes()))
+                        .maxAttempts(1)
+                        .build())
+                .messageBus(messageBus)
+                .transcriptStore(transcriptStore)
+                .enablePlanMode(false)
+                .enableAgentTracingLog(false)
+                .disableMemoryHooks();
+        if (teamClient != null && teamContext != null) {
+            builder.teamsMode(teamClient, teamContext, memberSessionId);
+        }
         return builder.build();
     }
 
