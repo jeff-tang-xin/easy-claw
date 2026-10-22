@@ -43,6 +43,8 @@ interface SessionItem { id: string; workspaceId: string; title: string; createdA
 interface BoxMessage {
   id?: string; type: string; content: string; toolName?: string;
   toolArgs?: string; toolResult?: string; subagentName?: string; images?: string[]; seq: number;
+  /** 子 Agent 段的结构化步骤（新转录才有；旧数据缺失时退化为单个正文步） */
+  subagentSteps?: { kind: string; content?: string; name?: string; args?: string; result?: string; state?: string }[];
 }
 interface Attachment { name: string; mimeType: string; base64Data: string; }
 
@@ -1593,10 +1595,20 @@ export default function ChatPage() {
               bbAuthor: p.author || 'unknown',
             });
           } else {
-            // 历史落盘的 subagent 只有聚合正文（TranscriptRecorder 已把步骤降级为纯文本，
-            // 工具入参根本没落盘），故 steps 只能给空数组：由 TimelineNode 退化成单个正文步。
+            // 新转录带结构化步骤（subagentSteps，与实时通道 steps 同构）：重建 steps 时间线，
+            // 「思考 → 调工具 → 结果」的真实时序在刷新后不再丢失；旧转录无此字段，
+            // 退化为单个正文步（TimelineNode 对空 steps 的既有兜底）。
             // 显式给出 running/steps 以对齐 Segment 类型契约，避免 undefined 让节点误判为运行中。
-            cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content, running: false, steps: [] });
+            const steps = (b.subagentSteps || []).map((s) => ({
+              kind: (s.kind === 'tool' ? 'tool' : s.kind === 'reasoning' ? 'reasoning' : 'text') as 'text' | 'reasoning' | 'tool',
+              content: s.content,
+              name: s.name,
+              args: s.args,
+              result: s.result,
+              state: s.state,
+              running: false,
+            }));
+            cur.segments.push({ type: 'subagent', name: b.subagentName || '', content: b.content, running: false, steps });
           }
         }
       }

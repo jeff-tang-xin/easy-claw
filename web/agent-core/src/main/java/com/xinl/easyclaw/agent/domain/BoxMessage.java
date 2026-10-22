@@ -56,6 +56,80 @@ public class BoxMessage {
     private long timestamp;
     /** 流式中间态标志：true 表示该条仍在接收流式 chunk（不持久化） */
     private transient boolean streaming = false;
+    /**
+     * 子 Agent 段的结构化步骤（仅 Type.SUBAGENT 使用）：与前端实时通道的 steps 同构，
+     * 历史回放时据此重建 steps 时间线，而不是退化成单个正文步。
+     * 旧版本转录无此字段（null），回放端按缺失退化，兼容存量数据。
+     */
+    private List<SubStepBox> subagentSteps;
+
+    /**
+     * 子 Agent 步骤的落盘形态（对齐前端 SubStep 契约）。
+     * {@code running} 不落盘——历史里的步骤都是已完成步。
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class SubStepBox {
+        /** 步骤类型：text / reasoning / tool */
+        private String kind;
+        /** 正文或思考内容（kind=text/reasoning） */
+        private String content;
+        /** 工具名（kind=tool） */
+        private String name;
+        /** 工具入参（JSON 字符串） */
+        private String args;
+        /** 工具结果 */
+        private String result;
+        /** 工具结果状态（如 SUCCESS / ERROR） */
+        private String state;
+
+        public String getKind() {
+            return kind;
+        }
+
+        public void setKind(String kind) {
+            this.kind = kind;
+        }
+
+        public String getContent() {
+            return content;
+        }
+
+        public void setContent(String content) {
+            this.content = content;
+        }
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
+
+        public String getArgs() {
+            return args;
+        }
+
+        public void setArgs(String args) {
+            this.args = args;
+        }
+
+        public String getResult() {
+            return result;
+        }
+
+        public void setResult(String result) {
+            this.result = result;
+        }
+
+        public String getState() {
+            return state;
+        }
+
+        public void setState(String state) {
+            this.state = state;
+        }
+    }
 
     public BoxMessage() {
     }
@@ -161,5 +235,13 @@ public class BoxMessage {
 
     public void setStreaming(boolean streaming) {
         this.streaming = streaming;
+    }
+
+    public List<SubStepBox> getSubagentSteps() {
+        return subagentSteps;
+    }
+
+    public void setSubagentSteps(List<SubStepBox> subagentSteps) {
+        this.subagentSteps = subagentSteps;
     }
 }

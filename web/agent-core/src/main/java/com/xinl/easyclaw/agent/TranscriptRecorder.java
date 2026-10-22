@@ -5,6 +5,8 @@ import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 
 /**
@@ -17,7 +19,8 @@ import java.util.function.Consumer;
  *   <li>tool → tool_args → tool_result → tool_end 组成 TOOL_CALL + TOOL_RESULT 一对</li>
  *   <li>subagent / subagent_text（name\u0001delta 编码）/ subagent_end 组成 SUBAGENT 一条；
  *       其中 subagent_tool_args（工具入参原始 JSON 分片）只参与归属跟踪、不写入正文，
- *       否则历史回放会把截断的 JSON 当作子 Agent 话术渲染出来</li>
+ *       否则历史回放会把截断的 JSON 当作子 Agent 话术渲染出来；同时按事件序列并行累积
+ *       结构化步骤（BoxMessage.subagentSteps），历史回放据此重建 steps 时间线</li>
  *   <li>confirm（人工确认暂停）：先把未完成的工具调用落盘——原事件流会被释放，
  *       结果由恢复流的新记录器补写 TOOL_RESULT（前端历史加载支持孤立结果配对）</li>
  * </ul>
@@ -43,6 +46,14 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
     private final StringBuilder subBuf = new StringBuilder();
     /** 当前子 Agent 段落的类型（text/reasoning/tool/toolResult），用于只在切换时插入一次可读标记 */
     private String subSegKind;
+    /**
+     * 当前子 Agent 段的结构化步骤（与 subBuf 纯文本正文并行累积）：
+     * 落盘进 BoxMessage.subagentSteps，历史回放据此重建 steps 时间线（对齐实时通道），
+     * 而不是退化成单个正文步。纯文本正文保留——旧版前端/解析失败时的可读性兜底。
+     */
+    private final List<BoxMessage.SubStepBox> subSteps = new ArrayList<>();
+    /** 当前正在累积 args/result 的工具步（kind=tool），subagent_tool_args/_result 落到这里 */
+    private BoxMessage.SubStepBox curSubToolStep;
 
     TranscriptRecorder(Path sessionDir, Consumer<StreamEvent> delegate) {
         this.sessionDir = sessionDir;
@@ -89,6 +100,8 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                 subagentName = evt.content();
                 subBuf.setLength(0);
                 subSegKind = null;
+                subSteps.clear();
+                curSubToolStep = null;
             }
             case "subagent_text" -> appendSubagent(evt.content(), "text", "");
             // 结构化子 Agent 事件：转录里退化为带标记的纯文本，保证历史回放仍可读。
@@ -99,7 +112,10 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
             // 工具入参属于「工具步」的附属数据，不是子 Agent 的话术：
             // 早期实现把入参增量原样追加进正文缓冲，历史回放时会把截断的原始 JSON
             // （形如 rs": 4000, "url":）当正文渲染出来。此处只做归属跟踪，不写正文。
-            case "subagent_tool_args" -> trackSubagent(evt.content());
+            case "subagent_tool_args" -> {
+                trackSubagent(evt.content());
+                appendSubToolArgs(evt.content());
+            }
             case "subagent_tool_result" -> {
                 // 编码为 name \u0001 state \u0001 result，转录只保留状态摘要
                 String c = evt.content();
@@ -110,6 +126,11 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
                     String state = j >= 0 ? rest.substring(0, j) : rest;
                     appendSubagent(c.substring(0, i) + SEP + "\n📤 结果(" + state + ")\n",
                             "toolResult", "");
+                    // 结构化：结果与状态落到当前工具步（result 为一次性整段，直接覆盖）
+                    if (curSubToolStep != null) {
+                        curSubToolStep.setState(state);
+                        curSubToolStep.setResult(j >= 0 ? rest.substring(j + 1) : "");
+                    }
                 }
             }
             case "subagent_end" -> flushSubagent();
@@ -192,6 +213,54 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
             subBuf.append(prefix);
         }
         subBuf.append(delta);
+        appendSubStep(kind, delta);
+    }
+
+    /**
+     * 结构化步骤累积（与 subBuf 纯文本并行）：text/reasoning 合并进最后一个同类型步
+     * （对齐前端 appendSubStep 的线性合并），tool 开新步（delta 即工具名）。
+     * toolResult 不在这里处理——结果归当前工具步（见 subagent_tool_result 分支）。
+     */
+    private void appendSubStep(String kind, String delta) {
+        if (delta == null || delta.isEmpty()) {
+            return;
+        }
+        switch (kind) {
+            case "text", "reasoning" -> {
+                BoxMessage.SubStepBox last = subSteps.isEmpty() ? null : subSteps.get(subSteps.size() - 1);
+                if (last != null && kind.equals(last.getKind())) {
+                    last.setContent(nullSafe(last.getContent()) + delta);
+                } else {
+                    BoxMessage.SubStepBox step = new BoxMessage.SubStepBox();
+                    step.setKind(kind);
+                    step.setContent(delta);
+                    subSteps.add(step);
+                }
+            }
+            case "tool" -> {
+                BoxMessage.SubStepBox step = new BoxMessage.SubStepBox();
+                step.setKind("tool");
+                step.setName(delta);
+                subSteps.add(step);
+                curSubToolStep = step;
+            }
+            default -> {
+                // toolResult 等附属类型不新建步
+            }
+        }
+    }
+
+    /** 工具入参增量落到当前工具步（编码 name\u0001delta，delta 为原始 JSON 分片）。 */
+    private void appendSubToolArgs(String content) {
+        if (curSubToolStep == null) {
+            return;
+        }
+        int i = content == null ? -1 : content.indexOf(SEP);
+        if (i < 0) {
+            return;
+        }
+        String delta = content.substring(i + 1);
+        curSubToolStep.setArgs(nullSafe(curSubToolStep.getArgs()) + delta);
     }
 
     private void flushText() {        if (thinkBuf.length() > 0) {
@@ -273,11 +342,17 @@ final class TranscriptRecorder implements Consumer<StreamEvent> {
             BoxMessage bm = new BoxMessage(BoxMessage.Type.SUBAGENT, ++seq);
             bm.setSubagentName(subagentName);
             bm.setContent(subBuf.toString());
+            // 结构化步骤随条落盘（空步骤不写字段，保持存量形态）
+            if (!subSteps.isEmpty()) {
+                bm.setSubagentSteps(new ArrayList<>(subSteps));
+            }
             SessionTranscriptStore.append(sessionDir, bm);
         }
         subagentName = null;
         subBuf.setLength(0);
         subSegKind = null;
+        subSteps.clear();
+        curSubToolStep = null;
     }
 
     private static String nullSafe(String s) {
