@@ -124,6 +124,7 @@ class StuckToolRecoveryTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 sessions,
+                new TurnLeaseService(),
                 mock(ScenarioResolver.class),
                 new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
                 new com.xinl.easyclaw.agent.spi.OrchestratorRegistry(),

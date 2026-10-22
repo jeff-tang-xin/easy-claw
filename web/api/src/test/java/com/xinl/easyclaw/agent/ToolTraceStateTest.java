@@ -54,6 +54,7 @@ class ToolTraceStateTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 new SessionRegistry(),
+                new TurnLeaseService(),
                 mock(ScenarioResolver.class),
                 new com.xinl.easyclaw.workspace.WorkspaceFileLayout(),
                 new com.xinl.easyclaw.agent.spi.OrchestratorRegistry(),

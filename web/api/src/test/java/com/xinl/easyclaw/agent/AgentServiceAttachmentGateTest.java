@@ -45,6 +45,7 @@ class AgentServiceAttachmentGateTest {
                 mock(PermissionRuleService.class),
                 new AgentScopeProperties(),
                 new SessionRegistry(),
+                new TurnLeaseService(),
                 mock(ScenarioResolver.class),
                 new WorkspaceFileLayout(),
                 new OrchestratorRegistry(),

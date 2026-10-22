@@ -72,6 +72,7 @@ class SubagentLoopGuardTest {
                 mock(PermissionRuleService.class),
                 props,
                 new SessionRegistry(),
+                new TurnLeaseService(),
                 mock(ScenarioResolver.class),
                 new WorkspaceFileLayout(),
                 new com.xinl.easyclaw.agent.spi.OrchestratorRegistry(),

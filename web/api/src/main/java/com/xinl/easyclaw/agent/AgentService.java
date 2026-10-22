@@ -80,6 +80,7 @@ public class AgentService {
     private final AgentScopeProperties agentScopeProperties;
     /** 会话级运行时状态（待确认工具、回合授权、订阅句柄、护栏计数……）统一由此持有 */
     private final SessionRegistry sessions;
+    private final TurnLeaseService turnLeases;
     /** 激活场景查询（编排审计需要对照工作流计划） */
     private final com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver;
     private final com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout;
@@ -119,6 +120,7 @@ public class AgentService {
                         PermissionRuleService permissionRuleService,
                         AgentScopeProperties agentScopeProperties,
                         SessionRegistry sessions,
+                        TurnLeaseService turnLeases,
                         com.xinl.easyclaw.workspace.ScenarioResolver scenarioResolver,
                         com.xinl.easyclaw.workspace.WorkspaceFileLayout workspaceFileLayout,
                         OrchestratorRegistry orchestratorRegistry,
@@ -128,6 +130,7 @@ public class AgentService {
         this.permissionRuleService = permissionRuleService;
         this.agentScopeProperties = agentScopeProperties;
         this.sessions = sessions;
+        this.turnLeases = turnLeases;
         this.scenarioResolver = scenarioResolver;
         this.workspaceFileLayout = workspaceFileLayout;
         this.orchestratorRegistry = orchestratorRegistry;
@@ -514,6 +517,21 @@ public class AgentService {
         if (sessionId == null || sessionId.isBlank()) {
             return;
         }
+        // 对齐 service releaseSession 的 interruptLocal 优先语义：会话仍有活跃回合时
+        // 先走 stopChat（宽限中断 + 记忆落盘 + 兜底 dispose + recoverStuckAgent），
+        // 再清理状态 —— 直接 dispose 会跳过 handleInterrupt 落盘，丢掉本轮记忆。
+        // 典型场景：删除会话 API 直接调用本方法，未先判 idle。
+        if (sessions.isRunning(sessionId)) {
+            String wsId = sessions.workspaceOf(sessionId);
+            if (wsId != null) {
+                try {
+                    stopChat(wsId, sessionId);
+                } catch (Exception ex) {
+                    log.warn("releaseSession 前置中断异常（继续清理）: sessionId={}, err={}",
+                            sessionId, ex.toString());
+                }
+            }
+        }
         Disposable disp = sessions.release(sessionId);
         if (disp != null && !disp.isDisposed()) {
             try {
@@ -700,6 +718,13 @@ public class AgentService {
             return;
         }
 
+        // 回合租约（对齐 service TurnLeaseService.acquireOrConflict 语义）：
+        // 同会话已有活跃回合时先中断旧回合（走 stopChat 宽限路径，记忆落盘有保障），
+        // 新回合接管。必须在 RetryScope.clear 之前 —— 冲突回调里的 stopChat 会设置
+        // abort 标记，紧随其后的 clear 顺带清掉它，新回合干净启动。
+        turnLeases.acquireOrConflict(sessionId, workspaceId,
+                () -> stopChat(workspaceId, sessionId));
+
         // 清除本会话上次 stopChat 设置的 abort 标志（允许新回合重试）
         RetryScope.clear(sessionId);
 
@@ -748,8 +773,15 @@ public class AgentService {
                 message == null ? "" : message,
                 () -> RetryScope.isAborted(sessionId));
 
+        // 事件心跳：每个流式事件刷新回合租约活跃时间 —— 孤儿判定依据
+        // （事件静默超过 TTL 的回合由 OrphanExecutionReconciler 强制收尾）
+        java.util.function.Consumer<StreamEvent> leasedOnEvent = event -> {
+            turnLeases.heartbeat(sessionId);
+            onEvent.accept(event);
+        };
+
         StreamingStepExecutor stepExecutor = new StreamingStepExecutor(
-                this, attachments, skillName, onEvent);
+                this, attachments, skillName, leasedOnEvent);
 
         orchestratorRegistry.execute(execCtx, stepExecutor)
                 .whenComplete((result, err) -> {
@@ -767,6 +799,8 @@ public class AgentService {
                                 result == null ? 0 : result.stepResults().size(),
                                 result != null && result.ok());
                     }
+                    // 回合收尾释放租约；异常路径漏释放的由 OrphanExecutionReconciler 兜底
+                    turnLeases.release(sessionId);
                     // end 由回合级统一发送：步骤的 onFinish 只用于完成 future，
                     // 若在那里发 end，多步计划会发出多个 end 而前端只认第一个
                     onFinish.run();
