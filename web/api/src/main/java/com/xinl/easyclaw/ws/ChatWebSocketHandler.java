@@ -100,7 +100,8 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
                                 com.xinl.easyclaw.config.AgentScopeProperties agentScopeProperties,
                                 com.xinl.easyclaw.config.CloudFeatureGate featureGate,
                                 SshConnectionService ssh,
-                                com.xinl.easyclaw.db.service.DbConnectionService dbConnections) {
+                                com.xinl.easyclaw.db.service.DbConnectionService dbConnections,
+                                org.springframework.beans.factory.ObjectProvider<com.xinl.easyclaw.agent.team.TeamRuntimeService> teamRuntime) {
         this.agentService = agentService;
         this.workspaceManager = workspaceManager;
         this.accessGuard = accessGuard;
@@ -109,6 +110,13 @@ public class ChatWebSocketHandler extends TextWebSocketHandler {
         this.featureGate = featureGate;
         this.ssh = ssh;
         this.dbConnections = dbConnections;
+        // team 成员事件出口：成员回合跨主回合运行，事件经本 handler 的会话路由推送
+        // （sendJson 已含序列化 + 无连接时缓冲）。ObjectProvider 避免构造期强依赖，
+        // team 基础设施缺席（单测）时静默跳过。
+        com.xinl.easyclaw.agent.team.TeamRuntimeService team = teamRuntime.getIfAvailable();
+        if (team != null) {
+            team.setMemberEventSink(this::sendJson);
+        }
     }
 
     /**

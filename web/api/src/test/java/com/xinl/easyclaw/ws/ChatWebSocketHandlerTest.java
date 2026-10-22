@@ -60,7 +60,9 @@ class ChatWebSocketHandlerTest {
                 new AgentScopeProperties(),
                 new CloudFeatureGate(cloudBootstrap),
                 mock(SshConnectionService.class),
-                mock(DbConnectionService.class));
+                mock(DbConnectionService.class),
+                // team 基础设施缺席：ObjectProvider 返回空，构造器静默跳过 sink 注册
+                org.mockito.Mockito.mock(org.springframework.beans.factory.ObjectProvider.class));
         connection = mock(WebSocketSession.class);
         when(connection.getId()).thenReturn("conn-1");
         when(connection.isOpen()).thenReturn(true);

@@ -1,8 +1,10 @@
 package com.xinl.easyclaw.agent.team;
 
 import com.xinl.easyclaw.agent.SubagentLoader;
+import com.xinl.easyclaw.agent.domain.StreamEvent;
 import com.xinl.easyclaw.workspace.ScenarioResolver;
 import io.agentscope.core.agent.RuntimeContext;
+import io.agentscope.core.event.*;
 import io.agentscope.harness.agent.HarnessAgent;
 import io.agentscope.harness.agent.subagent.SubagentDeclaration;
 import io.agentscope.harness.agent.team.TeamContext;
@@ -349,18 +351,76 @@ public class TeamRuntimeService {
         String msg = notice == null || notice.isBlank()
                 ? "[team] 你被唤醒，请用 listMessages 查看邮箱、listTasks 查看任务板，继续协作。"
                 : notice;
+        MemberEventSink sink = memberEventSink;
+        // 工具结果文本缓冲：结果走 ToolResultTextDeltaEvent 流式给，End 事件只带状态——
+        // 对齐 AgentService 主回合的做法（累积后一次性下发），但用回合级局部 Map，
+        // 不依赖 SessionRegistry（成员回合生命周期独立于主回合）。
+        Map<String, StringBuilder> toolResultBuf = new java.util.HashMap<>();
         h.currentTurn = h.agent.streamEvents(msg, rc)
                 .subscribeOn(Schedulers.boundedElastic())
-                .doOnNext(event -> log.debug("[team-member:{}] event {}", h.name, event))
+                .doOnNext(event -> {
+                    log.debug("[team-member:{}] event {}", h.name, event);
+                    if (sink == null) {
+                        return;
+                    }
+                    StreamEvent se = translateMemberEvent(
+                            h.name, h.memberSessionId, event, toolResultBuf);
+                    if (se != null) {
+                        sink.accept(rt.sessionId, se);
+                    }
+                })
                 .doFinally(sig -> {
                     h.running.set(false);
                     log.info("[team] 成员回合结束: team={}, member={}, signal={}",
                             rt.teamName, h.name, sig);
                 })
                 .subscribe(
-                        ev -> { /* 事件处理见批 4（WS 推送） */ },
+                        ev -> { /* 翻译推送见 doOnNext */ },
                         err -> log.warn("[team] 成员回合异常: member={}, err={}",
                                 h.name, err.toString()));
+    }
+
+    /**
+     * 成员 AgentEvent → StreamEvent.subagent* 翻译。subId 用成员会话 id（稳定实例身份，
+     * 前端按 id 分卡）。工具结果文本经 toolResultBuf 累积、End 时一次性下发。
+     * 返回 null 表示该事件无需外发。
+     */
+    private StreamEvent translateMemberEvent(String memberName, String memberSessionId,
+                                             AgentEvent event,
+                                             Map<String, StringBuilder> toolResultBuf) {
+        if (event instanceof TextBlockDeltaEvent e) {
+            return StreamEvent.subagentText(memberName, e.getDelta(), memberSessionId);
+        }
+        if (event instanceof ThinkingBlockDeltaEvent e) {
+            return StreamEvent.subagentReasoning(memberName, e.getDelta(), memberSessionId);
+        }
+        if (event instanceof ToolCallStartEvent e) {
+            toolResultBuf.remove(e.getToolCallId());
+            return StreamEvent.subagentTool(memberName, e.getToolCallName(), memberSessionId);
+        }
+        if (event instanceof ToolCallDeltaEvent e) {
+            return StreamEvent.subagentToolArgs(memberName, e.getDelta(), memberSessionId);
+        }
+        if (event instanceof ToolResultTextDeltaEvent e) {
+            toolResultBuf.computeIfAbsent(e.getToolCallId(), k -> new StringBuilder())
+                    .append(e.getDelta());
+            return null;
+        }
+        if (event instanceof ToolResultEndEvent e) {
+            StringBuilder buf = toolResultBuf.remove(e.getToolCallId());
+            String result = buf != null ? buf.toString() : "";
+            // 超长结果截断（对齐主回合口径：前端渲染不需要全量原始输出）
+            if (result.length() > 20_000) {
+                result = result.substring(0, 20_000) + "\n…（已截断）";
+            }
+            return StreamEvent.subagentToolResult(memberName,
+                    e.getState() != null ? e.getState().name() : "ok",
+                    result, memberSessionId);
+        }
+        if (event.getType() == AgentEventType.AGENT_END) {
+            return StreamEvent.subagentEnd(memberName, memberSessionId);
+        }
+        return null;
     }
 
     // ── 查询 ─────────────────────────────────────────────────────────────
@@ -368,6 +428,24 @@ public class TeamRuntimeService {
     /** lead 会话是否已有运行中 team。 */
     public boolean hasTeam(String workspaceId, String sessionId) {
         return runtimes.containsKey(runtimeKey(workspaceId, sessionId));
+    }
+
+    // ── 成员事件推送（批 4）────────────────────────────────────────────
+
+    /**
+     * 成员回合事件出口：由 WS 层注册（{@code ChatWebSocketHandler::sendJson}），
+     * 成员回合的事件实时推给前端（复用 subagent* 事件族渲染——前端折叠块+steps
+     * 时间线现成，成员名即 agentName，subId=成员会话 id）。
+     * 未注册时（单测/无 WS）事件只落日志，行为与批 3 一致。
+     */
+    public interface MemberEventSink {
+        void accept(String sessionId, StreamEvent event);
+    }
+
+    private volatile MemberEventSink memberEventSink;
+
+    public void setMemberEventSink(MemberEventSink sink) {
+        this.memberEventSink = sink;
     }
 
     /** 取 lead 会话的 team 客户端（供 lead Agent 装配 teamsMode 用，批 3）。 */
